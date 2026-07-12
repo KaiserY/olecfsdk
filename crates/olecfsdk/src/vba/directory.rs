@@ -253,6 +253,21 @@ impl DirStream {
         })
     }
 
+    pub fn set_module_offsets(&mut self, offset: u32) -> usize {
+        let mut changed = 0;
+        for record in &mut self.records {
+            if let DirRecord::U32 {
+                kind: U32RecordKind::ModuleOffset,
+                value,
+            } = record
+            {
+                *value = offset;
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     pub fn modules(&self) -> Vec<ModuleDescriptor> {
         let mut modules = Vec::new();
         let mut current: Option<ModuleDescriptor> = None;

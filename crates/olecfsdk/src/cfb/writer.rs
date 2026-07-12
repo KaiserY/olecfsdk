@@ -22,11 +22,39 @@ const HEADER_DIFAT_LEN: usize = 109;
 const UNIX_EPOCH_FILETIME: u64 = 116_444_736_000_000_000;
 
 pub(crate) fn write_compound(compound: &CompoundFile) -> Result<Vec<u8>> {
-    let sector_len = match compound.version {
+    write_logical_compound(
+        compound.version,
+        &compound.entries,
+        &compound.unallocated_sectors,
+        &compound.trailing_data,
+    )
+}
+
+pub(crate) fn write_empty_compound(version: Version) -> Result<Vec<u8>> {
+    let entries = [Entry {
+        path: "/".into(),
+        name: "Root Entry".into(),
+        kind: EntryKind::Root,
+        clsid: Uuid::nil(),
+        state_bits: 0,
+        created: UNIX_EPOCH,
+        modified: UNIX_EPOCH,
+        data: Vec::new(),
+    }];
+    write_logical_compound(version, &entries, &[], &[])
+}
+
+fn write_logical_compound(
+    version: Version,
+    entries: &[Entry],
+    unallocated_sectors: &[Vec<u8>],
+    trailing_data: &[u8],
+) -> Result<Vec<u8>> {
+    let sector_len = match version {
         Version::V3 => 512,
         Version::V4 => 4096,
     };
-    let ordered = ordered_entries(&compound.entries)?;
+    let ordered = ordered_entries(entries)?;
     let mut starts = vec![END_OF_CHAIN; ordered.len()];
     let mut mini_starts = vec![END_OF_CHAIN; ordered.len()];
     let mut mini_stream = Vec::new();
@@ -164,18 +192,18 @@ pub(crate) fn write_compound(compound: &CompoundFile) -> Result<Vec<u8>> {
         signature: MAGIC,
         clsid: [0; 16],
         minor_version: 0x003e,
-        major_version: match compound.version {
+        major_version: match version {
             Version::V3 => 3,
             Version::V4 => 4,
         },
         byte_order: BYTE_ORDER_LE,
-        sector_shift: match compound.version {
+        sector_shift: match version {
             Version::V3 => 9,
             Version::V4 => 12,
         },
         mini_sector_shift: MINI_SECTOR_SHIFT,
         reserved: [0; 6],
-        number_of_directory_sectors: if compound.version == Version::V4 {
+        number_of_directory_sectors: if version == Version::V4 {
             u32_len(directory_sector_count, "directory sector count")?
         } else {
             0
@@ -202,13 +230,13 @@ pub(crate) fn write_compound(compound: &CompoundFile) -> Result<Vec<u8>> {
     {
         output.extend_from_slice(sector);
     }
-    for sector in &compound.unallocated_sectors {
+    for sector in unallocated_sectors {
         if sector.len() != sector_len {
             return Err(Error::invalid(0, "unallocated sector has the wrong size"));
         }
         output.extend_from_slice(sector);
     }
-    output.extend_from_slice(&compound.trailing_data);
+    output.extend_from_slice(trailing_data);
     Ok(output)
 }
 
@@ -474,6 +502,13 @@ fn encode_name(name: &str) -> Result<[u16; 32]> {
     Ok(buffer)
 }
 
+pub(crate) fn validate_entry_name(name: &str) -> Result<()> {
+    if name.contains('\0') {
+        return Err(Error::invalid(0, "new CFB name contains NUL"));
+    }
+    encode_name(name).map(|_| ())
+}
+
 fn name_length(name: &str) -> Result<u16> {
     let chars = name.encode_utf16().count();
     u16::try_from((chars + 1) * 2).map_err(|_| Error::invalid(0, "CFB name length overflow"))
@@ -487,6 +522,10 @@ fn compare_names(left: &str, right: &str) -> Ordering {
             .map(cfb_simple_uppercase)
             .cmp(right.chars().map(cfb_simple_uppercase))
     })
+}
+
+pub(crate) fn names_equal(left: &str, right: &str) -> bool {
+    compare_names(left, right) == Ordering::Equal
 }
 
 fn cfb_simple_uppercase(value: char) -> char {

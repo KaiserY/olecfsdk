@@ -1,12 +1,51 @@
 //! Version-dependent VBA project cache streams.
 
-use std::io::Cursor;
+use std::{io::Cursor, path::PathBuf};
 
 use crate::{
     Error, Result, SdkObject,
     io::{BinaryFormat, IoContext, Reader, SdkRead, SdkWrite, Writer},
     limits::Limits,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SrpStreamName {
+    pub hex_digits: String,
+}
+
+impl SrpStreamName {
+    pub fn parse(name: &str) -> Result<Option<Self>> {
+        let Some(prefix) = name.get(..6) else {
+            return Ok(None);
+        };
+        if !prefix.eq_ignore_ascii_case("__SRP_") {
+            return Ok(None);
+        }
+        let hex_digits = &name[6..];
+        if hex_digits.is_empty()
+            || hex_digits.len() > 25
+            || !hex_digits.bytes().all(|value| value.is_ascii_hexdigit())
+        {
+            return Err(Error::invalid(0, "invalid MS-OVBA SRP stream name"));
+        }
+        Ok(Some(Self {
+            hex_digits: hex_digits.to_owned(),
+        }))
+    }
+
+    pub fn cfb_name(&self) -> String {
+        format!("__SRP_{}", self.hex_digits)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SrpStream {
+    pub path: PathBuf,
+    pub name: SrpStreamName,
+    /// MS-OVBA defines these bytes as implementation-specific and requires
+    /// them to be ignored on read and omitted on interoperable write.
+    pub implementation_specific_cache: Vec<u8>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 #[sdk(validate = "validate_vba_project_stream")]
@@ -94,5 +133,16 @@ mod tests {
     #[test]
     fn invalid_fixed_header_is_rejected() {
         assert!(VbaProjectStream::from_bytes(&[0; 7]).is_err());
+    }
+
+    #[test]
+    fn srp_stream_name_enforces_ms_ovba_grammar() {
+        let name = SrpStreamName::parse("__SRP_0aF19").unwrap().unwrap();
+        assert_eq!(name.hex_digits, "0aF19");
+        assert_eq!(name.cfb_name(), "__SRP_0aF19");
+        assert!(SrpStreamName::parse("module").unwrap().is_none());
+        assert!(SrpStreamName::parse("__SRP_").is_err());
+        assert!(SrpStreamName::parse("__SRP_not-hex").is_err());
+        assert!(SrpStreamName::parse(&format!("__SRP_{}", "A".repeat(26))).is_err());
     }
 }

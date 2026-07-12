@@ -5,6 +5,9 @@ use crate::{Error, Result};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CodePage(pub u16);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FileTime(pub u64);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EncodedString {
     pub code_page: CodePage,
@@ -48,6 +51,26 @@ impl CodePage {
     }
 }
 
+impl FileTime {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn from_parts(low: u32, high: u32) -> Self {
+        Self((low as u64) | ((high as u64) << 32))
+    }
+
+    pub const fn low(self) -> u32 {
+        self.0 as u32
+    }
+
+    pub const fn high(self) -> u32 {
+        (self.0 >> 32) as u32
+    }
+
+    pub const fn ticks(self) -> u64 {
+        self.0
+    }
+}
+
 impl EncodedString {
     pub fn new(code_page: CodePage, bytes: Vec<u8>) -> Self {
         Self { code_page, bytes }
@@ -83,5 +106,13 @@ mod tests {
     fn unsupported_code_page_is_explicit() {
         assert!(!CodePage(0xffff).is_supported());
         assert!(CodePage(0xffff).decode(b"text").is_err());
+    }
+
+    #[test]
+    fn filetime_parts_round_trip_without_endian_ambiguity() {
+        let value = FileTime::from_parts(0x89ab_cdef, 0x0123_4567);
+        assert_eq!(value.ticks(), 0x0123_4567_89ab_cdef);
+        assert_eq!(value.low(), 0x89ab_cdef);
+        assert_eq!(value.high(), 0x0123_4567);
     }
 }

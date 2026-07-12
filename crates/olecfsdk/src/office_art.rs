@@ -8,6 +8,9 @@ use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 
 const HEADER_LEN: usize = 8;
 const MAX_CONTAINER_DEPTH: usize = 256;
+const STANDARD_HYPERLINK_CLASS_ID: [u8; 16] = [
+    0xd0, 0xc9, 0xea, 0x79, 0xf9, 0xba, 0xce, 0x11, 0x8c, 0x82, 0x00, 0xaa, 0x00, 0x4b, 0xa9, 0x0b,
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OfficeArtStream {
@@ -80,10 +83,12 @@ pub enum OfficeArtRecordData {
     /// Children of a known container whose producer wrote a non-container recVer.
     CompatibilityContainer(Vec<OfficeArtRecord>),
     Atom(Vec<u8>),
+    ArcRule(OfficeArtArcRule),
     CalloutRule(OfficeArtCalloutRule),
     ChildAnchor(OfficeArtRect),
     ClientAnchor(OfficeArtClientAnchor),
     ClientMarker(OfficeArtClientMarker),
+    ColorMru(Vec<OfficeArtColor>),
     ConnectorRule(OfficeArtConnectorRule),
     BitmapBlip(OfficeArtBitmapBlip),
     Drawing(OfficeArtDrawing),
@@ -98,6 +103,15 @@ pub enum OfficeArtRecordData {
     Shape(OfficeArtShape),
     SoftMakerNativeProperties(SoftMakerNativeProperties),
     SplitMenuColors([u32; 4]),
+    WordClientAnchor(i32),
+    WordClientData(i32),
+    WordClientTextbox(OfficeArtWordClientTextbox),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtWordClientTextbox {
+    pub story_index: u16,
+    pub chain_index: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -217,7 +231,14 @@ pub enum OfficeArtMetafileData {
         metafile: WmfMetafile,
         original_encoded: Vec<u8>,
     },
-    /// PICT, unsupported compression, or producer data rejected by the typed SDK.
+    /// Encoded Macintosh PICT file data. MS-ODRAW treats this as an image leaf;
+    /// decoded bytes remain editable and are re-encoded with the original
+    /// OfficeArt compression mode.
+    Pict {
+        decoded: Vec<u8>,
+        original_encoded: Vec<u8>,
+    },
+    /// Unsupported compression or producer data rejected by the typed SDK.
     Opaque {
         reason: OfficeArtMetafileOpaqueReason,
         decoded: Option<Vec<u8>>,
@@ -229,7 +250,6 @@ pub enum OfficeArtMetafileData {
 pub enum OfficeArtMetafileOpaqueReason {
     InvalidEmf,
     InvalidWmf,
-    Pict,
     DecodeFailed,
     UnsupportedCompression(u8),
 }
@@ -305,7 +325,18 @@ pub enum OfficeArtClientAnchor {
         width: i32,
         height: i32,
     },
+    /// 16-byte host anchor used by PowerPoint drawing clients.
+    PowerPointRect(OfficeArtRect),
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtArcRule {
+    pub rule_id: u32,
+    pub shape_id: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtColor(pub u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OfficeArtConnectorRule {
@@ -368,7 +399,7 @@ pub struct OfficeArtComplexPropertyFragment {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OfficeArtComplexPropertyData {
     Bytes(Vec<u8>),
-    Words12AndU16 { words: [u32; 12], trailing: u16 },
+    Array(OfficeArtArray),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -389,7 +420,105 @@ pub struct OfficeArtProperty {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OfficeArtPropertyValue {
     Simple(u32),
-    Complex { declared_length: u32, data: Vec<u8> },
+    Complex {
+        declared_length: u32,
+        data: Vec<u8>,
+    },
+    Utf16String {
+        declared_length: u32,
+        /// Exact UTF-16 code units, including a terminating NUL when present.
+        code_units: Vec<u16>,
+    },
+    /// A complex-flagged property with a zero declared length and no body.
+    EmptyComplex {
+        declared_length: u32,
+    },
+    EmptyArray {
+        declared_length: u32,
+    },
+    Array {
+        declared_length: u32,
+        /// Bytes present in the encoded array beyond the FOPTE-declared length.
+        /// This is normally 0 or the 6-byte array header; damaged producers can
+        /// retain another explicit delta without losing the typed array body.
+        declared_length_delta: u8,
+        value: OfficeArtArray,
+    },
+    MetroBlob {
+        declared_length: u32,
+        value: OfficeArtMetroBlob,
+    },
+    Hyperlink {
+        declared_length: u32,
+        class_id: [u8; 16],
+        object: crate::xls::HyperlinkObject,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtMetroBlob {
+    /// Exact encoded OPC/ZIP package bytes.
+    pub package_bytes: Vec<u8>,
+    pub directory: OfficeArtZipDirectory,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtZipDirectory {
+    pub entry_count: u16,
+    pub central_directory_size: u32,
+    pub central_directory_offset: u32,
+    pub comment: Vec<u8>,
+    pub entries: Vec<OfficeArtZipEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtZipEntry {
+    pub compression_method: u16,
+    pub flags: u16,
+    pub crc32: u32,
+    pub compressed_size: u32,
+    pub uncompressed_size: u32,
+    pub file_name: Vec<u8>,
+    pub extra_field: Vec<u8>,
+    pub comment: Vec<u8>,
+    pub local_header_offset: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtArray {
+    pub element_count: u16,
+    pub allocated_element_count: u16,
+    pub encoded_element_size: u16,
+    pub data: OfficeArtArrayData,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OfficeArtArrayData {
+    Points16(Vec<OfficeArtPoint16>),
+    Points32(Vec<OfficeArtPoint32>),
+    Segments(Vec<u16>),
+    FixedPointBits(Vec<u32>),
+    Rectangles(Vec<OfficeArtRect>),
+    ShadeColors(Vec<OfficeArtShadeColor>),
+    Unsigned32(Vec<u32>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtPoint16 {
+    pub x: i16,
+    pub y: i16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtPoint32 {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtShadeColor {
+    pub color: u32,
+    pub position: u32,
 }
 
 impl OfficeArtStream {
@@ -885,12 +1014,18 @@ impl OfficeArtRecord {
                 }
                 payload.extend_from_slice(value);
             }
+            OfficeArtRecordData::ArcRule(value) => value.write(&mut payload),
             OfficeArtRecordData::CalloutRule(value) => value.write(&mut payload),
             OfficeArtRecordData::ChildAnchor(value) | OfficeArtRecordData::GroupShape(value) => {
                 value.write(&mut payload)
             }
             OfficeArtRecordData::ClientAnchor(value) => value.write(&mut payload),
             OfficeArtRecordData::ClientMarker(_) => {}
+            OfficeArtRecordData::ColorMru(colors) => {
+                for color in colors {
+                    payload.extend_from_slice(&color.0.to_le_bytes());
+                }
+            }
             OfficeArtRecordData::ConnectorRule(value) => value.write(&mut payload),
             OfficeArtRecordData::BitmapBlip(value) => value.write(&mut payload)?,
             OfficeArtRecordData::Drawing(value) => value.write(&mut payload),
@@ -911,6 +1046,14 @@ impl OfficeArtRecord {
                 for color in colors {
                     payload.extend_from_slice(&color.to_le_bytes());
                 }
+            }
+            OfficeArtRecordData::WordClientAnchor(value)
+            | OfficeArtRecordData::WordClientData(value) => {
+                payload.extend_from_slice(&value.to_le_bytes());
+            }
+            OfficeArtRecordData::WordClientTextbox(value) => {
+                payload.extend_from_slice(&value.chain_index.to_le_bytes());
+                payload.extend_from_slice(&value.story_index.to_le_bytes());
             }
         }
         if usize::try_from(self.header.declared_length).ok() != Some(payload.len()) {
@@ -1224,11 +1367,22 @@ fn parse_typed_atom(
             Some(OfficeArtRecordData::Shape(OfficeArtShape::parse(payload)))
         }
         0xf00b | 0xf121 | 0xf122 => {
-            OfficeArtPropertyTable::parse(payload, usize::from(header.instance))
+            let property_count = usize::from(header.instance);
+            OfficeArtPropertyTable::parse(payload, property_count)
                 .map(OfficeArtRecordData::PropertyTable)
                 .or_else(|| {
-                    OfficeArtIncompletePropertyTable::parse(payload, usize::from(header.instance))
+                    OfficeArtIncompletePropertyTable::parse(payload, property_count)
                         .map(OfficeArtRecordData::IncompletePropertyTable)
+                })
+                .or_else(|| {
+                    (payload.len() < property_count.saturating_mul(6)).then(|| {
+                        OfficeArtRecordData::IncompletePropertyTable(
+                            OfficeArtIncompletePropertyTable::parse_partial(
+                                payload,
+                                property_count,
+                            ),
+                        )
+                    })
                 })
         }
         0xf043 if payload.len() == 48 => {
@@ -1255,6 +1409,9 @@ fn parse_typed_atom(
         0xf012 if payload.len() == 24 => Some(OfficeArtRecordData::ConnectorRule(
             OfficeArtConnectorRule::parse(payload),
         )),
+        0xf014 if payload.len() == 8 => Some(OfficeArtRecordData::ArcRule(
+            OfficeArtArcRule::parse(payload),
+        )),
         0xf017 if payload.len() == 8 => Some(OfficeArtRecordData::CalloutRule(
             OfficeArtCalloutRule::parse(payload),
         )),
@@ -1267,6 +1424,18 @@ fn parse_typed_atom(
         0xf118 if payload.len() == usize::from(header.instance) * 4 => Some(
             OfficeArtRecordData::Frit(payload.chunks_exact(4).map(OfficeArtFrit::parse).collect()),
         ),
+        0xf11a if payload.len() == usize::from(header.instance) * 4 => {
+            Some(OfficeArtRecordData::ColorMru(
+                payload
+                    .chunks_exact(4)
+                    .map(|bytes| {
+                        OfficeArtColor(u32::from_le_bytes(
+                            bytes.try_into().expect("four-byte MSOCR"),
+                        ))
+                    })
+                    .collect(),
+            ))
+        }
         0xf01a..=0xf01c => metafile_uid_count(header.record_type, header.instance)
             .and_then(|uid_count| {
                 OfficeArtMetafileBlip::parse(
@@ -1392,8 +1561,7 @@ impl OfficeArtMetafileBlip {
                     decoded: Some(decoded),
                     original_encoded: encoded.clone(),
                 }),
-            (0xf01c, decoded @ Some(_)) => OfficeArtMetafileData::Opaque {
-                reason: OfficeArtMetafileOpaqueReason::Pict,
+            (0xf01c, Some(decoded)) => OfficeArtMetafileData::Pict {
                 decoded,
                 original_encoded: encoded,
             },
@@ -1445,6 +1613,15 @@ impl OfficeArtMetafileBlip {
                 &metafile
                     .to_bytes()
                     .map_err(|error| Error::invalid(0, error.to_string()))?,
+                original_encoded,
+                self.metafile_header.compression,
+            )?,
+            OfficeArtMetafileData::Pict {
+                decoded,
+                original_encoded,
+            } => write_typed_metafile(
+                payload,
+                decoded,
                 original_encoded,
                 self.metafile_header.compression,
             )?,
@@ -1711,6 +1888,7 @@ impl OfficeArtClientAnchor {
                 width: i32::from_le_bytes(payload[0..4].try_into().expect("four bytes")),
                 height: i32::from_le_bytes(payload[4..8].try_into().expect("four bytes")),
             }),
+            16 => Some(Self::PowerPointRect(OfficeArtRect::parse(payload))),
             _ => None,
         }
     }
@@ -1727,7 +1905,22 @@ impl OfficeArtClientAnchor {
                 payload.extend_from_slice(&width.to_le_bytes());
                 payload.extend_from_slice(&height.to_le_bytes());
             }
+            Self::PowerPointRect(rect) => rect.write(payload),
         }
+    }
+}
+
+impl OfficeArtArcRule {
+    fn parse(payload: &[u8]) -> Self {
+        Self {
+            rule_id: u32::from_le_bytes(payload[0..4].try_into().expect("four bytes")),
+            shape_id: u32::from_le_bytes(payload[4..8].try_into().expect("four bytes")),
+        }
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) {
+        payload.extend_from_slice(&self.rule_id.to_le_bytes());
+        payload.extend_from_slice(&self.shape_id.to_le_bytes());
     }
 }
 
@@ -2033,16 +2226,79 @@ impl OfficeArtPropertyTable {
         }
         let mut cursor = fixed_len;
         for property in &mut properties {
-            if let OfficeArtPropertyValue::Complex {
-                declared_length,
-                data,
-            } = &mut property.value
-            {
-                let length = usize::try_from(*declared_length).ok()?;
-                let end = cursor.checked_add(length)?;
-                *data = payload.get(cursor..end)?.to_vec();
-                cursor = end;
+            let declared_length = match &property.value {
+                OfficeArtPropertyValue::Complex {
+                    declared_length, ..
+                } => *declared_length,
+                _ => continue,
+            };
+            let length = usize::try_from(declared_length).ok()?;
+            let remaining = payload.get(cursor..)?;
+            if is_typed_array_property(property.property_id) && length == 0 {
+                property.value = OfficeArtPropertyValue::EmptyArray { declared_length };
+                continue;
             }
+            if length == 0 && !is_utf16_complex_property(property.property_id) {
+                property.value = OfficeArtPropertyValue::EmptyComplex { declared_length };
+                continue;
+            }
+            if let Some((value, consumed, declared_length_delta)) =
+                OfficeArtArray::parse(property.property_id, remaining, length)
+            {
+                property.value = OfficeArtPropertyValue::Array {
+                    declared_length,
+                    declared_length_delta,
+                    value,
+                };
+                cursor = cursor.checked_add(consumed)?;
+                continue;
+            }
+            if property.property_id == 0x03a9 {
+                let end = cursor.checked_add(length)?;
+                let data = payload.get(cursor..end)?;
+                if let Some(value) = OfficeArtMetroBlob::parse(data) {
+                    property.value = OfficeArtPropertyValue::MetroBlob {
+                        declared_length,
+                        value,
+                    };
+                    cursor = end;
+                    continue;
+                }
+            }
+            if property.property_id == 0x0382 && length >= 24 {
+                let end = cursor.checked_add(length)?;
+                let data = payload.get(cursor..end)?;
+                if data[..16] == STANDARD_HYPERLINK_CLASS_ID
+                    && let Ok(object) = crate::xls::HyperlinkObject::parse(&data[16..])
+                {
+                    property.value = OfficeArtPropertyValue::Hyperlink {
+                        declared_length,
+                        class_id: STANDARD_HYPERLINK_CLASS_ID,
+                        object,
+                    };
+                    cursor = end;
+                    continue;
+                }
+            }
+            let end = cursor.checked_add(length)?;
+            let data = payload.get(cursor..end)?;
+            property.value = if is_utf16_complex_property(property.property_id)
+                && data.len().is_multiple_of(2)
+            {
+                OfficeArtPropertyValue::Utf16String {
+                    declared_length,
+                    code_units: data
+                        .chunks_exact(2)
+                        .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
+                        .collect(),
+                }
+            } else {
+                OfficeArtPropertyValue::Complex {
+                    declared_length,
+                    data: data.to_vec(),
+                }
+            };
+            cursor = end;
         }
         Some(Self {
             properties,
@@ -2066,6 +2322,85 @@ impl OfficeArtPropertyTable {
                     }
                     (true, *declared_length)
                 }
+                OfficeArtPropertyValue::EmptyComplex { declared_length } => {
+                    if *declared_length != 0 {
+                        return Err(Error::invalid(
+                            0,
+                            "OfficeArt empty complex property has a nonzero declared length",
+                        ));
+                    }
+                    (true, 0)
+                }
+                OfficeArtPropertyValue::EmptyArray { declared_length } => {
+                    if *declared_length != 0 {
+                        return Err(Error::invalid(
+                            0,
+                            "OfficeArt empty array has a nonzero declared length",
+                        ));
+                    }
+                    (true, 0)
+                }
+                OfficeArtPropertyValue::Array {
+                    declared_length,
+                    declared_length_delta,
+                    value,
+                } => {
+                    let encoded_len = value.encoded_len()?;
+                    let expected_declared = encoded_len
+                        .checked_sub(usize::from(*declared_length_delta))
+                        .ok_or_else(|| {
+                            Error::invalid(0, "OfficeArt array delta exceeds its encoded length")
+                        })?;
+                    if usize::try_from(*declared_length).ok() != Some(expected_declared) {
+                        return Err(Error::invalid(
+                            0,
+                            "OfficeArt array property length mismatch",
+                        ));
+                    }
+                    (true, *declared_length)
+                }
+                OfficeArtPropertyValue::MetroBlob {
+                    declared_length,
+                    value,
+                } => {
+                    value.validate()?;
+                    if usize::try_from(*declared_length).ok() != Some(value.package_bytes.len()) {
+                        return Err(Error::invalid(
+                            0,
+                            "OfficeArt metroBlob property length mismatch",
+                        ));
+                    }
+                    (true, *declared_length)
+                }
+                OfficeArtPropertyValue::Hyperlink {
+                    declared_length,
+                    class_id,
+                    object,
+                } => {
+                    if *class_id != STANDARD_HYPERLINK_CLASS_ID {
+                        return Err(Error::invalid(0, "OfficeArt IHlink CLSID changed"));
+                    }
+                    let object_len = object.to_bytes()?.len();
+                    if usize::try_from(*declared_length).ok() != object_len.checked_add(16) {
+                        return Err(Error::invalid(
+                            0,
+                            "OfficeArt IHlink property length mismatch",
+                        ));
+                    }
+                    (true, *declared_length)
+                }
+                OfficeArtPropertyValue::Utf16String {
+                    declared_length,
+                    code_units,
+                } => {
+                    if usize::try_from(*declared_length).ok() != code_units.len().checked_mul(2) {
+                        return Err(Error::invalid(
+                            0,
+                            "OfficeArt UTF-16 property length mismatch",
+                        ));
+                    }
+                    (true, *declared_length)
+                }
             };
             if property.property_id > 0x3fff {
                 return Err(Error::invalid(0, "OfficeArt property id exceeds 14 bits"));
@@ -2079,10 +2414,376 @@ impl OfficeArtPropertyTable {
         for property in &self.properties {
             if let OfficeArtPropertyValue::Complex { data, .. } = &property.value {
                 payload.extend_from_slice(data);
+            } else if let OfficeArtPropertyValue::Utf16String { code_units, .. } = &property.value {
+                for unit in code_units {
+                    payload.extend_from_slice(&unit.to_le_bytes());
+                }
+            } else if let OfficeArtPropertyValue::Array { value, .. } = &property.value {
+                value.write(payload)?;
+            } else if let OfficeArtPropertyValue::MetroBlob { value, .. } = &property.value {
+                value.validate()?;
+                payload.extend_from_slice(&value.package_bytes);
+            } else if let OfficeArtPropertyValue::Hyperlink {
+                class_id, object, ..
+            } = &property.value
+            {
+                payload.extend_from_slice(class_id);
+                payload.extend_from_slice(&object.to_bytes()?);
             }
         }
         payload.extend_from_slice(&self.trailing);
         Ok(())
+    }
+}
+
+fn is_utf16_complex_property(property_id: u16) -> bool {
+    matches!(
+        property_id,
+        0x00c0 // geoText.unicode
+            | 0x00c5 // geoText.fontFamilyName
+            | 0x0105 // blip.blipFileName
+            | 0x0110 // blip.printBlipFileName
+            | 0x0187 // fill.blipFileName
+            | 0x01c6 // lineStyle.fillBlipName
+            | 0x0380 // groupShape.shapeName
+            | 0x0381 // groupShape.description
+            | 0x038d // groupShape.tooltip
+            | 0x038e // groupShape.script
+            | 0x0397 // groupShape.scriptExtAttr
+            | 0x03a5 // groupShape.webBot
+    )
+}
+
+fn is_typed_array_property(property_id: u16) -> bool {
+    matches!(
+        property_id,
+        0x0145 // geometry.pVertices
+            | 0x0146 // geometry.pSegmentInfo
+            | 0x0151 // geometry.pConnectionSites
+            | 0x0152 // geometry.pConnectionSitesDir
+            | 0x0155 // geometry.pAdjustHandles
+            | 0x0156 // geometry.pGuides
+            | 0x0157 // geometry.pInscribe
+            | 0x0197 // fill.fillShadeColors
+            | 0x01cf // lineStyle.lineDashStyle
+            | 0x0383 // groupShape.pWrapPolygonVertices
+    )
+}
+
+impl OfficeArtMetroBlob {
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        const LOCAL_FILE_HEADER: &[u8; 4] = b"PK\x03\x04";
+        const CENTRAL_FILE_HEADER: &[u8; 4] = b"PK\x01\x02";
+        const END_OF_CENTRAL_DIRECTORY: &[u8; 4] = b"PK\x05\x06";
+        if !bytes.starts_with(LOCAL_FILE_HEADER) || bytes.len() < 22 {
+            return None;
+        }
+
+        let minimum_offset = bytes.len().saturating_sub(22 + usize::from(u16::MAX));
+        let eocd_offset = (minimum_offset..=bytes.len() - 22)
+            .rev()
+            .find(|offset| bytes[*offset..].starts_with(END_OF_CENTRAL_DIRECTORY))?;
+        let eocd = &bytes[eocd_offset..];
+        let read_u16 = |offset: usize| {
+            eocd.get(offset..offset + 2)
+                .map(|value| u16::from_le_bytes([value[0], value[1]]))
+        };
+        let read_u32 = |offset: usize| {
+            eocd.get(offset..offset + 4).map(|value| {
+                u32::from_le_bytes(value.try_into().expect("validated four-byte ZIP field"))
+            })
+        };
+        let disk_number = read_u16(4)?;
+        let central_directory_disk = read_u16(6)?;
+        let entries_on_disk = read_u16(8)?;
+        let entry_count = read_u16(10)?;
+        let central_directory_size = read_u32(12)?;
+        let central_directory_offset = read_u32(16)?;
+        let comment_len = usize::from(read_u16(20)?);
+        if disk_number != 0
+            || central_directory_disk != 0
+            || entries_on_disk != entry_count
+            || eocd_offset.checked_add(22)?.checked_add(comment_len)? != bytes.len()
+        {
+            return None;
+        }
+        let comment = eocd.get(22..22 + comment_len)?.to_vec();
+        let directory_start = usize::try_from(central_directory_offset).ok()?;
+        let directory_size = usize::try_from(central_directory_size).ok()?;
+        let directory_end = directory_start.checked_add(directory_size)?;
+        if directory_end != eocd_offset {
+            return None;
+        }
+
+        let mut cursor = directory_start;
+        let mut entries = Vec::with_capacity(usize::from(entry_count));
+        for _ in 0..entry_count {
+            let fixed = bytes.get(cursor..cursor.checked_add(46)?)?;
+            if !fixed.starts_with(CENTRAL_FILE_HEADER) {
+                return None;
+            }
+            let u16_at = |offset: usize| u16::from_le_bytes([fixed[offset], fixed[offset + 1]]);
+            let u32_at = |offset: usize| {
+                u32::from_le_bytes(
+                    fixed[offset..offset + 4]
+                        .try_into()
+                        .expect("validated central-directory field"),
+                )
+            };
+            let file_name_len = usize::from(u16_at(28));
+            let extra_len = usize::from(u16_at(30));
+            let entry_comment_len = usize::from(u16_at(32));
+            if u16_at(34) != 0 {
+                return None;
+            }
+            let variable_len = file_name_len
+                .checked_add(extra_len)?
+                .checked_add(entry_comment_len)?;
+            let end = cursor.checked_add(46)?.checked_add(variable_len)?;
+            let variable = bytes.get(cursor + 46..end)?;
+            let local_header_offset = u32_at(42);
+            let local_offset = usize::try_from(local_header_offset).ok()?;
+            if !bytes.get(local_offset..)?.starts_with(LOCAL_FILE_HEADER) {
+                return None;
+            }
+            entries.push(OfficeArtZipEntry {
+                compression_method: u16_at(10),
+                flags: u16_at(8),
+                crc32: u32_at(16),
+                compressed_size: u32_at(20),
+                uncompressed_size: u32_at(24),
+                file_name: variable[..file_name_len].to_vec(),
+                extra_field: variable[file_name_len..file_name_len + extra_len].to_vec(),
+                comment: variable[file_name_len + extra_len..].to_vec(),
+                local_header_offset,
+            });
+            cursor = end;
+        }
+        if cursor != directory_end {
+            return None;
+        }
+
+        Some(Self {
+            package_bytes: bytes.to_vec(),
+            directory: OfficeArtZipDirectory {
+                entry_count,
+                central_directory_size,
+                central_directory_offset,
+                comment,
+                entries,
+            },
+        })
+    }
+
+    fn validate(&self) -> Result<()> {
+        let parsed = Self::parse(&self.package_bytes)
+            .ok_or_else(|| Error::invalid(0, "OfficeArt metroBlob is not a bounded OPC ZIP"))?;
+        if parsed.directory != self.directory {
+            return Err(Error::invalid(
+                0,
+                "OfficeArt metroBlob ZIP directory metadata changed",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl OfficeArtArray {
+    fn parse(property_id: u16, bytes: &[u8], declared_length: usize) -> Option<(Self, usize, u8)> {
+        if declared_length == 0 {
+            return None;
+        }
+        let (value, encoded_len) = Self::parse_encoded(property_id, bytes)?;
+        let declared_length_delta = encoded_len.checked_sub(declared_length)?;
+        if !(matches!(declared_length_delta, 0 | 6)
+            || property_id == 0x0145 && declared_length_delta == 5)
+        {
+            return None;
+        }
+        Some((
+            value,
+            encoded_len,
+            u8::try_from(declared_length_delta).ok()?,
+        ))
+    }
+
+    fn parse_encoded(property_id: u16, bytes: &[u8]) -> Option<(Self, usize)> {
+        if !is_typed_array_property(property_id) {
+            return None;
+        }
+        let header = bytes.get(..6)?;
+        let element_count = u16::from_le_bytes([header[0], header[1]]);
+        let allocated_element_count = u16::from_le_bytes([header[2], header[3]]);
+        if allocated_element_count < element_count {
+            return None;
+        }
+        let encoded_element_size = u16::from_le_bytes([header[4], header[5]]);
+        let element_size = if encoded_element_size == 0xfff0 {
+            4usize
+        } else {
+            usize::from(encoded_element_size)
+        };
+        let data_len = usize::from(element_count).checked_mul(element_size)?;
+        let encoded_len = 6usize.checked_add(data_len)?;
+        let data = bytes.get(6..encoded_len)?;
+        let data = OfficeArtArrayData::parse(property_id, encoded_element_size, data)?;
+        Some((
+            Self {
+                element_count,
+                allocated_element_count,
+                encoded_element_size,
+                data,
+            },
+            encoded_len,
+        ))
+    }
+
+    fn encoded_len(&self) -> Result<usize> {
+        let data_len = self.data.encoded_len();
+        let count = self.data.element_count();
+        if usize::from(self.element_count) != count {
+            return Err(Error::invalid(0, "OfficeArt array element count mismatch"));
+        }
+        if self.allocated_element_count < self.element_count {
+            return Err(Error::invalid(
+                0,
+                "OfficeArt allocated array count is below its element count",
+            ));
+        }
+        let expected_size = if self.encoded_element_size == 0xfff0 {
+            4
+        } else {
+            usize::from(self.encoded_element_size)
+        };
+        if count != 0 && data_len / count != expected_size {
+            return Err(Error::invalid(0, "OfficeArt array element size mismatch"));
+        }
+        6usize
+            .checked_add(data_len)
+            .ok_or_else(|| Error::Limit("OfficeArt array length overflow".into()))
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) -> Result<()> {
+        self.encoded_len()?;
+        payload.extend_from_slice(&self.element_count.to_le_bytes());
+        payload.extend_from_slice(&self.allocated_element_count.to_le_bytes());
+        payload.extend_from_slice(&self.encoded_element_size.to_le_bytes());
+        self.data.write(payload);
+        Ok(())
+    }
+}
+
+impl OfficeArtArrayData {
+    fn parse(property_id: u16, element_size: u16, bytes: &[u8]) -> Option<Self> {
+        let words_u16 = || {
+            bytes
+                .chunks_exact(2)
+                .map(|value| u16::from_le_bytes([value[0], value[1]]))
+                .collect::<Vec<_>>()
+        };
+        let words_u32 = || {
+            bytes
+                .chunks_exact(4)
+                .map(|value| u32::from_le_bytes(value.try_into().expect("four bytes")))
+                .collect::<Vec<_>>()
+        };
+        match (property_id, element_size) {
+            (0x0145 | 0x0151 | 0x0383, 0xfff0 | 4) => Some(Self::Points16(
+                bytes
+                    .chunks_exact(4)
+                    .map(|value| OfficeArtPoint16 {
+                        x: i16::from_le_bytes([value[0], value[1]]),
+                        y: i16::from_le_bytes([value[2], value[3]]),
+                    })
+                    .collect(),
+            )),
+            (0x0145 | 0x0151 | 0x0383, 8) => Some(Self::Points32(
+                bytes
+                    .chunks_exact(8)
+                    .map(|value| OfficeArtPoint32 {
+                        x: i32::from_le_bytes(value[0..4].try_into().expect("four bytes")),
+                        y: i32::from_le_bytes(value[4..8].try_into().expect("four bytes")),
+                    })
+                    .collect(),
+            )),
+            (0x0146, 2) => Some(Self::Segments(words_u16())),
+            (0x0152, 4) => Some(Self::FixedPointBits(words_u32())),
+            (0x0157, 16) => Some(Self::Rectangles(
+                bytes.chunks_exact(16).map(OfficeArtRect::parse).collect(),
+            )),
+            (0x0197, 8) => Some(Self::ShadeColors(
+                bytes
+                    .chunks_exact(8)
+                    .map(|value| OfficeArtShadeColor {
+                        color: u32::from_le_bytes(value[0..4].try_into().expect("four bytes")),
+                        position: u32::from_le_bytes(value[4..8].try_into().expect("four bytes")),
+                    })
+                    .collect(),
+            )),
+            (0x01cf, 4) => Some(Self::Unsigned32(words_u32())),
+            _ => None,
+        }
+    }
+
+    fn element_count(&self) -> usize {
+        match self {
+            Self::Points16(values) => values.len(),
+            Self::Points32(values) => values.len(),
+            Self::Segments(values) => values.len(),
+            Self::FixedPointBits(values) => values.len(),
+            Self::Rectangles(values) => values.len(),
+            Self::ShadeColors(values) => values.len(),
+            Self::Unsigned32(values) => values.len(),
+        }
+    }
+
+    fn encoded_len(&self) -> usize {
+        match self {
+            Self::Points16(values) => values.len() * 4,
+            Self::Points32(values) => values.len() * 8,
+            Self::Segments(values) => values.len() * 2,
+            Self::FixedPointBits(values) | Self::Unsigned32(values) => values.len() * 4,
+            Self::Rectangles(values) => values.len() * 16,
+            Self::ShadeColors(values) => values.len() * 8,
+        }
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) {
+        match self {
+            Self::Points16(values) => {
+                for value in values {
+                    payload.extend_from_slice(&value.x.to_le_bytes());
+                    payload.extend_from_slice(&value.y.to_le_bytes());
+                }
+            }
+            Self::Points32(values) => {
+                for value in values {
+                    payload.extend_from_slice(&value.x.to_le_bytes());
+                    payload.extend_from_slice(&value.y.to_le_bytes());
+                }
+            }
+            Self::Segments(values) => {
+                for value in values {
+                    payload.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            Self::FixedPointBits(values) | Self::Unsigned32(values) => {
+                for value in values {
+                    payload.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            Self::Rectangles(values) => {
+                for value in values {
+                    value.write(payload);
+                }
+            }
+            Self::ShadeColors(values) => {
+                for value in values {
+                    payload.extend_from_slice(&value.color.to_le_bytes());
+                    payload.extend_from_slice(&value.position.to_le_bytes());
+                }
+            }
+        }
     }
 }
 
@@ -2116,33 +2817,32 @@ impl OfficeArtIncompletePropertyTable {
             }
             let declared_length = entry.value_or_declared_length;
             let declared = usize::try_from(declared_length).unwrap_or(usize::MAX);
+            let remaining = &payload[cursor..];
+            if let Some((array, encoded_len)) =
+                OfficeArtArray::parse_encoded(entry.property_id, remaining)
+            {
+                let declared_delta = encoded_len.checked_sub(declared);
+                let is_complete = declared == encoded_len
+                    || declared_delta == Some(6)
+                    || entry.property_id == 0x0145 && declared_delta == Some(5);
+                fragments.push(OfficeArtComplexPropertyFragment {
+                    entry_index,
+                    property_id: entry.property_id,
+                    declared_length,
+                    data: OfficeArtComplexPropertyData::Array(array),
+                    is_complete,
+                });
+                cursor += encoded_len;
+                continue;
+            }
             let available = declared.min(payload.len().saturating_sub(cursor));
             let end = cursor + available;
             let raw = &payload[cursor..end];
-            let data = if entry.property_id == 326 && available == 50 && available < declared {
-                OfficeArtComplexPropertyData::Words12AndU16 {
-                    words: std::array::from_fn(|index| {
-                        let start = index * 4;
-                        u32::from_le_bytes(
-                            raw[start..start + 4]
-                                .try_into()
-                                .expect("validated fixed complex property"),
-                        )
-                    }),
-                    trailing: u16::from_le_bytes(
-                        raw[48..50]
-                            .try_into()
-                            .expect("validated fixed complex property"),
-                    ),
-                }
-            } else {
-                OfficeArtComplexPropertyData::Bytes(raw.to_vec())
-            };
             fragments.push(OfficeArtComplexPropertyFragment {
                 entry_index,
                 property_id: entry.property_id,
                 declared_length,
-                data,
+                data: OfficeArtComplexPropertyData::Bytes(raw.to_vec()),
                 is_complete: available == declared,
             });
             cursor = end;
@@ -2223,7 +2923,7 @@ impl OfficeArtIncompletePropertyTable {
         }
         self.incomplete_fixed_entry.write(payload);
         for fragment in &self.complex_fragments {
-            fragment.data.write(payload);
+            fragment.data.write(payload)?;
         }
         payload.extend_from_slice(&self.trailing_data);
         if let Some(sequence) = &self.recovered_trailing {
@@ -2264,27 +2964,23 @@ impl OfficeArtComplexPropertyData {
     pub fn encoded_len(&self) -> usize {
         match self {
             Self::Bytes(bytes) => bytes.len(),
-            Self::Words12AndU16 { .. } => 50,
+            Self::Array(value) => 6 + value.data.encoded_len(),
         }
     }
 
     pub fn unparsed_byte_count(&self) -> usize {
         match self {
             Self::Bytes(bytes) => bytes.len(),
-            Self::Words12AndU16 { .. } => 0,
+            Self::Array(_) => 0,
         }
     }
 
-    fn write(&self, payload: &mut Vec<u8>) {
+    fn write(&self, payload: &mut Vec<u8>) -> Result<()> {
         match self {
             Self::Bytes(bytes) => payload.extend_from_slice(bytes),
-            Self::Words12AndU16 { words, trailing } => {
-                for word in words {
-                    payload.extend_from_slice(&word.to_le_bytes());
-                }
-                payload.extend_from_slice(&trailing.to_le_bytes());
-            }
+            Self::Array(value) => value.write(payload)?,
         }
+        Ok(())
     }
 }
 
@@ -2478,6 +3174,54 @@ mod tests {
     }
 
     #[test]
+    fn pict_blip_uses_a_named_editable_leaf() {
+        let decoded = vec![0x00, 0x11, 0x02, 0xff];
+        let blip = OfficeArtMetafileBlip {
+            uid1: [0x5a; 16],
+            uid2: None,
+            metafile_header: OfficeArtMetafileHeader {
+                uncompressed_size: decoded.len() as u32,
+                bounds: OfficeArtRect {
+                    left: 0,
+                    top: 0,
+                    right: 10,
+                    bottom: 20,
+                },
+                render_size: OfficeArtPoint { x: 30, y: 40 },
+                saved_size: decoded.len() as u32,
+                compression: 0xfe,
+                filter: 0xfe,
+            },
+            file_data: OfficeArtMetafileData::Pict {
+                decoded: decoded.clone(),
+                original_encoded: decoded,
+            },
+        };
+        let record = OfficeArtRecord {
+            header: OfficeArtRecordHeader {
+                version: 0,
+                instance: 0x542,
+                record_type: 0xf01c,
+                declared_length: 54,
+            },
+            data: OfficeArtRecordData::MetafileBlip(blip),
+        };
+        let stream = OfficeArtStream {
+            records: vec![record],
+        };
+        let bytes = stream.to_bytes().unwrap();
+        let reparsed = OfficeArtStream::from_bytes(&bytes).unwrap();
+        assert!(matches!(
+            &reparsed.records[0].data,
+            OfficeArtRecordData::MetafileBlip(OfficeArtMetafileBlip {
+                file_data: OfficeArtMetafileData::Pict { decoded, .. },
+                ..
+            }) if decoded == &[0x00, 0x11, 0x02, 0xff]
+        ));
+        assert_eq!(reparsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
     fn rejects_container_garbage_and_truncated_atoms() {
         let container = [0x0f, 0, 0, 0xf0, 1, 0, 0, 0, 0];
         assert!(OfficeArtStream::from_bytes(&container).is_err());
@@ -2580,6 +3324,186 @@ mod tests {
     }
 
     #[test]
+    fn property_table_types_utf16_complex_properties() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0013u16.to_le_bytes());
+        bytes.extend_from_slice(&0xf00bu16.to_le_bytes());
+        bytes.extend_from_slice(&14u32.to_le_bytes());
+        bytes.extend_from_slice(&0x8380u16.to_le_bytes());
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        for unit in [b'N' as u16, b'a' as u16, 0xd800, 0] {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+
+        let parsed = OfficeArtStream::from_bytes(&bytes).unwrap();
+        let OfficeArtRecordData::PropertyTable(table) = &parsed.records[0].data else {
+            panic!("expected a typed property table");
+        };
+        assert_eq!(
+            table.properties[0].value,
+            OfficeArtPropertyValue::Utf16String {
+                declared_length: 8,
+                code_units: vec![b'N' as u16, b'a' as u16, 0xd800, 0],
+            }
+        );
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn property_table_keeps_zero_length_complex_flag_explicit() {
+        let bytes = [
+            0x13, 0x00, 0x0b, 0xf0, 0x06, 0, 0, 0, 0xa1, 0x81, 0, 0, 0, 0,
+        ];
+        let parsed = OfficeArtStream::from_bytes(&bytes).unwrap();
+        let OfficeArtRecordData::PropertyTable(table) = &parsed.records[0].data else {
+            panic!("expected a typed property table");
+        };
+        assert!(matches!(
+            table.properties[0].value,
+            OfficeArtPropertyValue::EmptyComplex { declared_length: 0 }
+        ));
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn property_table_types_metro_blob_zip_directory() {
+        let mut package = Vec::new();
+        package.extend_from_slice(b"PK\x03\x04");
+        package.extend_from_slice(&20u16.to_le_bytes());
+        package.extend_from_slice(&[0; 20]);
+        package.extend_from_slice(&1u16.to_le_bytes());
+        package.extend_from_slice(&0u16.to_le_bytes());
+        package.push(b'a');
+        assert_eq!(package.len(), 31);
+
+        package.extend_from_slice(b"PK\x01\x02");
+        package.extend_from_slice(&20u16.to_le_bytes());
+        package.extend_from_slice(&20u16.to_le_bytes());
+        package.extend_from_slice(&[0; 20]);
+        package.extend_from_slice(&1u16.to_le_bytes());
+        package.extend_from_slice(&0u16.to_le_bytes());
+        package.extend_from_slice(&0u16.to_le_bytes());
+        package.extend_from_slice(&0u16.to_le_bytes());
+        package.extend_from_slice(&0u16.to_le_bytes());
+        package.extend_from_slice(&0u32.to_le_bytes());
+        package.extend_from_slice(&0u32.to_le_bytes());
+        package.push(b'a');
+        assert_eq!(package.len(), 78);
+
+        package.extend_from_slice(b"PK\x05\x06");
+        package.extend_from_slice(&0u16.to_le_bytes());
+        package.extend_from_slice(&0u16.to_le_bytes());
+        package.extend_from_slice(&1u16.to_le_bytes());
+        package.extend_from_slice(&1u16.to_le_bytes());
+        package.extend_from_slice(&47u32.to_le_bytes());
+        package.extend_from_slice(&31u32.to_le_bytes());
+        package.extend_from_slice(&0u16.to_le_bytes());
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0013u16.to_le_bytes());
+        bytes.extend_from_slice(&0xf00bu16.to_le_bytes());
+        bytes.extend_from_slice(&106u32.to_le_bytes());
+        bytes.extend_from_slice(&0x83a9u16.to_le_bytes());
+        bytes.extend_from_slice(&100u32.to_le_bytes());
+        bytes.extend_from_slice(&package);
+
+        let parsed = OfficeArtStream::from_bytes(&bytes).unwrap();
+        let OfficeArtRecordData::PropertyTable(table) = &parsed.records[0].data else {
+            panic!("expected a typed property table");
+        };
+        let OfficeArtPropertyValue::MetroBlob { value, .. } = &table.properties[0].value else {
+            panic!("expected a typed metroBlob");
+        };
+        assert_eq!(value.directory.entry_count, 1);
+        assert_eq!(value.directory.entries[0].file_name, b"a");
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn property_table_reuses_static_hyperlink_for_ihlink() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0013u16.to_le_bytes());
+        bytes.extend_from_slice(&0xf00bu16.to_le_bytes());
+        bytes.extend_from_slice(&30u32.to_le_bytes());
+        bytes.extend_from_slice(&0x8382u16.to_le_bytes());
+        bytes.extend_from_slice(&24u32.to_le_bytes());
+        bytes.extend_from_slice(&STANDARD_HYPERLINK_CLASS_ID);
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        let parsed = OfficeArtStream::from_bytes(&bytes).unwrap();
+        let OfficeArtRecordData::PropertyTable(table) = &parsed.records[0].data else {
+            panic!("expected a typed property table");
+        };
+        assert!(matches!(
+            &table.properties[0].value,
+            OfficeArtPropertyValue::Hyperlink {
+                class_id,
+                object: crate::xls::HyperlinkObject::Parsed {
+                    stream_version: 2,
+                    flags,
+                    trailing,
+                    ..
+                },
+                ..
+            } if class_id == &STANDARD_HYPERLINK_CLASS_ID && flags.is_empty() && trailing.is_empty()
+        ));
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn property_table_types_arrays_and_preserves_damaged_length_delta() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0023u16.to_le_bytes());
+        bytes.extend_from_slice(&0xf00bu16.to_le_bytes());
+        bytes.extend_from_slice(&30u32.to_le_bytes());
+        bytes.extend_from_slice(&0x8145u16.to_le_bytes());
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.extend_from_slice(&0x8146u16.to_le_bytes());
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&0xfff0u16.to_le_bytes());
+        bytes.extend_from_slice(&12i16.to_le_bytes());
+        bytes.extend_from_slice(&(-34i16).to_le_bytes());
+
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&0x4000u16.to_le_bytes());
+
+        let parsed = OfficeArtStream::from_bytes(&bytes).unwrap();
+        let OfficeArtRecordData::PropertyTable(table) = &parsed.records[0].data else {
+            panic!("expected a typed property table");
+        };
+        assert!(matches!(
+            &table.properties[0].value,
+            OfficeArtPropertyValue::Array {
+                declared_length: 5,
+                declared_length_delta: 5,
+                value: OfficeArtArray {
+                    data: OfficeArtArrayData::Points16(points),
+                    ..
+                },
+            } if points == &[OfficeArtPoint16 { x: 12, y: -34 }]
+        ));
+        assert!(matches!(
+            &table.properties[1].value,
+            OfficeArtPropertyValue::Array {
+                declared_length: 8,
+                declared_length_delta: 0,
+                value: OfficeArtArray {
+                    data: OfficeArtArrayData::Segments(segments),
+                    ..
+                },
+            } if segments == &[0x4000]
+        ));
+        assert!(table.trailing.is_empty());
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
     fn incomplete_property_table_preserves_fixed_entries_and_available_complex_data() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0x0023u16.to_le_bytes());
@@ -2603,6 +3527,59 @@ mod tests {
         );
         assert!(!table.complex_fragments[0].is_complete);
         assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn incomplete_property_table_recovers_self_describing_arrays() {
+        let entries = [
+            OfficeArtPropertyEntry {
+                property_id: 0x0145,
+                is_blip_id: false,
+                is_complex: true,
+                value_or_declared_length: 36,
+            },
+            OfficeArtPropertyEntry {
+                property_id: 0x0146,
+                is_blip_id: false,
+                is_complex: true,
+                value_or_declared_length: 0x6430_002c,
+            },
+        ];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&9u16.to_le_bytes());
+        payload.extend_from_slice(&9u16.to_le_bytes());
+        payload.extend_from_slice(&0xfff0u16.to_le_bytes());
+        for point in 0..9i16 {
+            payload.extend_from_slice(&point.to_le_bytes());
+            payload.extend_from_slice(&(-point).to_le_bytes());
+        }
+        payload.extend_from_slice(&19u16.to_le_bytes());
+        payload.extend_from_slice(&20u16.to_le_bytes());
+        payload.extend_from_slice(&2u16.to_le_bytes());
+        for segment in 0..19u16 {
+            payload.extend_from_slice(&segment.to_le_bytes());
+        }
+
+        let (fragments, trailing) =
+            OfficeArtIncompletePropertyTable::split_complex_data(&entries, &payload);
+        assert!(trailing.is_empty());
+        assert_eq!(fragments.len(), 2);
+        assert!(fragments[0].is_complete);
+        assert!(!fragments[1].is_complete);
+        assert!(matches!(
+            &fragments[0].data,
+            OfficeArtComplexPropertyData::Array(OfficeArtArray {
+                data: OfficeArtArrayData::Points16(points),
+                ..
+            }) if points.len() == 9
+        ));
+        assert!(matches!(
+            &fragments[1].data,
+            OfficeArtComplexPropertyData::Array(OfficeArtArray {
+                data: OfficeArtArrayData::Segments(segments),
+                ..
+            }) if segments.len() == 19
+        ));
     }
 
     #[test]

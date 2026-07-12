@@ -5,6 +5,9 @@ use crate::{Error, Result, limits::Limits};
 const SIGNATURE_BYTE: u8 = 0x01;
 const CHUNK_SIGNATURE: u16 = 0b011;
 const MAX_CHUNK_DATA: usize = 4096;
+// Each group of eight literals needs one flag byte. 3,640 literals plus 455
+// flag bytes fit in the 4,095-byte compressed chunk payload limit.
+const MAX_LITERAL_CHUNK_OUTPUT: usize = 3640;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompressedContainer {
@@ -84,6 +87,33 @@ impl CompressedChunkHeader {
 }
 
 impl CompressedContainer {
+    pub fn from_uncompressed(bytes: &[u8]) -> Self {
+        let chunks = bytes
+            .chunks(MAX_LITERAL_CHUNK_OUTPUT)
+            .map(|chunk| {
+                let sequences = chunk
+                    .chunks(8)
+                    .map(|values| TokenSequence {
+                        flag_byte: 0,
+                        tokens: values.iter().copied().map(Token::Literal).collect(),
+                    })
+                    .collect::<Vec<_>>();
+                let encoded_size = chunk.len() + sequences.len();
+                debug_assert!((1..=4095).contains(&encoded_size));
+                CompressedChunk {
+                    header: CompressedChunkHeader {
+                        raw: 0xb000 | (encoded_size as u16 - 1),
+                    },
+                    data: CompressedChunkData::Compressed(sequences),
+                }
+            })
+            .collect();
+        Self {
+            signature: SIGNATURE_BYTE,
+            chunks,
+        }
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         Self::from_bytes_with_limits(bytes, Limits::default())
     }
@@ -386,6 +416,17 @@ mod tests {
                 length: 6,
             })
         );
+    }
+
+    #[test]
+    fn literal_compressor_round_trips_across_chunk_boundaries() {
+        for size in [0, 1, 8, 9, 3639, 3640, 3641, 8192] {
+            let bytes: Vec<_> = (0..size).map(|index| index as u8).collect();
+            let container = CompressedContainer::from_uncompressed(&bytes);
+            let encoded = container.to_bytes().unwrap();
+            let reparsed = CompressedContainer::from_bytes(&encoded).unwrap();
+            assert_eq!(reparsed.decompress().unwrap(), bytes);
+        }
     }
 
     #[test]

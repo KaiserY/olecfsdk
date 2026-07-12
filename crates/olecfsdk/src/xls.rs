@@ -745,6 +745,13 @@ pub enum HyperlinkObject {
         flags: HyperlinkFlags,
         payload: Vec<u8>,
     },
+    TruncatedUrlMoniker {
+        stream_version: u32,
+        flags: HyperlinkFlags,
+        class_id: [u8; 16],
+        declared_byte_length: u32,
+        address: Vec<u16>,
+    },
     Compatibility(Vec<u8>),
 }
 
@@ -2907,6 +2914,10 @@ pub enum RtdOperation {
     ShortString(BiffUnicodeString),
     Boolean(u32),
     Error(i32),
+    ErrorWithCorruptDiscriminator {
+        discriminator: u32,
+        value: i32,
+    },
     Integer(i32),
     LongString(BiffUnicodeString),
     /// A structurally bounded operation with a discriminator outside MS-XLS.
@@ -6284,6 +6295,9 @@ impl SdkRead for HyperlinkRecord {
             .map_err(|_| Error::Limit("HLink object length exceeds usize".into()))?;
         let bytes = reader.read_vec(length)?;
         let object = HyperlinkObject::parse(&bytes).unwrap_or_else(|_| {
+            if let Some(value) = HyperlinkObject::parse_truncated_url_moniker(&bytes) {
+                return value;
+            }
             if bytes.len() >= 8 {
                 HyperlinkObject::Truncated {
                     stream_version: u32::from_le_bytes(bytes[0..4].try_into().expect("four bytes")),
@@ -6320,7 +6334,7 @@ impl SdkWrite for HyperlinkRecord {
 }
 
 impl HyperlinkObject {
-    fn parse(bytes: &[u8]) -> Result<Self> {
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
         let mut reader = Reader::new(Cursor::new(bytes))?;
         let stream_version = reader.read_u32()?;
         let flags = HyperlinkFlags::from_bits_retain(reader.read_u32()?);
@@ -6376,7 +6390,7 @@ impl HyperlinkObject {
         })
     }
 
-    fn to_bytes(&self) -> Result<Vec<u8>> {
+    pub(crate) fn to_bytes(&self) -> Result<Vec<u8>> {
         match self {
             Self::Compatibility(bytes) => Ok(bytes.clone()),
             Self::Truncated {
@@ -6387,6 +6401,34 @@ impl HyperlinkObject {
                 let mut bytes = stream_version.to_le_bytes().to_vec();
                 bytes.extend_from_slice(&flags.bits().to_le_bytes());
                 bytes.extend_from_slice(payload);
+                Ok(bytes)
+            }
+            Self::TruncatedUrlMoniker {
+                stream_version,
+                flags,
+                class_id,
+                declared_byte_length,
+                address,
+            } => {
+                if *class_id != URL_MONIKER_CLASS_ID
+                    || !flags.contains(HyperlinkFlags::HAS_MONIKER)
+                    || flags.contains(HyperlinkFlags::MONIKER_SAVED_AS_STRING)
+                    || address.len().checked_mul(2).is_none_or(|available| {
+                        available >= usize::try_from(*declared_byte_length).unwrap_or(usize::MAX)
+                    })
+                {
+                    return Err(Error::invalid(
+                        0,
+                        "truncated URL moniker invariants changed",
+                    ));
+                }
+                let mut bytes = stream_version.to_le_bytes().to_vec();
+                bytes.extend_from_slice(&flags.bits().to_le_bytes());
+                bytes.extend_from_slice(class_id);
+                bytes.extend_from_slice(&declared_byte_length.to_le_bytes());
+                for unit in address {
+                    bytes.extend_from_slice(&unit.to_le_bytes());
+                }
                 Ok(bytes)
             }
             Self::Parsed {
@@ -6437,6 +6479,43 @@ impl HyperlinkObject {
                 Ok(bytes)
             }
         }
+    }
+
+    fn parse_truncated_url_moniker(bytes: &[u8]) -> Option<Self> {
+        let fixed = bytes.get(..28)?;
+        let stream_version = u32::from_le_bytes(fixed[0..4].try_into().ok()?);
+        let flags =
+            HyperlinkFlags::from_bits_retain(u32::from_le_bytes(fixed[4..8].try_into().ok()?));
+        if !flags.contains(HyperlinkFlags::HAS_MONIKER)
+            || flags.intersects(
+                HyperlinkFlags::HAS_DISPLAY_NAME
+                    | HyperlinkFlags::HAS_TARGET_FRAME
+                    | HyperlinkFlags::MONIKER_SAVED_AS_STRING,
+            )
+        {
+            return None;
+        }
+        let class_id: [u8; 16] = fixed[8..24].try_into().ok()?;
+        if class_id != URL_MONIKER_CLASS_ID {
+            return None;
+        }
+        let declared_byte_length = u32::from_le_bytes(fixed[24..28].try_into().ok()?);
+        let available = &bytes[28..];
+        if !available.len().is_multiple_of(2)
+            || available.len() >= usize::try_from(declared_byte_length).ok()?
+        {
+            return None;
+        }
+        Some(Self::TruncatedUrlMoniker {
+            stream_version,
+            flags,
+            class_id,
+            declared_byte_length,
+            address: available
+                .chunks_exact(2)
+                .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
+                .collect(),
+        })
     }
 }
 
@@ -13610,6 +13689,16 @@ impl SdkRead for RealTimeDataRecord {
             }
             0x0000_0004 => RtdOperation::Boolean(reader.read_u32()?),
             0x0000_0010 => RtdOperation::Error(reader.read_i32()?),
+            value
+                if value & 0x0000_00ff == 0x10
+                    && reader.remaining()? >= 4
+                    && (reader.remaining()? - 4).is_multiple_of(6) =>
+            {
+                RtdOperation::ErrorWithCorruptDiscriminator {
+                    discriminator: value,
+                    value: reader.read_i32()?,
+                }
+            }
             0x0000_0800 => RtdOperation::Integer(reader.read_i32()?),
             _ => {
                 let length = usize::try_from(reader.remaining()?)
@@ -13678,6 +13767,19 @@ impl SdkWrite for RealTimeDataRecord {
             }
             RtdOperation::Error(value) => {
                 writer.write_u32(0x10)?;
+                writer.write_i32(*value)?;
+            }
+            RtdOperation::ErrorWithCorruptDiscriminator {
+                discriminator,
+                value,
+            } => {
+                if discriminator & 0x0000_00ff != 0x10 {
+                    return Err(Error::invalid(
+                        0,
+                        "RTD corrupt error discriminator lost its Error low byte",
+                    ));
+                }
+                writer.write_u32(*discriminator)?;
                 writer.write_i32(*value)?;
             }
             RtdOperation::Integer(value) => {
@@ -19293,6 +19395,62 @@ mod tests {
         let decoded: RealTimeDataRecord = parse_sdk(&bytes, 0, REAL_TIME_DATA).unwrap();
         assert_eq!(decoded, value);
         assert_eq!(encode_sdk(&decoded).unwrap(), bytes);
+    }
+
+    #[test]
+    fn real_time_data_recovers_error_with_corrupt_discriminator() {
+        let value = RealTimeDataRecord {
+            header: FrtHeader {
+                record_type: REAL_TIME_DATA,
+                flags: FrtFlags::empty(),
+                reserved: 0,
+            },
+            shared_prefix_character_count: 0,
+            topic: RtdTopicString {
+                declared_unit_count: 1,
+                flags: 0,
+                substrings: vec![XlStringCharacters::Compressed(Vec::new())],
+            },
+            operation: RtdOperation::ErrorWithCorruptDiscriminator {
+                discriminator: 0x0000_dd10,
+                value: 42,
+            },
+            cells: vec![RtdCellReference {
+                row: 7,
+                column: 5,
+                sheet_index: 0,
+            }],
+        };
+        let bytes = encode_sdk(&value).unwrap();
+        let decoded: RealTimeDataRecord = parse_sdk(&bytes, 0, REAL_TIME_DATA).unwrap();
+        assert_eq!(decoded, value);
+        assert_eq!(encode_sdk(&decoded).unwrap(), bytes);
+    }
+
+    #[test]
+    fn hyperlink_recovers_truncated_url_moniker() {
+        let mut bytes = 2u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(
+            &(HyperlinkFlags::HAS_MONIKER | HyperlinkFlags::ABSOLUTE)
+                .bits()
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(&URL_MONIKER_CLASS_ID);
+        bytes.extend_from_slice(&10u32.to_le_bytes());
+        bytes.extend_from_slice(&[b'A', 0, b'B', 0]);
+
+        let value = HyperlinkObject::parse_truncated_url_moniker(&bytes).unwrap();
+        assert_eq!(
+            value,
+            HyperlinkObject::TruncatedUrlMoniker {
+                stream_version: 2,
+                flags: HyperlinkFlags::HAS_MONIKER | HyperlinkFlags::ABSOLUTE,
+                class_id: URL_MONIKER_CLASS_ID,
+                declared_byte_length: 10,
+                address: vec![u16::from(b'A'), u16::from(b'B')],
+            }
+        );
+        assert_eq!(value.to_bytes().unwrap(), bytes);
     }
 
     #[test]

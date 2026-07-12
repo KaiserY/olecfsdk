@@ -45,8 +45,19 @@ impl ModuleStream {
         Ok(bytes)
     }
 
+    pub fn to_interoperable_bytes(&self) -> Result<Vec<u8>> {
+        self.compressed_source_code.to_bytes()
+    }
+
     pub fn source_bytes(&self) -> Result<Vec<u8>> {
         self.compressed_source_code.decompress()
+    }
+
+    pub fn replace_source_bytes(&mut self, source: &[u8]) -> Result<Vec<u8>> {
+        let previous = self.source_bytes()?;
+        self.compressed_source_code = CompressedContainer::from_uncompressed(source);
+        self.performance_cache.clear();
+        Ok(previous)
     }
 }
 
@@ -67,5 +78,26 @@ mod tests {
     #[test]
     fn invalid_text_offset_is_rejected() {
         assert!(ModuleStream::from_bytes(&[1], 2).is_err());
+    }
+
+    #[test]
+    fn replacing_source_recompresses_and_invalidates_cache() {
+        let mut bytes = vec![0xaa, 0xbb];
+        bytes.extend_from_slice(
+            &CompressedContainer::from_uncompressed(b"old")
+                .to_bytes()
+                .unwrap(),
+        );
+        let mut module = ModuleStream::from_bytes(&bytes, 2).unwrap();
+        assert_eq!(module.replace_source_bytes(b"new source").unwrap(), b"old");
+        assert!(module.performance_cache.is_empty());
+        assert_eq!(module.source_bytes().unwrap(), b"new source");
+        assert_eq!(
+            ModuleStream::from_bytes(&module.to_bytes().unwrap(), 0)
+                .unwrap()
+                .source_bytes()
+                .unwrap(),
+            b"new source"
+        );
     }
 }

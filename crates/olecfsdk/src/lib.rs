@@ -4,11 +4,15 @@ extern crate self as olecfsdk;
 
 pub mod cfb;
 pub mod common;
+pub mod doc;
 pub mod error;
+pub mod forms;
 pub mod io;
 pub mod limits;
 pub mod office_art;
+pub mod ppt;
 pub mod property_set;
+pub mod shared;
 pub mod vba;
 pub mod xls;
 
