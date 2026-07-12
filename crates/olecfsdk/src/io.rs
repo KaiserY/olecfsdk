@@ -1,6 +1,46 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use crate::{Error, Result};
+use crate::{Error, Result, limits::Limits};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BinaryFormat {
+    #[default]
+    Unknown,
+    Cfb,
+    PropertySet,
+    Vba,
+    Xls,
+    Ppt,
+    Doc,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ParseMode {
+    Strict,
+    #[default]
+    Compatible,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IoContext {
+    pub format: BinaryFormat,
+    pub version: u32,
+    pub code_page: Option<u16>,
+    pub mode: ParseMode,
+    pub limits: Limits,
+}
+
+impl Default for IoContext {
+    fn default() -> Self {
+        Self {
+            format: BinaryFormat::Unknown,
+            version: 0,
+            code_page: None,
+            mode: ParseMode::Compatible,
+            limits: Limits::default(),
+        }
+    }
+}
 
 pub trait SdkRead: Sized {
     fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self>;
@@ -24,6 +64,7 @@ pub struct Reader<R> {
     inner: R,
     start: u64,
     end: u64,
+    context: IoContext,
 }
 
 impl<R: Read + Seek> Reader<R> {
@@ -31,7 +72,24 @@ impl<R: Read + Seek> Reader<R> {
         let start = inner.stream_position()?;
         let end = inner.seek(SeekFrom::End(0))?;
         inner.seek(SeekFrom::Start(start))?;
-        Ok(Self { inner, start, end })
+        Ok(Self {
+            inner,
+            start,
+            end,
+            context: IoContext::default(),
+        })
+    }
+
+    pub fn with_context(mut inner: R, context: IoContext) -> Result<Self> {
+        let start = inner.stream_position()?;
+        let end = inner.seek(SeekFrom::End(0))?;
+        inner.seek(SeekFrom::Start(start))?;
+        Ok(Self {
+            inner,
+            start,
+            end,
+            context,
+        })
     }
 
     pub fn with_bounds(mut inner: R, start: u64, len: u64) -> Result<Self> {
@@ -43,7 +101,12 @@ impl<R: Read + Seek> Reader<R> {
             return Err(Error::invalid(start, "reader bounds exceed input"));
         }
         inner.seek(SeekFrom::Start(start))?;
-        Ok(Self { inner, start, end })
+        Ok(Self {
+            inner,
+            start,
+            end,
+            context: IoContext::default(),
+        })
     }
 
     pub fn position(&mut self) -> Result<u64> {
@@ -63,6 +126,63 @@ impl<R: Read + Seek> Reader<R> {
 
     pub fn end(&self) -> u64 {
         self.end
+    }
+
+    pub fn context(&self) -> &IoContext {
+        &self.context
+    }
+
+    pub fn context_mut(&mut self) -> &mut IoContext {
+        &mut self.context
+    }
+
+    pub fn sub_reader(&mut self, len: u64) -> Result<Reader<&mut R>> {
+        let start = self.position()?;
+        if len > self.remaining()? {
+            return Err(Error::invalid(start, "sub-reader exceeds bounded input"));
+        }
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| Error::invalid(start, "sub-reader end overflow"))?;
+        Ok(Reader {
+            inner: &mut self.inner,
+            start,
+            end,
+            context: self.context,
+        })
+    }
+
+    pub fn read_vec(&mut self, len: usize) -> Result<Vec<u8>> {
+        self.ensure_allocation(len, 1)?;
+        let mut value = vec![0; len];
+        self.read_exact(&mut value)?;
+        Ok(value)
+    }
+
+    pub fn ensure_allocation(&self, count: usize, element_size: usize) -> Result<()> {
+        let bytes = count
+            .checked_mul(element_size)
+            .ok_or_else(|| Error::Limit("binary allocation size overflow".into()))?;
+        if bytes > self.context.limits.max_allocation {
+            return Err(Error::Limit(format!(
+                "binary allocation {bytes} exceeds {}",
+                self.context.limits.max_allocation
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn read_alignment(&mut self, alignment: usize) -> Result<Vec<u8>> {
+        if alignment == 0 || !alignment.is_power_of_two() {
+            return Err(Error::invalid(
+                self.position()?,
+                "alignment must be a power of two",
+            ));
+        }
+        let position = usize::try_from(self.position()?)
+            .map_err(|_| Error::Limit("reader position does not fit usize".into()))?;
+        let padding = position.next_multiple_of(alignment) - position;
+        self.read_vec(padding)
     }
 
     pub fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
@@ -126,17 +246,43 @@ impl<R: Read + Seek> Read for Reader<R> {
 
 pub struct Writer<W> {
     inner: W,
+    context: IoContext,
 }
 
 impl<W: Write + Seek> Writer<W> {
     pub fn new(inner: W) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            context: IoContext::default(),
+        }
+    }
+    pub fn with_context(inner: W, context: IoContext) -> Self {
+        Self { inner, context }
     }
     pub fn position(&mut self) -> Result<u64> {
         Ok(self.inner.stream_position()?)
     }
     pub fn into_inner(self) -> W {
         self.inner
+    }
+    pub fn context(&self) -> &IoContext {
+        &self.context
+    }
+    pub fn alignment_padding(&mut self, alignment: usize) -> Result<usize> {
+        if alignment == 0 || !alignment.is_power_of_two() {
+            return Err(Error::invalid(
+                self.position()?,
+                "alignment must be a power of two",
+            ));
+        }
+        let position = usize::try_from(self.position()?)
+            .map_err(|_| Error::Limit("writer position does not fit usize".into()))?;
+        Ok(position.next_multiple_of(alignment) - position)
+    }
+    pub fn write_alignment(&mut self, alignment: usize, value: u8) -> Result<usize> {
+        let padding = self.alignment_padding(alignment)?;
+        self.write_all(&vec![value; padding])?;
+        Ok(padding)
     }
     pub fn write_u8(&mut self, value: u8) -> Result<()> {
         Ok(self.write_all(&[value])?)
@@ -191,6 +337,7 @@ mod tests {
         a: u16,
         b: u32,
         raw: [u8; 3],
+        sectors: [u32; 3],
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
@@ -200,20 +347,161 @@ mod tests {
         Two = 2,
     }
 
+    #[derive(Debug, PartialEq, Eq, SdkObject)]
+    struct CountedValues {
+        count: u16,
+        #[sdk(count = "count")]
+        values: Vec<u32>,
+    }
+
+    #[derive(Debug, PartialEq, Eq, SdkObject)]
+    struct ConditionalAndPadding {
+        flags: u16,
+        #[sdk(condition = "flags", mask = 0x0001)]
+        extra: Option<u32>,
+        payload_len: u16,
+        #[sdk(count = "payload_len")]
+        payload: Vec<u8>,
+        #[sdk(align = 4)]
+        padding: Vec<u8>,
+    }
+
+    #[derive(Debug, PartialEq, Eq, SdkObject)]
+    struct RemainingBytes {
+        tag: u16,
+        #[sdk(remaining)]
+        tail: Vec<u8>,
+    }
+
+    bitflags::bitflags! {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        struct TestFlags: u16 {
+            const KNOWN = 0x0001;
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq, SdkObject)]
+    struct Flagged {
+        #[sdk(bitflags = "u16")]
+        flags: TestFlags,
+    }
+
     #[test]
     fn derived_binary_round_trip() {
         let value = Header {
             a: 7,
             b: 11,
             raw: [1, 2, 3],
+            sectors: [13, 17, u32::MAX],
         };
         let mut writer = Writer::new(Cursor::new(Vec::new()));
         value.write_to(&mut writer).unwrap();
         Kind::Two.write_to(&mut writer).unwrap();
-        assert_eq!(value.sdk_size(), 9);
+        assert_eq!(value.sdk_size(), 21);
         let bytes = writer.into_inner().into_inner();
         let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
         assert_eq!(Header::read_from(&mut reader).unwrap(), value);
         assert_eq!(Kind::read_from(&mut reader).unwrap(), Kind::Two);
+    }
+
+    #[test]
+    fn derive_bitflags_retains_unknown_bits() {
+        let bytes = [0x01, 0x80];
+        let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+        let value = Flagged::read_from(&mut reader).unwrap();
+        assert_eq!(value.flags.bits(), 0x8001);
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        value.write_to(&mut writer).unwrap();
+        assert_eq!(writer.into_inner().into_inner(), bytes);
+    }
+
+    #[test]
+    fn derive_reads_and_validates_counted_vectors() {
+        let value = CountedValues {
+            count: 3,
+            values: vec![7, 11, 13],
+        };
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        value.write_to(&mut writer).unwrap();
+        assert_eq!(value.sdk_size(), 14);
+        let mut reader = Reader::new(Cursor::new(writer.into_inner().into_inner())).unwrap();
+        assert_eq!(CountedValues::read_from(&mut reader).unwrap(), value);
+
+        let invalid = CountedValues {
+            count: 2,
+            values: vec![1],
+        };
+        assert!(
+            invalid
+                .write_to(&mut Writer::new(Cursor::new(Vec::new())))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn context_and_sub_reader_keep_hard_bounds() {
+        let context = IoContext {
+            format: BinaryFormat::Xls,
+            version: 8,
+            limits: Limits {
+                max_allocation: 4,
+                ..Limits::default()
+            },
+            ..IoContext::default()
+        };
+        let mut reader = Reader::with_context(Cursor::new(vec![1, 2, 3, 4, 5]), context).unwrap();
+        {
+            let mut child = reader.sub_reader(3).unwrap();
+            assert_eq!(child.context().format, BinaryFormat::Xls);
+            assert_eq!(child.read_vec(3).unwrap(), [1, 2, 3]);
+            assert!(child.read_u8().is_err());
+        }
+        assert_eq!(reader.read_u8().unwrap(), 4);
+        assert!(reader.read_vec(5).is_err());
+    }
+
+    #[test]
+    fn derive_supports_conditions_and_preserved_alignment() {
+        let value = ConditionalAndPadding {
+            flags: 1,
+            extra: Some(0x1122_3344),
+            payload_len: 3,
+            payload: vec![5, 6, 7],
+            padding: vec![0],
+        };
+        assert_eq!(value.sdk_size(), 12);
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        value.write_to(&mut writer).unwrap();
+        let mut reader = Reader::new(Cursor::new(writer.into_inner().into_inner())).unwrap();
+        assert_eq!(
+            ConditionalAndPadding::read_from(&mut reader).unwrap(),
+            value
+        );
+
+        let invalid = ConditionalAndPadding {
+            flags: 0,
+            extra: Some(1),
+            payload_len: 0,
+            payload: Vec::new(),
+            padding: Vec::new(),
+        };
+        assert!(
+            invalid
+                .write_to(&mut Writer::new(Cursor::new(Vec::new())))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn derive_supports_bounded_remaining_bytes() {
+        let value = RemainingBytes {
+            tag: 0x1234,
+            tail: vec![1, 2, 3, 4],
+        };
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        value.write_to(&mut writer).unwrap();
+        assert_eq!(value.sdk_size(), 6);
+        let mut reader = Reader::new(Cursor::new(writer.into_inner().into_inner())).unwrap();
+        assert_eq!(RemainingBytes::read_from(&mut reader).unwrap(), value);
     }
 }

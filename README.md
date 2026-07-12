@@ -17,9 +17,9 @@ The project is developed round-trip first: unknown bounded payloads are preserve
   in logical round-trip comparison.
 - Bounded readers, writers, allocation limits, and `SdkObject`/`SdkEnum` derives
   provide the base for typed DOC/XLS/PPT records.
-- The bootstrap CFB sector implementation uses the sibling `rust-cfb` crate
-  behind the SDK-owned model. This keeps the public model independent while the
-  native typed sector layer is developed.
+- CFB reading and deterministic writing use SDK-owned static header,
+  DIFAT/FAT, MiniFAT, directory, and regular/mini-stream types. The sibling
+  `rust-cfb` crate is dev-only and provides strict differential validation.
 
 The external corpus workspace contains 1533 generated legacy Office tests:
 

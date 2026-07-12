@@ -1,0 +1,912 @@
+use crate::{Error, Result};
+
+use super::XlStringCharacters;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormulaTokenStream {
+    pub tokens: Vec<FormulaToken>,
+    /// Bounded remainder beginning with an unsupported opcode.
+    pub unparsed_tail: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormulaToken {
+    /// Exact Ptg opcode, including the operand-class bits.
+    pub opcode: u8,
+    pub data: FormulaTokenData,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FormulaTokenData {
+    UnknownZero,
+    Exp {
+        row: u16,
+        column: u16,
+    },
+    Table {
+        row: u16,
+        column: u16,
+    },
+    Operator(FormulaOperator),
+    String {
+        flags: u8,
+        characters: XlStringCharacters,
+    },
+    Attribute {
+        options: u8,
+        data: u16,
+        choose_jump_offsets: Vec<u16>,
+        choose_function_offset: Option<u16>,
+    },
+    Error(u8),
+    Boolean(u8),
+    Integer(u16),
+    NumberBits(u64),
+    Array {
+        reserved0: u32,
+        reserved1: u16,
+        reserved2: u8,
+        values: Option<FormulaArray>,
+    },
+    Function {
+        function_index: u16,
+    },
+    FunctionVar {
+        argument_count: u8,
+        function_index: u16,
+    },
+    Name {
+        name_index: u32,
+    },
+    Reference {
+        row: u16,
+        column: u16,
+    },
+    Area {
+        first_row: u16,
+        last_row: u16,
+        first_column: u16,
+        last_column: u16,
+    },
+    MemArea {
+        reserved: u32,
+        byte_count: u16,
+        extra: Option<FormulaMemExtra>,
+    },
+    MemError {
+        reserved: u32,
+        byte_count: u16,
+    },
+    MemFunction {
+        byte_count: u16,
+    },
+    ReferenceError {
+        reserved: u32,
+    },
+    AreaError {
+        reserved0: u32,
+        reserved1: u32,
+    },
+    RelativeReference {
+        row: u16,
+        column: u16,
+    },
+    RelativeArea {
+        first_row: u16,
+        last_row: u16,
+        first_column: u16,
+        last_column: u16,
+    },
+    ExternalName {
+        external_sheet_index: u16,
+        name_index: u32,
+    },
+    Reference3d {
+        external_sheet_index: u16,
+        row: u16,
+        column: u16,
+    },
+    Area3d {
+        external_sheet_index: u16,
+        first_row: u16,
+        last_row: u16,
+        first_column: u16,
+        last_column: u16,
+    },
+    DeletedReference3d {
+        external_sheet_index: u16,
+        reserved: u32,
+    },
+    DeletedArea3d {
+        external_sheet_index: u16,
+        reserved0: u32,
+        reserved1: u32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormulaOperator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Power,
+    Concat,
+    LessThan,
+    LessEqual,
+    Equal,
+    GreaterEqual,
+    GreaterThan,
+    NotEqual,
+    Intersection,
+    Union,
+    Range,
+    UnaryPlus,
+    UnaryMinus,
+    Percent,
+    Parenthesis,
+    MissingArgument,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormulaArray {
+    pub columns: u16,
+    pub rows: u16,
+    pub values: Vec<BiffConstant>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BiffConstant {
+    Empty {
+        reserved: u64,
+    },
+    NumberBits(u64),
+    String {
+        flags: u8,
+        characters: XlStringCharacters,
+    },
+    Boolean {
+        value: u8,
+        reserved: [u8; 7],
+    },
+    Error {
+        code: u16,
+        reserved0: u16,
+        reserved1: u32,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormulaMemExtra {
+    pub ranges: Vec<FormulaRange>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FormulaRange {
+    pub first_row: u16,
+    pub last_row: u16,
+    pub first_column: u16,
+    pub last_column: u16,
+}
+
+impl FormulaTokenStream {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let mut cursor = 0usize;
+        let mut tokens = Vec::new();
+        while cursor < bytes.len() {
+            let start = cursor;
+            let opcode = take_u8(bytes, &mut cursor)?;
+            let Some(data) = FormulaTokenData::read(opcode, bytes, &mut cursor)? else {
+                return Ok(Self {
+                    tokens,
+                    unparsed_tail: bytes[start..].to_vec(),
+                });
+            };
+            tokens.push(FormulaToken { opcode, data });
+        }
+        Ok(Self {
+            tokens,
+            unparsed_tail: Vec::new(),
+        })
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        for token in &self.tokens {
+            token.write(&mut bytes)?;
+        }
+        bytes.extend_from_slice(&self.unparsed_tail);
+        Ok(bytes)
+    }
+
+    pub fn encoded_len(&self) -> Result<usize> {
+        Ok(self.to_bytes()?.len())
+    }
+
+    pub fn missing_extra_count(&self) -> usize {
+        self.tokens
+            .iter()
+            .filter(|token| match &token.data {
+                FormulaTokenData::Array { values, .. } => values.is_none(),
+                FormulaTokenData::MemArea { extra, .. } => extra.is_none(),
+                _ => false,
+            })
+            .count()
+    }
+
+    pub fn parse_extra_data(&mut self, bytes: &[u8]) -> Result<Vec<u8>> {
+        let mut cursor = 0usize;
+        for token in &mut self.tokens {
+            let start = cursor;
+            let result = match &mut token.data {
+                FormulaTokenData::Array { values, .. } => {
+                    FormulaArray::read(bytes, &mut cursor).map(|value| *values = Some(value))
+                }
+                FormulaTokenData::MemArea { extra, .. } => {
+                    FormulaMemExtra::read(bytes, &mut cursor).map(|value| *extra = Some(value))
+                }
+                _ => continue,
+            };
+            match result {
+                Ok(()) => {}
+                Err(Error::InvalidData { .. }) => return Ok(bytes[start..].to_vec()),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(bytes[cursor..].to_vec())
+    }
+
+    pub fn extra_data_to_bytes(&self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        for token in &self.tokens {
+            match &token.data {
+                FormulaTokenData::Array { values, .. } => {
+                    let Some(values) = values else {
+                        break;
+                    };
+                    values.write(&mut bytes)?;
+                }
+                FormulaTokenData::MemArea { extra, .. } => {
+                    let Some(extra) = extra else {
+                        break;
+                    };
+                    extra.write(&mut bytes)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(bytes)
+    }
+}
+
+impl FormulaTokenData {
+    fn read(opcode: u8, bytes: &[u8], cursor: &mut usize) -> Result<Option<Self>> {
+        if opcode < 0x20 {
+            return Ok(Some(match opcode {
+                0x00 => Self::UnknownZero,
+                0x01 => Self::Exp {
+                    row: take_u16(bytes, cursor)?,
+                    column: take_u16(bytes, cursor)?,
+                },
+                0x02 => Self::Table {
+                    row: take_u16(bytes, cursor)?,
+                    column: take_u16(bytes, cursor)?,
+                },
+                0x03..=0x16 => Self::Operator(FormulaOperator::from_opcode(opcode)),
+                0x17 => {
+                    let count = usize::from(take_u8(bytes, cursor)?);
+                    let flags = take_u8(bytes, cursor)?;
+                    let characters = if flags & 1 == 0 {
+                        XlStringCharacters::Compressed(take(bytes, cursor, count)?.to_vec())
+                    } else {
+                        let byte_count = count.checked_mul(2).ok_or_else(|| {
+                            Error::Limit("formula string byte count overflow".into())
+                        })?;
+                        XlStringCharacters::Unicode(
+                            take(bytes, cursor, byte_count)?
+                                .chunks_exact(2)
+                                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                                .collect(),
+                        )
+                    };
+                    Self::String { flags, characters }
+                }
+                0x18 => return Ok(None),
+                0x19 => {
+                    let options = take_u8(bytes, cursor)?;
+                    let data = take_u16(bytes, cursor)?;
+                    let (choose_jump_offsets, choose_function_offset) = if options & 0x04 != 0 {
+                        let mut offsets = Vec::with_capacity(usize::from(data));
+                        for _ in 0..data {
+                            offsets.push(take_u16(bytes, cursor)?);
+                        }
+                        (offsets, Some(take_u16(bytes, cursor)?))
+                    } else {
+                        (Vec::new(), None)
+                    };
+                    Self::Attribute {
+                        options,
+                        data,
+                        choose_jump_offsets,
+                        choose_function_offset,
+                    }
+                }
+                0x1c => Self::Error(take_u8(bytes, cursor)?),
+                0x1d => Self::Boolean(take_u8(bytes, cursor)?),
+                0x1e => Self::Integer(take_u16(bytes, cursor)?),
+                0x1f => Self::NumberBits(take_u64(bytes, cursor)?),
+                _ => return Ok(None),
+            }));
+        }
+
+        let base = opcode & 0x1f | 0x20;
+        Ok(Some(match base {
+            0x20 => Self::Array {
+                reserved0: take_u32(bytes, cursor)?,
+                reserved1: take_u16(bytes, cursor)?,
+                reserved2: take_u8(bytes, cursor)?,
+                values: None,
+            },
+            0x21 => Self::Function {
+                function_index: take_u16(bytes, cursor)?,
+            },
+            0x22 => Self::FunctionVar {
+                argument_count: take_u8(bytes, cursor)?,
+                function_index: take_u16(bytes, cursor)?,
+            },
+            0x23 => Self::Name {
+                name_index: take_u32(bytes, cursor)?,
+            },
+            0x24 => Self::Reference {
+                row: take_u16(bytes, cursor)?,
+                column: take_u16(bytes, cursor)?,
+            },
+            0x25 => Self::Area {
+                first_row: take_u16(bytes, cursor)?,
+                last_row: take_u16(bytes, cursor)?,
+                first_column: take_u16(bytes, cursor)?,
+                last_column: take_u16(bytes, cursor)?,
+            },
+            0x26 => Self::MemArea {
+                reserved: take_u32(bytes, cursor)?,
+                byte_count: take_u16(bytes, cursor)?,
+                extra: None,
+            },
+            0x27 => Self::MemError {
+                reserved: take_u32(bytes, cursor)?,
+                byte_count: take_u16(bytes, cursor)?,
+            },
+            0x29 => Self::MemFunction {
+                byte_count: take_u16(bytes, cursor)?,
+            },
+            0x2a => Self::ReferenceError {
+                reserved: take_u32(bytes, cursor)?,
+            },
+            0x2b => Self::AreaError {
+                reserved0: take_u32(bytes, cursor)?,
+                reserved1: take_u32(bytes, cursor)?,
+            },
+            0x2c => Self::RelativeReference {
+                row: take_u16(bytes, cursor)?,
+                column: take_u16(bytes, cursor)?,
+            },
+            0x2d => Self::RelativeArea {
+                first_row: take_u16(bytes, cursor)?,
+                last_row: take_u16(bytes, cursor)?,
+                first_column: take_u16(bytes, cursor)?,
+                last_column: take_u16(bytes, cursor)?,
+            },
+            0x39 => Self::ExternalName {
+                external_sheet_index: take_u16(bytes, cursor)?,
+                name_index: take_u32(bytes, cursor)?,
+            },
+            0x3a => Self::Reference3d {
+                external_sheet_index: take_u16(bytes, cursor)?,
+                row: take_u16(bytes, cursor)?,
+                column: take_u16(bytes, cursor)?,
+            },
+            0x3b => Self::Area3d {
+                external_sheet_index: take_u16(bytes, cursor)?,
+                first_row: take_u16(bytes, cursor)?,
+                last_row: take_u16(bytes, cursor)?,
+                first_column: take_u16(bytes, cursor)?,
+                last_column: take_u16(bytes, cursor)?,
+            },
+            0x3c => Self::DeletedReference3d {
+                external_sheet_index: take_u16(bytes, cursor)?,
+                reserved: take_u32(bytes, cursor)?,
+            },
+            0x3d => Self::DeletedArea3d {
+                external_sheet_index: take_u16(bytes, cursor)?,
+                reserved0: take_u32(bytes, cursor)?,
+                reserved1: take_u32(bytes, cursor)?,
+            },
+            _ => return Ok(None),
+        }))
+    }
+}
+
+impl FormulaToken {
+    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        bytes.push(self.opcode);
+        match &self.data {
+            FormulaTokenData::UnknownZero | FormulaTokenData::Operator(_) => {}
+            FormulaTokenData::Exp { row, column }
+            | FormulaTokenData::Table { row, column }
+            | FormulaTokenData::Reference { row, column }
+            | FormulaTokenData::RelativeReference { row, column } => {
+                put_u16(bytes, *row);
+                put_u16(bytes, *column);
+            }
+            FormulaTokenData::String { flags, characters } => {
+                let count = match characters {
+                    XlStringCharacters::Compressed(values) => {
+                        if flags & 1 != 0 {
+                            return Err(Error::invalid(
+                                0,
+                                "compressed Formula string has UTF-16 flag",
+                            ));
+                        }
+                        values.len()
+                    }
+                    XlStringCharacters::Unicode(values) => {
+                        if flags & 1 == 0 {
+                            return Err(Error::invalid(
+                                0,
+                                "Unicode Formula string lacks UTF-16 flag",
+                            ));
+                        }
+                        values.len()
+                    }
+                };
+                bytes.push(u8::try_from(count).map_err(|_| {
+                    Error::Limit("Formula string character count exceeds u8".into())
+                })?);
+                bytes.push(*flags);
+                match characters {
+                    XlStringCharacters::Compressed(values) => bytes.extend_from_slice(values),
+                    XlStringCharacters::Unicode(values) => {
+                        for value in values {
+                            put_u16(bytes, *value);
+                        }
+                    }
+                }
+            }
+            FormulaTokenData::Attribute {
+                options,
+                data,
+                choose_jump_offsets,
+                choose_function_offset,
+            } => {
+                bytes.push(*options);
+                put_u16(bytes, *data);
+                if *options & 0x04 != 0 {
+                    if usize::from(*data) != choose_jump_offsets.len() {
+                        return Err(Error::invalid(0, "Formula choose jump count mismatch"));
+                    }
+                    for value in choose_jump_offsets {
+                        put_u16(bytes, *value);
+                    }
+                    put_u16(
+                        bytes,
+                        choose_function_offset.ok_or_else(|| {
+                            Error::invalid(0, "Formula choose function offset is missing")
+                        })?,
+                    );
+                }
+            }
+            FormulaTokenData::Error(value) | FormulaTokenData::Boolean(value) => bytes.push(*value),
+            FormulaTokenData::Integer(value)
+            | FormulaTokenData::Function {
+                function_index: value,
+            }
+            | FormulaTokenData::MemFunction { byte_count: value } => put_u16(bytes, *value),
+            FormulaTokenData::NumberBits(value) => put_u64(bytes, *value),
+            FormulaTokenData::Array {
+                reserved0,
+                reserved1,
+                reserved2,
+                ..
+            } => {
+                put_u32(bytes, *reserved0);
+                put_u16(bytes, *reserved1);
+                bytes.push(*reserved2);
+            }
+            FormulaTokenData::FunctionVar {
+                argument_count,
+                function_index,
+            } => {
+                bytes.push(*argument_count);
+                put_u16(bytes, *function_index);
+            }
+            FormulaTokenData::Name { name_index } => put_u32(bytes, *name_index),
+            FormulaTokenData::Area {
+                first_row,
+                last_row,
+                first_column,
+                last_column,
+            }
+            | FormulaTokenData::RelativeArea {
+                first_row,
+                last_row,
+                first_column,
+                last_column,
+            } => {
+                put_u16(bytes, *first_row);
+                put_u16(bytes, *last_row);
+                put_u16(bytes, *first_column);
+                put_u16(bytes, *last_column);
+            }
+            FormulaTokenData::MemArea {
+                reserved,
+                byte_count,
+                ..
+            }
+            | FormulaTokenData::MemError {
+                reserved,
+                byte_count,
+                ..
+            } => {
+                put_u32(bytes, *reserved);
+                put_u16(bytes, *byte_count);
+            }
+            FormulaTokenData::ReferenceError { reserved } => put_u32(bytes, *reserved),
+            FormulaTokenData::AreaError {
+                reserved0,
+                reserved1,
+            } => {
+                put_u32(bytes, *reserved0);
+                put_u32(bytes, *reserved1);
+            }
+            FormulaTokenData::ExternalName {
+                external_sheet_index,
+                name_index,
+            } => {
+                put_u16(bytes, *external_sheet_index);
+                put_u32(bytes, *name_index);
+            }
+            FormulaTokenData::Reference3d {
+                external_sheet_index,
+                row,
+                column,
+            } => {
+                put_u16(bytes, *external_sheet_index);
+                put_u16(bytes, *row);
+                put_u16(bytes, *column);
+            }
+            FormulaTokenData::Area3d {
+                external_sheet_index,
+                first_row,
+                last_row,
+                first_column,
+                last_column,
+            } => {
+                put_u16(bytes, *external_sheet_index);
+                put_u16(bytes, *first_row);
+                put_u16(bytes, *last_row);
+                put_u16(bytes, *first_column);
+                put_u16(bytes, *last_column);
+            }
+            FormulaTokenData::DeletedReference3d {
+                external_sheet_index,
+                reserved,
+            } => {
+                put_u16(bytes, *external_sheet_index);
+                put_u32(bytes, *reserved);
+            }
+            FormulaTokenData::DeletedArea3d {
+                external_sheet_index,
+                reserved0,
+                reserved1,
+            } => {
+                put_u16(bytes, *external_sheet_index);
+                put_u32(bytes, *reserved0);
+                put_u32(bytes, *reserved1);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl FormulaOperator {
+    fn from_opcode(opcode: u8) -> Self {
+        match opcode {
+            0x03 => Self::Add,
+            0x04 => Self::Subtract,
+            0x05 => Self::Multiply,
+            0x06 => Self::Divide,
+            0x07 => Self::Power,
+            0x08 => Self::Concat,
+            0x09 => Self::LessThan,
+            0x0a => Self::LessEqual,
+            0x0b => Self::Equal,
+            0x0c => Self::GreaterEqual,
+            0x0d => Self::GreaterThan,
+            0x0e => Self::NotEqual,
+            0x0f => Self::Intersection,
+            0x10 => Self::Union,
+            0x11 => Self::Range,
+            0x12 => Self::UnaryPlus,
+            0x13 => Self::UnaryMinus,
+            0x14 => Self::Percent,
+            0x15 => Self::Parenthesis,
+            0x16 => Self::MissingArgument,
+            _ => unreachable!("operator opcode range checked by caller"),
+        }
+    }
+}
+
+impl BiffConstant {
+    pub(super) fn read(bytes: &[u8], cursor: &mut usize) -> Result<Self> {
+        Ok(match take_u8(bytes, cursor)? {
+            0x00 => Self::Empty {
+                reserved: take_u64(bytes, cursor)?,
+            },
+            0x01 => Self::NumberBits(take_u64(bytes, cursor)?),
+            0x02 => {
+                let count = usize::from(take_u16(bytes, cursor)?);
+                let flags = take_u8(bytes, cursor)?;
+                let characters = if flags & 1 == 0 {
+                    XlStringCharacters::Compressed(take(bytes, cursor, count)?.to_vec())
+                } else {
+                    let byte_count = count.checked_mul(2).ok_or_else(|| {
+                        Error::Limit("Formula array string byte count overflow".into())
+                    })?;
+                    XlStringCharacters::Unicode(
+                        take(bytes, cursor, byte_count)?
+                            .chunks_exact(2)
+                            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                            .collect(),
+                    )
+                };
+                Self::String { flags, characters }
+            }
+            0x04 => {
+                let raw = take(bytes, cursor, 8)?;
+                Self::Boolean {
+                    value: raw[0],
+                    reserved: raw[1..].try_into().expect("seven bytes"),
+                }
+            }
+            0x10 => Self::Error {
+                code: take_u16(bytes, cursor)?,
+                reserved0: take_u16(bytes, cursor)?,
+                reserved1: take_u32(bytes, cursor)?,
+            },
+            kind => {
+                return Err(Error::invalid(
+                    (*cursor - 1) as u64,
+                    format!("unknown Formula array constant kind 0x{kind:02x}"),
+                ));
+            }
+        })
+    }
+
+    pub(super) fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        match self {
+            Self::Empty { reserved } => {
+                bytes.push(0x00);
+                put_u64(bytes, *reserved);
+            }
+            Self::NumberBits(bits) => {
+                bytes.push(0x01);
+                put_u64(bytes, *bits);
+            }
+            Self::String { flags, characters } => {
+                bytes.push(0x02);
+                let count = match characters {
+                    XlStringCharacters::Compressed(values) => {
+                        if flags & 1 != 0 {
+                            return Err(Error::invalid(
+                                0,
+                                "compressed Formula array string has UTF-16 flag",
+                            ));
+                        }
+                        values.len()
+                    }
+                    XlStringCharacters::Unicode(values) => {
+                        if flags & 1 == 0 {
+                            return Err(Error::invalid(
+                                0,
+                                "Unicode Formula array string lacks UTF-16 flag",
+                            ));
+                        }
+                        values.len()
+                    }
+                };
+                put_u16(
+                    bytes,
+                    u16::try_from(count).map_err(|_| {
+                        Error::Limit("Formula array string character count exceeds u16".into())
+                    })?,
+                );
+                bytes.push(*flags);
+                match characters {
+                    XlStringCharacters::Compressed(values) => bytes.extend_from_slice(values),
+                    XlStringCharacters::Unicode(values) => {
+                        for value in values {
+                            put_u16(bytes, *value);
+                        }
+                    }
+                }
+            }
+            Self::Boolean { value, reserved } => {
+                bytes.push(0x04);
+                bytes.push(*value);
+                bytes.extend_from_slice(reserved);
+            }
+            Self::Error {
+                code,
+                reserved0,
+                reserved1,
+            } => {
+                bytes.push(0x10);
+                put_u16(bytes, *code);
+                put_u16(bytes, *reserved0);
+                put_u32(bytes, *reserved1);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl FormulaArray {
+    fn read(bytes: &[u8], cursor: &mut usize) -> Result<Self> {
+        let columns = u16::from(take_u8(bytes, cursor)?) + 1;
+        let rows = take_u16(bytes, cursor)?
+            .checked_add(1)
+            .ok_or_else(|| Error::invalid(*cursor as u64, "Formula array row count overflow"))?;
+        let count = usize::from(columns)
+            .checked_mul(usize::from(rows))
+            .ok_or_else(|| Error::Limit("Formula array value count overflow".into()))?;
+        if count > bytes.len().saturating_sub(*cursor) / 4 {
+            return Err(Error::invalid(
+                *cursor as u64,
+                "Formula array dimensions exceed the bounded value data",
+            ));
+        }
+        let mut values = Vec::with_capacity(count);
+        for _ in 0..count {
+            values.push(BiffConstant::read(bytes, cursor)?);
+        }
+        Ok(Self {
+            columns,
+            rows,
+            values,
+        })
+    }
+
+    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        let expected = usize::from(self.columns)
+            .checked_mul(usize::from(self.rows))
+            .ok_or_else(|| Error::Limit("Formula array value count overflow".into()))?;
+        if self.columns == 0 || self.columns > 256 || self.rows == 0 {
+            return Err(Error::invalid(0, "Formula array dimensions are invalid"));
+        }
+        if self.values.len() != expected {
+            return Err(Error::invalid(0, "Formula array value count mismatch"));
+        }
+        bytes.push((self.columns - 1) as u8);
+        put_u16(bytes, self.rows - 1);
+        for value in &self.values {
+            value.write(bytes)?;
+        }
+        Ok(())
+    }
+}
+
+impl FormulaMemExtra {
+    fn read(bytes: &[u8], cursor: &mut usize) -> Result<Self> {
+        let count = usize::from(take_u16(bytes, cursor)?);
+        if count > bytes.len().saturating_sub(*cursor) / 8 {
+            return Err(Error::invalid(
+                *cursor as u64,
+                "Formula memory range count exceeds bounded extra data",
+            ));
+        }
+        let mut ranges = Vec::with_capacity(count);
+        for _ in 0..count {
+            ranges.push(FormulaRange {
+                first_row: take_u16(bytes, cursor)?,
+                last_row: take_u16(bytes, cursor)?,
+                first_column: take_u16(bytes, cursor)?,
+                last_column: take_u16(bytes, cursor)?,
+            });
+        }
+        Ok(Self { ranges })
+    }
+
+    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        put_u16(
+            bytes,
+            u16::try_from(self.ranges.len())
+                .map_err(|_| Error::Limit("Formula memory range count exceeds u16".into()))?,
+        );
+        for range in &self.ranges {
+            put_u16(bytes, range.first_row);
+            put_u16(bytes, range.last_row);
+            put_u16(bytes, range.first_column);
+            put_u16(bytes, range.last_column);
+        }
+        Ok(())
+    }
+}
+
+fn take<'a>(bytes: &'a [u8], cursor: &mut usize, len: usize) -> Result<&'a [u8]> {
+    let end = cursor
+        .checked_add(len)
+        .ok_or_else(|| Error::Limit("formula token offset overflow".into()))?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| Error::invalid(*cursor as u64, "truncated Formula token"))?;
+    *cursor = end;
+    Ok(value)
+}
+
+fn take_u8(bytes: &[u8], cursor: &mut usize) -> Result<u8> {
+    Ok(take(bytes, cursor, 1)?[0])
+}
+
+fn take_u16(bytes: &[u8], cursor: &mut usize) -> Result<u16> {
+    Ok(u16::from_le_bytes(
+        take(bytes, cursor, 2)?.try_into().expect("two bytes"),
+    ))
+}
+
+fn take_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32> {
+    Ok(u32::from_le_bytes(
+        take(bytes, cursor, 4)?.try_into().expect("four bytes"),
+    ))
+}
+
+fn take_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64> {
+    Ok(u64::from_le_bytes(
+        take(bytes, cursor, 8)?.try_into().expect("eight bytes"),
+    ))
+}
+
+fn put_u16(bytes: &mut Vec<u8>, value: u16) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put_u32(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_and_extra_data_round_trip_statically() {
+        let rgce = [
+            0x60, 0, 0, 0, 0, 0, 0, 0, // Array
+            0x26, 0, 0, 0, 0, 0, 0, // MemArea
+            0x1e, 42, 0,    // integer constant
+            0x03, // add
+        ];
+        let rgcb = [
+            0, 0, 0, // one-column, one-row array
+            1, 0, 0, 0, 0, 0, 0, 0, 0, // numeric array value
+            1, 0, 1, 0, 2, 0, 3, 0, 4, 0, // one MemArea range
+        ];
+        let mut parsed = FormulaTokenStream::from_bytes(&rgce).unwrap();
+        assert!(parsed.unparsed_tail.is_empty());
+        assert!(parsed.parse_extra_data(&rgcb).unwrap().is_empty());
+        assert_eq!(parsed.missing_extra_count(), 0);
+        assert_eq!(parsed.to_bytes().unwrap(), rgce);
+        assert_eq!(parsed.extra_data_to_bytes().unwrap(), rgcb);
+    }
+
+    #[test]
+    fn unsupported_token_is_a_bounded_tail() {
+        let parsed = FormulaTokenStream::from_bytes(&[0x1e, 7, 0, 0x18, 1, 2]).unwrap();
+        assert_eq!(parsed.tokens.len(), 1);
+        assert_eq!(parsed.unparsed_tail, [0x18, 1, 2]);
+        assert_eq!(parsed.to_bytes().unwrap(), [0x1e, 7, 0, 0x18, 1, 2]);
+    }
+}

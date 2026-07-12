@@ -1,35 +1,28 @@
-use std::{
-    io::{Cursor, Read, Write},
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 use web_time::SystemTime;
 
 use crate::{Error, Result, limits::Limits};
 
+mod allocation;
+mod directory;
+mod header;
+mod sector;
+mod stream;
+mod writer;
+
+pub use allocation::{Difat, Fat, FatEntry, FatMarkerMismatch, MiniFat, MiniFatEntry};
+pub use directory::{
+    Directory, DirectoryColor, DirectoryEntry, DirectoryObjectType, DirectoryPointer,
+};
+pub use header::Header;
+pub use sector::{MiniSectorId, SectorId};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Version {
     V3,
     V4,
-}
-
-impl From<cfb::Version> for Version {
-    fn from(value: cfb::Version) -> Self {
-        match value {
-            cfb::Version::V3 => Self::V3,
-            cfb::Version::V4 => Self::V4,
-        }
-    }
-}
-
-impl From<Version> for cfb::Version {
-    fn from(value: Version) -> Self {
-        match value {
-            Version::V3 => Self::V3,
-            Version::V4 => Self::V4,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,7 +56,14 @@ impl Entry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompoundFile {
     version: Version,
+    header: Header,
+    difat: Difat,
+    fat: Fat,
+    mini_fat: MiniFat,
+    directory: Directory,
     entries: Vec<Entry>,
+    unallocated_sectors: Vec<Vec<u8>>,
+    trailing_data: Vec<u8>,
 }
 
 impl CompoundFile {
@@ -79,62 +79,66 @@ impl CompoundFile {
                 limits.max_file_size
             )));
         }
-        let mut compatible_bytes = bytes.to_vec();
-        normalize_unaddressable_fat_padding(&mut compatible_bytes);
-        let mut source = cfb::CompoundFile::open(Cursor::new(compatible_bytes))?;
-        let version = source.version().into();
-        let metadata: Vec<_> = source.walk().collect();
-        if metadata.len() > limits.max_entries {
-            return Err(Error::Limit(format!(
-                "entry count {} exceeds {}",
-                metadata.len(),
-                limits.max_entries
-            )));
+        let header = Header::from_bytes(bytes)?;
+        let sector_len = header.sector_len();
+        let padded_len = bytes
+            .len()
+            .checked_add(sector_len - 1)
+            .map(|len| len / sector_len * sector_len)
+            .ok_or_else(|| Error::Limit("padded CFB length overflow".into()))?;
+        let mut padded_bytes = bytes.to_vec();
+        padded_bytes.resize(padded_len, 0);
+        let sectors = sector::SectorSource::new(&padded_bytes, bytes.len(), &header)?;
+        if sectors.sector_count() > u32::MAX as usize {
+            return Err(Error::Limit("CFB sector count exceeds u32".into()));
         }
-
-        let mut entries = Vec::with_capacity(metadata.len());
-        for meta in metadata {
-            if meta.len() > limits.max_stream_size {
-                return Err(Error::Limit(format!(
-                    "stream {} length {} exceeds {}",
-                    meta.path().display(),
-                    meta.len(),
-                    limits.max_stream_size
-                )));
+        sectors.full_sector(SectorId::new(header.first_directory_sector)?)?;
+        let difat = Difat::read(&header, &sectors, limits)?;
+        let fat = Fat::read(&difat, &sectors)?;
+        let directory_sectors = fat.chain(header.first_directory_sector, sectors.sector_count())?;
+        let mini_fat = MiniFat::read(&header, &fat, &sectors, limits)?;
+        let directory = Directory::read(
+            directory_sectors,
+            header.number_of_directory_sectors,
+            &sectors,
+            limits,
+        )?;
+        let version = header.version();
+        let entries = stream::read_entries(&header, &fat, &mini_fat, &directory, &sectors, limits)?;
+        let mut unallocated_sectors = Vec::new();
+        let mut unallocated_bytes = 0usize;
+        for index in 0..sectors.sector_count() {
+            let id = SectorId::new(index as u32)?;
+            if sectors.is_partial(id) {
+                continue;
             }
-            let kind = if meta.is_root() {
-                EntryKind::Root
-            } else if meta.is_stream() {
-                EntryKind::Stream
-            } else {
-                EntryKind::Storage
-            };
-            let mut data = Vec::new();
-            if meta.is_stream() {
-                let capacity = usize::try_from(meta.len())
-                    .map_err(|_| Error::Limit("stream length does not fit usize".into()))?;
-                if capacity > limits.max_allocation {
+            let is_allocation_sector =
+                difat.fat_sectors().contains(&id) || difat.difat_sectors().contains(&id);
+            if !is_allocation_sector && fat.is_free_or_unaddressed(id) {
+                unallocated_bytes = unallocated_bytes
+                    .checked_add(sectors.sector_len())
+                    .ok_or_else(|| Error::Limit("unallocated sector size overflow".into()))?;
+                if unallocated_bytes > limits.max_allocation {
                     return Err(Error::Limit(format!(
-                        "stream allocation {capacity} exceeds {}",
+                        "unallocated sector data {unallocated_bytes} exceeds {}",
                         limits.max_allocation
                     )));
                 }
-                data.reserve_exact(capacity);
-                source.open_stream(meta.path())?.read_to_end(&mut data)?;
+                unallocated_sectors.push(sectors.sector(id)?.to_vec());
             }
-            entries.push(Entry {
-                path: meta.path().to_path_buf(),
-                name: meta.name().to_string(),
-                kind,
-                clsid: *meta.clsid(),
-                state_bits: meta.state_bits(),
-                created: meta.created(),
-                modified: meta.modified(),
-                data,
-            });
         }
-        entries.sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(Self { version, entries })
+        let trailing_data = sectors.unaccessed_partial_data().to_vec();
+        Ok(Self {
+            version,
+            header,
+            difat,
+            fat,
+            mini_fat,
+            directory,
+            entries,
+            unallocated_sectors,
+            trailing_data,
+        })
     }
 
     pub fn version(&self) -> Version {
@@ -143,150 +147,46 @@ impl CompoundFile {
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
+    pub fn header(&self) -> &Header {
+        &self.header
+    }
+    pub fn difat(&self) -> &Difat {
+        &self.difat
+    }
+    pub fn fat(&self) -> &Fat {
+        &self.fat
+    }
+    pub fn mini_fat(&self) -> &MiniFat {
+        &self.mini_fat
+    }
+    pub fn directory_sectors(&self) -> &[SectorId] {
+        self.directory.sectors()
+    }
+    pub fn directory(&self) -> &Directory {
+        &self.directory
+    }
     pub fn entry(&self, path: impl AsRef<Path>) -> Option<&Entry> {
         self.entries
             .iter()
             .find(|entry| entry.path == path.as_ref())
     }
+    pub fn trailing_data(&self) -> &[u8] {
+        &self.trailing_data
+    }
+    pub fn unallocated_sectors(&self) -> &[Vec<u8>] {
+        &self.unallocated_sectors
+    }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let cursor = Cursor::new(Vec::new());
-        let mut target = cfb::CompoundFile::create_with_version(self.version.into(), cursor)?;
-
-        let mut storages: Vec<_> = self
-            .entries
-            .iter()
-            .filter(|entry| entry.kind == EntryKind::Storage)
-            .collect();
-        storages.sort_by_key(|entry| entry.path.components().count());
-        for entry in storages {
-            target.create_storage(&entry.path)?;
-        }
-
-        for entry in self.entries.iter().filter(|entry| entry.is_stream()) {
-            let mut stream = target.create_new_stream(&entry.path)?;
-            stream.write_all(&entry.data)?;
-        }
-
-        for entry in self.entries.iter().filter(|entry| entry.is_storage()) {
-            target.set_storage_clsid(&entry.path, entry.clsid)?;
-            target.set_state_bits(&entry.path, entry.state_bits)?;
-            target.set_created_time(&entry.path, entry.created)?;
-            target.set_modified_time(&entry.path, entry.modified)?;
-        }
-        for entry in self.entries.iter().filter(|entry| entry.is_stream()) {
-            target.set_state_bits(&entry.path, entry.state_bits)?;
-        }
-        target.flush()?;
-        Ok(target.into_inner().into_inner())
+        writer::write_compound(self)
     }
 
     pub fn logical_eq(&self, other: &Self) -> bool {
-        self.version == other.version && self.entries == other.entries
+        self.version == other.version
+            && self.entries == other.entries
+            && self.unallocated_sectors == other.unallocated_sectors
+            && self.trailing_data == other.trailing_data
     }
-}
-
-const CFB_MAGIC: [u8; 8] = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
-const FREE_SECTOR: u32 = 0xffff_ffff;
-const END_OF_CHAIN: u32 = 0xffff_fffe;
-const MAX_REGULAR_SECTOR: u32 = 0xffff_fffa;
-
-/// Real-world writers sometimes leave garbage in FAT slots whose sector IDs
-/// are beyond EOF. Those slots cannot be reached by any valid chain. Office
-/// and POI ignore them, so compatibility mode canonicalizes only that unused
-/// padding before handing the image to the strict allocator implementation.
-fn normalize_unaddressable_fat_padding(bytes: &mut [u8]) {
-    if bytes.len() < 512 || bytes[..8] != CFB_MAGIC {
-        return;
-    }
-    let Some(sector_shift) = read_u16_at(bytes, 30) else {
-        return;
-    };
-    if !matches!(sector_shift, 9 | 12) {
-        return;
-    }
-    let sector_len = 1usize << sector_shift;
-    if bytes.len() < sector_len || !bytes.len().is_multiple_of(sector_len) {
-        return;
-    }
-    let num_sectors = bytes.len() / sector_len - 1;
-    let Some(num_fat_sectors) = read_u32_at(bytes, 44).map(|value| value as usize) else {
-        return;
-    };
-    let Some(mut next_difat) = read_u32_at(bytes, 68) else {
-        return;
-    };
-    let Some(num_difat_sectors) = read_u32_at(bytes, 72).map(|value| value as usize) else {
-        return;
-    };
-
-    let mut fat_sectors = Vec::with_capacity(num_fat_sectors.min(num_sectors));
-    for index in 0..109 {
-        let Some(value) = read_u32_at(bytes, 76 + index * 4) else {
-            return;
-        };
-        if value <= MAX_REGULAR_SECTOR {
-            fat_sectors.push(value);
-            if fat_sectors.len() == num_fat_sectors {
-                break;
-            }
-        }
-    }
-
-    let mut seen = std::collections::BTreeSet::new();
-    for _ in 0..num_difat_sectors.min(num_sectors) {
-        if fat_sectors.len() == num_fat_sectors || next_difat > MAX_REGULAR_SECTOR {
-            break;
-        }
-        if next_difat as usize >= num_sectors || !seen.insert(next_difat) {
-            return;
-        }
-        let offset = (next_difat as usize + 1) * sector_len;
-        for index in 0..(sector_len / 4 - 1) {
-            let Some(value) = read_u32_at(bytes, offset + index * 4) else {
-                return;
-            };
-            if value <= MAX_REGULAR_SECTOR {
-                fat_sectors.push(value);
-                if fat_sectors.len() == num_fat_sectors {
-                    break;
-                }
-            }
-        }
-        let Some(value) = read_u32_at(bytes, offset + sector_len - 4) else {
-            return;
-        };
-        next_difat = value;
-        if matches!(next_difat, END_OF_CHAIN | FREE_SECTOR) {
-            break;
-        }
-    }
-
-    let entries_per_sector = sector_len / 4;
-    for (table_index, sector_id) in fat_sectors.into_iter().enumerate() {
-        if sector_id as usize >= num_sectors {
-            return;
-        }
-        let offset = (sector_id as usize + 1) * sector_len;
-        for slot in 0..entries_per_sector {
-            if table_index * entries_per_sector + slot >= num_sectors {
-                bytes[offset + slot * 4..offset + slot * 4 + 4]
-                    .copy_from_slice(&FREE_SECTOR.to_le_bytes());
-            }
-        }
-    }
-}
-
-fn read_u16_at(bytes: &[u8], offset: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(
-        bytes.get(offset..offset + 2)?.try_into().ok()?,
-    ))
-}
-
-fn read_u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(
-        bytes.get(offset..offset + 4)?.try_into().ok()?,
-    ))
 }
 
 pub fn round_trip_bytes(bytes: &[u8]) -> Result<Vec<u8>> {
@@ -308,20 +208,27 @@ mod tests {
 
     #[test]
     fn empty_compound_file_round_trips() {
-        for version in [cfb::Version::V3, cfb::Version::V4] {
-            let source = cfb::CompoundFile::create_with_version(version, Cursor::new(Vec::new()))
-                .unwrap()
-                .into_inner()
-                .into_inner();
+        for (reference_version, version) in [
+            (cfb::Version::V3, Version::V3),
+            (cfb::Version::V4, Version::V4),
+        ] {
+            let source = cfb::CompoundFile::create_with_version(
+                reference_version,
+                std::io::Cursor::new(Vec::new()),
+            )
+            .unwrap()
+            .into_inner()
+            .into_inner();
             let output = round_trip_bytes(&source).unwrap();
             let parsed = CompoundFile::from_bytes(&output).unwrap();
-            assert_eq!(parsed.version(), version.into());
+            assert_eq!(parsed.version(), version);
         }
     }
 
     #[test]
     fn nested_streams_round_trip() {
-        let mut source = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+        use std::io::Write;
+        let mut source = cfb::CompoundFile::create(std::io::Cursor::new(Vec::new())).unwrap();
         source.create_storage("/Macros").unwrap();
         source.create_storage("/Macros/VBA").unwrap();
         source
@@ -337,8 +244,37 @@ mod tests {
         source.flush().unwrap();
         let bytes = source.into_inner().into_inner();
         let output = round_trip_bytes(&bytes).unwrap();
+        cfb::CompoundFile::open_strict(std::io::Cursor::new(output.clone())).unwrap();
         let parsed = CompoundFile::from_bytes(&output).unwrap();
         assert_eq!(parsed.entry("/WordDocument").unwrap().data, b"word");
         assert_eq!(parsed.entry("/Macros/VBA/dir").unwrap().data, b"vba");
+    }
+
+    #[test]
+    fn trailing_data_is_preserved_outside_sector_space() {
+        let source = cfb::CompoundFile::create(std::io::Cursor::new(Vec::new())).unwrap();
+        let mut bytes = source.into_inner().into_inner();
+        bytes.extend_from_slice(b"trailing");
+        let parsed = CompoundFile::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.trailing_data(), b"trailing");
+        let output = parsed.to_bytes().unwrap();
+        assert!(output.ends_with(b"trailing"));
+        assert!(parsed.logical_eq(&CompoundFile::from_bytes(&output).unwrap()));
+    }
+
+    #[test]
+    fn unallocated_physical_sectors_are_preserved() {
+        let source = cfb::CompoundFile::create_with_version(
+            cfb::Version::V3,
+            std::io::Cursor::new(Vec::new()),
+        )
+        .unwrap();
+        let mut bytes = source.into_inner().into_inner();
+        bytes.extend_from_slice(&[0x5a; 512]);
+        let parsed = CompoundFile::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.unallocated_sectors(), [vec![0x5a; 512]]);
+        let output = parsed.to_bytes().unwrap();
+        let reopened = CompoundFile::from_bytes(&output).unwrap();
+        assert!(parsed.logical_eq(&reopened));
     }
 }

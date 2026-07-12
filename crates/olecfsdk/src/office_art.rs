@@ -1,0 +1,2638 @@
+//! Shared MS-ODRAW OfficeArt record framing.
+
+use std::io::{Read, Write};
+
+use crate::{Error, Result, limits::Limits};
+use emfsdk::{DeviceIndependentBitmap, DibColorUsage, EmfMetafile, WmfMetafile};
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
+
+const HEADER_LEN: usize = 8;
+const MAX_CONTAINER_DEPTH: usize = 256;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtStream {
+    pub records: Vec<OfficeArtRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtPartialStream {
+    pub sequence: OfficeArtPartialSequence,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtPartialSequence {
+    pub records: Vec<OfficeArtPartialRecord>,
+    pub trailing_header: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OfficeArtPartialRecord {
+    Complete(OfficeArtRecord),
+    Incomplete(OfficeArtIncompleteRecord),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtIncompleteRecord {
+    pub header: OfficeArtRecordHeader,
+    pub data: OfficeArtIncompleteRecordData,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OfficeArtIncompleteRecordData {
+    Container(OfficeArtPartialSequence),
+    /// A typed FBSE whose on-disk record length omits high-order payload bits.
+    /// The original header is retained by [`OfficeArtIncompleteRecord`].
+    FbseWithUnderreportedLength(OfficeArtFbse),
+    PropertyTable(OfficeArtIncompletePropertyTable),
+    RecoveredSequence {
+        prefix: OfficeArtRecoveredPrefix,
+        sequence: OfficeArtPartialSequence,
+    },
+    Atom {
+        available_payload: Vec<u8>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OfficeArtRecoveredPrefix {
+    Words2([u32; 2]),
+    ClientAnchor(OfficeArtClientAnchor),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtRecordHeader {
+    pub version: u8,
+    pub instance: u16,
+    pub record_type: u16,
+    pub declared_length: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtRecord {
+    pub header: OfficeArtRecordHeader,
+    pub data: OfficeArtRecordData,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OfficeArtRecordData {
+    Container(Vec<OfficeArtRecord>),
+    /// Children of a known container whose producer wrote a non-container recVer.
+    CompatibilityContainer(Vec<OfficeArtRecord>),
+    Atom(Vec<u8>),
+    CalloutRule(OfficeArtCalloutRule),
+    ChildAnchor(OfficeArtRect),
+    ClientAnchor(OfficeArtClientAnchor),
+    ClientMarker(OfficeArtClientMarker),
+    ConnectorRule(OfficeArtConnectorRule),
+    BitmapBlip(OfficeArtBitmapBlip),
+    Drawing(OfficeArtDrawing),
+    DggBlock(OfficeArtDggBlock),
+    EmptyCompatibilityAtom,
+    Fbse(OfficeArtFbse),
+    Frit(Vec<OfficeArtFrit>),
+    GroupShape(OfficeArtRect),
+    IncompletePropertyTable(OfficeArtIncompletePropertyTable),
+    MetafileBlip(OfficeArtMetafileBlip),
+    PropertyTable(OfficeArtPropertyTable),
+    Shape(OfficeArtShape),
+    SoftMakerNativeProperties(SoftMakerNativeProperties),
+    SplitMenuColors([u32; 4]),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SoftMakerNativeProperties {
+    pub properties: Vec<SoftMakerNativeProperty>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SoftMakerNativeProperty {
+    pub selector: u16,
+    pub reserved: u16,
+    pub declared_length: u32,
+    pub data: SoftMakerNativePropertyData,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SoftMakerNativePropertyData {
+    Selector0 {
+        leading: u8,
+        words: [u32; 9],
+    },
+    Selector1 {
+        double_bits: [u64; 10],
+    },
+    Selector2 {
+        words: [u32; 35],
+    },
+    Selector3 {
+        words: [u32; 15],
+    },
+    Selector4 {
+        words: [u32; 24],
+    },
+    Selector6 {
+        font_name: [u16; 6],
+        words: [u32; 17],
+        trailing: u8,
+    },
+    Selector8 {
+        words: [u32; 5],
+    },
+    Selector9(u32),
+    Selector12 {
+        words: [u32; 4],
+    },
+    Unknown(Vec<u8>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtDggBlock {
+    pub maximum_shape_id: u32,
+    pub declared_cluster_count: u32,
+    pub saved_shape_count: u32,
+    pub saved_drawing_count: u32,
+    pub clusters: Vec<OfficeArtIdCluster>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtIdCluster {
+    pub drawing_id: u32,
+    pub current_shape_id: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtFbse {
+    pub win32_blip_type: u8,
+    pub macos_blip_type: u8,
+    pub uid: [u8; 16],
+    pub tag: u16,
+    pub declared_blip_size: u32,
+    pub reference_count: u32,
+    pub delay_offset: u32,
+    pub unused1: u8,
+    pub declared_name_length: u8,
+    pub unused2: u8,
+    pub unused3: u8,
+    /// UTF-16 code units, including the terminating NUL when present.
+    pub name_data: Vec<u16>,
+    pub embedded_blip: Option<Box<OfficeArtRecord>>,
+    /// Compatibility bytes following the optional embedded BLIP.
+    pub trailing: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtBitmapBlip {
+    pub uid1: [u8; 16],
+    pub uid2: Option<[u8; 16]>,
+    pub tag: u8,
+    pub file_data: OfficeArtBitmapData,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OfficeArtBitmapData {
+    Dib {
+        bitmap: DeviceIndependentBitmap,
+        original_encoded: Vec<u8>,
+    },
+    /// Encoded JPEG, PNG, or TIFF data, or a DIB rejected by the typed SDK.
+    Encoded(Vec<u8>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtMetafileBlip {
+    pub uid1: [u8; 16],
+    pub uid2: Option<[u8; 16]>,
+    pub metafile_header: OfficeArtMetafileHeader,
+    pub file_data: OfficeArtMetafileData,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OfficeArtMetafileData {
+    Emf {
+        metafile: EmfMetafile,
+        original_encoded: Vec<u8>,
+    },
+    Wmf {
+        metafile: WmfMetafile,
+        original_encoded: Vec<u8>,
+    },
+    /// PICT, unsupported compression, or producer data rejected by the typed SDK.
+    Opaque {
+        reason: OfficeArtMetafileOpaqueReason,
+        decoded: Option<Vec<u8>>,
+        original_encoded: Vec<u8>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum OfficeArtMetafileOpaqueReason {
+    InvalidEmf,
+    InvalidWmf,
+    Pict,
+    DecodeFailed,
+    UnsupportedCompression(u8),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtMetafileHeader {
+    pub uncompressed_size: u32,
+    pub bounds: OfficeArtRect,
+    pub render_size: OfficeArtPoint,
+    pub saved_size: u32,
+    pub compression: u8,
+    pub filter: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtPoint {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtDrawing {
+    pub shape_count: u32,
+    pub current_shape_id: u32,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct OfficeArtShapeFlags: u32 {
+        const GROUP = 0x0001;
+        const CHILD = 0x0002;
+        const PATRIARCH = 0x0004;
+        const DELETED = 0x0008;
+        const OLE_SHAPE = 0x0010;
+        const HAVE_MASTER = 0x0020;
+        const FLIP_HORIZONTAL = 0x0040;
+        const FLIP_VERTICAL = 0x0080;
+        const CONNECTOR = 0x0100;
+        const HAVE_ANCHOR = 0x0200;
+        const BACKGROUND = 0x0400;
+        const HAVE_SHAPE_TYPE = 0x0800;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtShape {
+    pub shape_id: u32,
+    pub flags: OfficeArtShapeFlags,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfficeArtClientMarker {
+    Textbox,
+    Data,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfficeArtClientAnchor {
+    /// Shared 18-byte representation used by sheet and chart anchors.
+    Words18 {
+        flags: u16,
+        coordinates: [u16; 8],
+    },
+    HeaderFooter {
+        width: i32,
+        height: i32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtConnectorRule {
+    pub rule_id: u32,
+    pub start_shape_id: u32,
+    pub end_shape_id: u32,
+    pub connector_shape_id: u32,
+    pub start_connection_site: u32,
+    pub end_connection_site: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtCalloutRule {
+    pub rule_id: u32,
+    pub shape_id: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtFrit {
+    pub new_group_id: u16,
+    pub old_group_id: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtPropertyTable {
+    pub properties: Vec<OfficeArtProperty>,
+    pub trailing: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtIncompletePropertyTable {
+    pub entries: Vec<OfficeArtPropertyEntry>,
+    pub incomplete_fixed_entry: OfficeArtIncompletePropertyEntry,
+    pub complex_fragments: Vec<OfficeArtComplexPropertyFragment>,
+    pub trailing_data: Vec<u8>,
+    pub recovered_trailing: Option<Box<OfficeArtPartialSequence>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OfficeArtIncompletePropertyEntry {
+    None,
+    LowWord {
+        property_id: u16,
+        is_blip_id: bool,
+        is_complex: bool,
+        value_low: u16,
+    },
+    Other(Vec<u8>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtComplexPropertyFragment {
+    pub entry_index: usize,
+    pub property_id: u16,
+    pub declared_length: u32,
+    pub data: OfficeArtComplexPropertyData,
+    pub is_complete: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OfficeArtComplexPropertyData {
+    Bytes(Vec<u8>),
+    Words12AndU16 { words: [u32; 12], trailing: u16 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtPropertyEntry {
+    pub property_id: u16,
+    pub is_blip_id: bool,
+    pub is_complex: bool,
+    pub value_or_declared_length: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtProperty {
+    pub property_id: u16,
+    pub is_blip_id: bool,
+    pub value: OfficeArtPropertyValue,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OfficeArtPropertyValue {
+    Simple(u32),
+    Complex { declared_length: u32, data: Vec<u8> },
+}
+
+impl OfficeArtStream {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Self::from_bytes_with_limits(bytes, Limits::default())
+    }
+
+    pub fn from_bytes_with_limits(bytes: &[u8], limits: Limits) -> Result<Self> {
+        if bytes.len() > limits.max_allocation {
+            return Err(Error::Limit(format!(
+                "OfficeArt stream length exceeds {}",
+                limits.max_allocation
+            )));
+        }
+        let mut record_count = 0usize;
+        let records = parse_records(bytes, 0, &mut record_count, limits)?;
+        Ok(Self { records })
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        for record in &self.records {
+            record.write(&mut bytes)?;
+        }
+        Ok(bytes)
+    }
+
+    pub fn visit(&self, mut visitor: impl FnMut(&OfficeArtRecord)) {
+        fn visit_records(records: &[OfficeArtRecord], visitor: &mut impl FnMut(&OfficeArtRecord)) {
+            for record in records {
+                visitor(record);
+                match &record.data {
+                    OfficeArtRecordData::Container(children)
+                    | OfficeArtRecordData::CompatibilityContainer(children) => {
+                        visit_records(children, visitor)
+                    }
+                    OfficeArtRecordData::Fbse(fbse) => {
+                        if let Some(blip) = &fbse.embedded_blip {
+                            visitor(blip);
+                            match &blip.data {
+                                OfficeArtRecordData::Container(children)
+                                | OfficeArtRecordData::CompatibilityContainer(children) => {
+                                    visit_records(children, visitor);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        visit_records(&self.records, &mut visitor);
+    }
+}
+
+impl OfficeArtPartialStream {
+    pub fn from_bytes_with_limits(bytes: &[u8], limits: Limits, reason: String) -> Result<Self> {
+        if bytes.len() > limits.max_allocation {
+            return Err(Error::Limit(format!(
+                "OfficeArt partial stream length exceeds {}",
+                limits.max_allocation
+            )));
+        }
+        let mut record_count = 0usize;
+        let sequence = parse_partial_sequence(bytes, 0, &mut record_count, limits)?;
+        if !sequence.is_incomplete() {
+            return Err(Error::invalid(
+                0,
+                "OfficeArt partial parser found no incomplete record",
+            ));
+        }
+        Ok(Self { sequence, reason })
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        self.sequence.to_bytes()
+    }
+
+    pub fn available_len(&self) -> usize {
+        self.sequence.encoded_len()
+    }
+
+    pub fn complete_record_count(&self) -> usize {
+        self.sequence.complete_record_count()
+    }
+
+    pub fn incomplete_record_count(&self) -> usize {
+        self.sequence.incomplete_record_count()
+    }
+
+    pub fn unparsed_byte_count(&self) -> usize {
+        self.sequence.unparsed_byte_count()
+    }
+
+    pub fn visit_complete(&self, mut visitor: impl FnMut(&OfficeArtRecord)) {
+        self.sequence.visit_complete(&mut visitor);
+    }
+
+    pub fn visit_incomplete(&self, mut visitor: impl FnMut(&OfficeArtIncompleteRecord)) {
+        self.sequence.visit_incomplete(&mut visitor);
+    }
+
+    pub fn trailing_header_lengths(&self) -> Vec<usize> {
+        let mut lengths = Vec::new();
+        self.sequence.collect_trailing_header_lengths(&mut lengths);
+        lengths
+    }
+}
+
+impl OfficeArtPartialSequence {
+    fn is_incomplete(&self) -> bool {
+        !self.trailing_header.is_empty()
+            || self
+                .records
+                .iter()
+                .any(|record| matches!(record, OfficeArtPartialRecord::Incomplete(_)))
+    }
+
+    fn to_bytes(&self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::with_capacity(self.encoded_len());
+        for record in &self.records {
+            record.write(&mut bytes)?;
+        }
+        bytes.extend_from_slice(&self.trailing_header);
+        Ok(bytes)
+    }
+
+    fn encoded_len(&self) -> usize {
+        self.records
+            .iter()
+            .map(OfficeArtPartialRecord::encoded_len)
+            .sum::<usize>()
+            .saturating_add(self.trailing_header.len())
+    }
+
+    fn complete_record_count(&self) -> usize {
+        self.records
+            .iter()
+            .map(OfficeArtPartialRecord::complete_record_count)
+            .sum()
+    }
+
+    fn incomplete_record_count(&self) -> usize {
+        self.records
+            .iter()
+            .map(OfficeArtPartialRecord::incomplete_record_count)
+            .sum()
+    }
+
+    fn unparsed_byte_count(&self) -> usize {
+        self.trailing_header.len()
+            + self
+                .records
+                .iter()
+                .map(OfficeArtPartialRecord::unparsed_byte_count)
+                .sum::<usize>()
+    }
+
+    fn visit_complete(&self, visitor: &mut impl FnMut(&OfficeArtRecord)) {
+        for record in &self.records {
+            match record {
+                OfficeArtPartialRecord::Complete(record) => {
+                    visit_complete_tree(record, visitor);
+                }
+                OfficeArtPartialRecord::Incomplete(record) => match &record.data {
+                    OfficeArtIncompleteRecordData::Container(sequence)
+                    | OfficeArtIncompleteRecordData::RecoveredSequence { sequence, .. } => {
+                        sequence.visit_complete(visitor);
+                    }
+                    OfficeArtIncompleteRecordData::FbseWithUnderreportedLength(fbse) => {
+                        if let Some(blip) = fbse.embedded_blip.as_deref() {
+                            visit_complete_tree(blip, visitor);
+                        }
+                    }
+                    OfficeArtIncompleteRecordData::PropertyTable(table) => {
+                        if let Some(sequence) = table.recovered_trailing.as_deref() {
+                            sequence.visit_complete(visitor);
+                        }
+                    }
+                    _ => {}
+                },
+            }
+        }
+    }
+
+    fn visit_incomplete(&self, visitor: &mut impl FnMut(&OfficeArtIncompleteRecord)) {
+        for record in &self.records {
+            if let OfficeArtPartialRecord::Incomplete(record) = record {
+                visitor(record);
+                match &record.data {
+                    OfficeArtIncompleteRecordData::Container(sequence)
+                    | OfficeArtIncompleteRecordData::RecoveredSequence { sequence, .. } => {
+                        sequence.visit_incomplete(visitor);
+                    }
+                    OfficeArtIncompleteRecordData::FbseWithUnderreportedLength(_) => {}
+                    OfficeArtIncompleteRecordData::PropertyTable(table) => {
+                        if let Some(sequence) = table.recovered_trailing.as_deref() {
+                            sequence.visit_incomplete(visitor);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn collect_trailing_header_lengths(&self, lengths: &mut Vec<usize>) {
+        if !self.trailing_header.is_empty() {
+            lengths.push(self.trailing_header.len());
+        }
+        for record in &self.records {
+            if let OfficeArtPartialRecord::Incomplete(record) = record {
+                match &record.data {
+                    OfficeArtIncompleteRecordData::Container(sequence)
+                    | OfficeArtIncompleteRecordData::RecoveredSequence { sequence, .. } => {
+                        sequence.collect_trailing_header_lengths(lengths);
+                    }
+                    OfficeArtIncompleteRecordData::FbseWithUnderreportedLength(_) => {}
+                    OfficeArtIncompleteRecordData::PropertyTable(table) => {
+                        if let Some(sequence) = table.recovered_trailing.as_deref() {
+                            sequence.collect_trailing_header_lengths(lengths);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+impl OfficeArtPartialRecord {
+    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        match self {
+            Self::Complete(record) => record.write(bytes),
+            Self::Incomplete(record) => record.write(bytes),
+        }
+    }
+
+    fn encoded_len(&self) -> usize {
+        match self {
+            Self::Complete(record) => HEADER_LEN + record.header.declared_length as usize,
+            Self::Incomplete(record) => HEADER_LEN + record.data.available_len(),
+        }
+    }
+
+    fn complete_record_count(&self) -> usize {
+        match self {
+            Self::Complete(record) => complete_tree_record_count(record),
+            Self::Incomplete(record) => match &record.data {
+                OfficeArtIncompleteRecordData::Container(sequence) => {
+                    sequence.complete_record_count()
+                }
+                OfficeArtIncompleteRecordData::FbseWithUnderreportedLength(fbse) => fbse
+                    .embedded_blip
+                    .as_deref()
+                    .map_or(0, complete_tree_record_count),
+                OfficeArtIncompleteRecordData::RecoveredSequence { sequence, .. } => {
+                    sequence.complete_record_count()
+                }
+                OfficeArtIncompleteRecordData::PropertyTable(table) => table
+                    .recovered_trailing
+                    .as_deref()
+                    .map_or(0, OfficeArtPartialSequence::complete_record_count),
+                OfficeArtIncompleteRecordData::Atom { .. } => 0,
+            },
+        }
+    }
+
+    fn incomplete_record_count(&self) -> usize {
+        match self {
+            Self::Complete(_) => 0,
+            Self::Incomplete(record) => {
+                1 + match &record.data {
+                    OfficeArtIncompleteRecordData::Container(sequence) => {
+                        sequence.incomplete_record_count()
+                    }
+                    OfficeArtIncompleteRecordData::FbseWithUnderreportedLength(_) => 0,
+                    OfficeArtIncompleteRecordData::RecoveredSequence { sequence, .. } => {
+                        sequence.incomplete_record_count()
+                    }
+                    OfficeArtIncompleteRecordData::PropertyTable(table) => table
+                        .recovered_trailing
+                        .as_deref()
+                        .map_or(0, OfficeArtPartialSequence::incomplete_record_count),
+                    OfficeArtIncompleteRecordData::Atom { .. } => 0,
+                }
+            }
+        }
+    }
+
+    fn unparsed_byte_count(&self) -> usize {
+        match self {
+            Self::Complete(record) => complete_tree_unparsed_byte_count(record),
+            Self::Incomplete(record) => match &record.data {
+                OfficeArtIncompleteRecordData::Container(sequence) => {
+                    sequence.unparsed_byte_count()
+                }
+                OfficeArtIncompleteRecordData::FbseWithUnderreportedLength(fbse) => {
+                    fbse.trailing.len()
+                        + fbse
+                            .embedded_blip
+                            .as_deref()
+                            .map_or(0, complete_tree_unparsed_byte_count)
+                }
+                OfficeArtIncompleteRecordData::RecoveredSequence { prefix, sequence } => {
+                    prefix.unparsed_byte_count() + sequence.unparsed_byte_count()
+                }
+                OfficeArtIncompleteRecordData::PropertyTable(table) => {
+                    table.incomplete_fixed_entry.unparsed_byte_count()
+                        + table.unparsed_complex_len()
+                        + table
+                            .recovered_trailing
+                            .as_deref()
+                            .map_or(0, OfficeArtPartialSequence::unparsed_byte_count)
+                }
+                OfficeArtIncompleteRecordData::Atom { available_payload } => {
+                    available_payload.len()
+                }
+            },
+        }
+    }
+}
+
+fn complete_tree_record_count(record: &OfficeArtRecord) -> usize {
+    1 + match &record.data {
+        OfficeArtRecordData::Container(children)
+        | OfficeArtRecordData::CompatibilityContainer(children) => children
+            .iter()
+            .map(complete_tree_record_count)
+            .sum::<usize>(),
+        OfficeArtRecordData::Fbse(fbse) => fbse
+            .embedded_blip
+            .as_deref()
+            .map_or(0, complete_tree_record_count),
+        OfficeArtRecordData::IncompletePropertyTable(table) => table
+            .recovered_trailing
+            .as_deref()
+            .map_or(0, OfficeArtPartialSequence::complete_record_count),
+        _ => 0,
+    }
+}
+
+fn visit_complete_tree(record: &OfficeArtRecord, visitor: &mut impl FnMut(&OfficeArtRecord)) {
+    visitor(record);
+    match &record.data {
+        OfficeArtRecordData::Container(children)
+        | OfficeArtRecordData::CompatibilityContainer(children) => {
+            for child in children {
+                visit_complete_tree(child, visitor);
+            }
+        }
+        OfficeArtRecordData::Fbse(fbse) => {
+            if let Some(blip) = fbse.embedded_blip.as_deref() {
+                visit_complete_tree(blip, visitor);
+            }
+        }
+        OfficeArtRecordData::IncompletePropertyTable(table) => {
+            if let Some(sequence) = table.recovered_trailing.as_deref() {
+                sequence.visit_complete(visitor);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn complete_tree_unparsed_byte_count(record: &OfficeArtRecord) -> usize {
+    match &record.data {
+        OfficeArtRecordData::Atom(payload) => payload.len(),
+        OfficeArtRecordData::Container(children)
+        | OfficeArtRecordData::CompatibilityContainer(children) => {
+            children.iter().map(complete_tree_unparsed_byte_count).sum()
+        }
+        OfficeArtRecordData::Fbse(fbse) => {
+            fbse.trailing.len()
+                + fbse
+                    .embedded_blip
+                    .as_deref()
+                    .map_or(0, complete_tree_unparsed_byte_count)
+        }
+        OfficeArtRecordData::SoftMakerNativeProperties(value) => value
+            .properties
+            .iter()
+            .map(|property| property.data.unparsed_byte_count())
+            .sum(),
+        OfficeArtRecordData::IncompletePropertyTable(value) => {
+            value.incomplete_fixed_entry.unparsed_byte_count()
+                + value.unparsed_complex_len()
+                + value
+                    .recovered_trailing
+                    .as_deref()
+                    .map_or(0, OfficeArtPartialSequence::unparsed_byte_count)
+        }
+        _ => 0,
+    }
+}
+
+impl OfficeArtIncompleteRecord {
+    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        let available_len = self.data.available_len();
+        if !matches!(
+            &self.data,
+            OfficeArtIncompleteRecordData::FbseWithUnderreportedLength(_)
+        ) && u64::try_from(available_len).unwrap_or(u64::MAX)
+            > u64::from(self.header.declared_length)
+        {
+            return Err(Error::invalid(
+                0,
+                "OfficeArt incomplete payload exceeds declared length",
+            ));
+        }
+        let options = u16::from(self.header.version) | (self.header.instance << 4);
+        bytes.extend_from_slice(&options.to_le_bytes());
+        bytes.extend_from_slice(&self.header.record_type.to_le_bytes());
+        bytes.extend_from_slice(&self.header.declared_length.to_le_bytes());
+        match &self.data {
+            OfficeArtIncompleteRecordData::Container(sequence) => {
+                bytes.extend_from_slice(&sequence.to_bytes()?);
+            }
+            OfficeArtIncompleteRecordData::FbseWithUnderreportedLength(fbse) => {
+                fbse.write(bytes)?;
+            }
+            OfficeArtIncompleteRecordData::PropertyTable(table) => table.write(bytes)?,
+            OfficeArtIncompleteRecordData::RecoveredSequence { prefix, sequence } => {
+                prefix.write(bytes);
+                bytes.extend_from_slice(&sequence.to_bytes()?);
+            }
+            OfficeArtIncompleteRecordData::Atom { available_payload } => {
+                bytes.extend_from_slice(available_payload);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl OfficeArtIncompleteRecordData {
+    fn available_len(&self) -> usize {
+        match self {
+            Self::Container(sequence) => sequence.encoded_len(),
+            Self::FbseWithUnderreportedLength(fbse) => fbse.encoded_len(),
+            Self::PropertyTable(table) => {
+                table.entries.len() * 6
+                    + table.incomplete_fixed_entry.encoded_len()
+                    + table.available_complex_len()
+                    + table
+                        .recovered_trailing
+                        .as_deref()
+                        .map_or(0, OfficeArtPartialSequence::encoded_len)
+            }
+            Self::RecoveredSequence { prefix, sequence } => {
+                prefix.encoded_len() + sequence.encoded_len()
+            }
+            Self::Atom { available_payload } => available_payload.len(),
+        }
+    }
+}
+
+impl OfficeArtRecord {
+    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        if self.header.version > 0x0f || self.header.instance > 0x0fff {
+            return Err(Error::invalid(
+                0,
+                "OfficeArt header bit fields exceed their width",
+            ));
+        }
+        let mut payload = Vec::new();
+        match &self.data {
+            OfficeArtRecordData::Container(children) => {
+                if self.header.version != 0x0f {
+                    return Err(Error::invalid(0, "OfficeArt container version is not 0xF"));
+                }
+                for child in children {
+                    child.write(&mut payload)?;
+                }
+            }
+            OfficeArtRecordData::CompatibilityContainer(children) => {
+                if self.header.version == 0x0f {
+                    return Err(Error::invalid(
+                        0,
+                        "OfficeArt compatibility container uses standard recVer 0xF",
+                    ));
+                }
+                for child in children {
+                    child.write(&mut payload)?;
+                }
+            }
+            OfficeArtRecordData::Atom(value) => {
+                if self.header.version == 0x0f {
+                    return Err(Error::invalid(
+                        0,
+                        "OfficeArt atom uses container version 0xF",
+                    ));
+                }
+                payload.extend_from_slice(value);
+            }
+            OfficeArtRecordData::CalloutRule(value) => value.write(&mut payload),
+            OfficeArtRecordData::ChildAnchor(value) | OfficeArtRecordData::GroupShape(value) => {
+                value.write(&mut payload)
+            }
+            OfficeArtRecordData::ClientAnchor(value) => value.write(&mut payload),
+            OfficeArtRecordData::ClientMarker(_) => {}
+            OfficeArtRecordData::ConnectorRule(value) => value.write(&mut payload),
+            OfficeArtRecordData::BitmapBlip(value) => value.write(&mut payload)?,
+            OfficeArtRecordData::Drawing(value) => value.write(&mut payload),
+            OfficeArtRecordData::DggBlock(value) => value.write(&mut payload)?,
+            OfficeArtRecordData::EmptyCompatibilityAtom => {}
+            OfficeArtRecordData::Fbse(value) => value.write(&mut payload)?,
+            OfficeArtRecordData::Frit(values) => {
+                for value in values {
+                    value.write(&mut payload);
+                }
+            }
+            OfficeArtRecordData::IncompletePropertyTable(value) => value.write(&mut payload)?,
+            OfficeArtRecordData::MetafileBlip(value) => value.write(&mut payload)?,
+            OfficeArtRecordData::PropertyTable(value) => value.write(&mut payload)?,
+            OfficeArtRecordData::Shape(value) => value.write(&mut payload),
+            OfficeArtRecordData::SoftMakerNativeProperties(value) => value.write(&mut payload)?,
+            OfficeArtRecordData::SplitMenuColors(colors) => {
+                for color in colors {
+                    payload.extend_from_slice(&color.to_le_bytes());
+                }
+            }
+        }
+        if usize::try_from(self.header.declared_length).ok() != Some(payload.len()) {
+            return Err(Error::invalid(
+                0,
+                "OfficeArt declared length does not match payload",
+            ));
+        }
+        let options = u16::from(self.header.version) | (self.header.instance << 4);
+        bytes.extend_from_slice(&options.to_le_bytes());
+        bytes.extend_from_slice(&self.header.record_type.to_le_bytes());
+        bytes.extend_from_slice(&self.header.declared_length.to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        Ok(())
+    }
+}
+
+fn parse_records(
+    bytes: &[u8],
+    depth: usize,
+    record_count: &mut usize,
+    limits: Limits,
+) -> Result<Vec<OfficeArtRecord>> {
+    if depth > MAX_CONTAINER_DEPTH {
+        return Err(Error::Limit(format!(
+            "OfficeArt container depth exceeds {MAX_CONTAINER_DEPTH}"
+        )));
+    }
+    let mut cursor = 0usize;
+    let mut records = Vec::new();
+    while cursor < bytes.len() {
+        let (record, consumed) = parse_one_record(&bytes[cursor..], depth, record_count, limits)?;
+        cursor = cursor
+            .checked_add(consumed)
+            .ok_or_else(|| Error::Limit("OfficeArt record offset overflow".into()))?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn parse_partial_sequence(
+    bytes: &[u8],
+    depth: usize,
+    record_count: &mut usize,
+    limits: Limits,
+) -> Result<OfficeArtPartialSequence> {
+    if depth > MAX_CONTAINER_DEPTH {
+        return Err(Error::Limit(format!(
+            "OfficeArt partial container depth exceeds {MAX_CONTAINER_DEPTH}"
+        )));
+    }
+    let mut cursor = 0usize;
+    let mut records = Vec::new();
+    while bytes.len().saturating_sub(cursor) >= HEADER_LEN {
+        let remaining = &bytes[cursor..];
+        let mut complete_count = *record_count;
+        if let Ok((record, consumed)) =
+            parse_one_record(remaining, depth, &mut complete_count, limits)
+        {
+            if let Some(recovered_payload_len) =
+                underreported_fbse_payload_len(&record, remaining, limits)
+            {
+                if *record_count >= limits.max_entries {
+                    return Err(Error::Limit(format!(
+                        "OfficeArt partial record count exceeds {}",
+                        limits.max_entries
+                    )));
+                }
+                let mut recovered_count = *record_count + 1;
+                let recovered_payload = &remaining[HEADER_LEN..HEADER_LEN + recovered_payload_len];
+                if let Some(fbse) =
+                    OfficeArtFbse::parse(recovered_payload, depth, &mut recovered_count, limits)?
+                    && fbse.embedded_blip.is_some()
+                    && fbse.trailing.is_empty()
+                {
+                    *record_count = recovered_count;
+                    cursor = cursor
+                        .checked_add(HEADER_LEN + recovered_payload_len)
+                        .ok_or_else(|| Error::Limit("OfficeArt partial offset overflow".into()))?;
+                    records.push(OfficeArtPartialRecord::Incomplete(
+                        OfficeArtIncompleteRecord {
+                            header: record.header,
+                            data: OfficeArtIncompleteRecordData::FbseWithUnderreportedLength(fbse),
+                        },
+                    ));
+                    continue;
+                }
+            }
+            *record_count = complete_count;
+            cursor = cursor
+                .checked_add(consumed)
+                .ok_or_else(|| Error::Limit("OfficeArt partial offset overflow".into()))?;
+            records.push(OfficeArtPartialRecord::Complete(record));
+            continue;
+        }
+
+        if *record_count >= limits.max_entries {
+            return Err(Error::Limit(format!(
+                "OfficeArt partial record count exceeds {}",
+                limits.max_entries
+            )));
+        }
+        *record_count += 1;
+        let header_bytes = &remaining[..HEADER_LEN];
+        let options = u16::from_le_bytes([header_bytes[0], header_bytes[1]]);
+        let header = OfficeArtRecordHeader {
+            version: (options & 0x000f) as u8,
+            instance: options >> 4,
+            record_type: u16::from_le_bytes([header_bytes[2], header_bytes[3]]),
+            declared_length: u32::from_le_bytes(header_bytes[4..8].try_into().expect("four bytes")),
+        };
+        let declared_len = usize::try_from(header.declared_length).unwrap_or(usize::MAX);
+        let available_len = declared_len.min(remaining.len() - HEADER_LEN);
+        let available_payload = &remaining[HEADER_LEN..HEADER_LEN + available_len];
+        let data = if header.version == 0x0f {
+            OfficeArtIncompleteRecordData::Container(parse_partial_sequence(
+                available_payload,
+                depth + 1,
+                record_count,
+                limits,
+            )?)
+        } else if let Some(prefix_len) = match (
+            header.version,
+            header.instance,
+            header.record_type,
+            available_payload.len(),
+        ) {
+            (0, 0x001, 0x0000, 26) => Some(18),
+            (2, 0x0aa, 0x0032, 98) => Some(8),
+            _ => None,
+        } {
+            OfficeArtIncompleteRecordData::RecoveredSequence {
+                prefix: if prefix_len == 18 {
+                    OfficeArtRecoveredPrefix::ClientAnchor(
+                        OfficeArtClientAnchor::parse(&available_payload[..prefix_len])
+                            .expect("validated 18-byte client anchor"),
+                    )
+                } else {
+                    OfficeArtRecoveredPrefix::Words2(std::array::from_fn(|index| {
+                        let start = index * 4;
+                        u32::from_le_bytes(
+                            available_payload[start..start + 4]
+                                .try_into()
+                                .expect("validated 8-byte damaged prefix"),
+                        )
+                    }))
+                },
+                sequence: parse_partial_sequence(
+                    &available_payload[prefix_len..],
+                    depth + 1,
+                    record_count,
+                    limits,
+                )?,
+            }
+        } else if header.record_type == 0xf00b {
+            let property_count = usize::from(header.instance);
+            let mut table =
+                OfficeArtIncompletePropertyTable::parse_partial(available_payload, property_count);
+            if table.entries.len() == property_count
+                && table.entries.iter().all(|entry| !entry.is_complex)
+                && table.complex_fragments.is_empty()
+                && !table.trailing_data.is_empty()
+            {
+                let mut nested_count = *record_count;
+                if let Ok(sequence) = parse_partial_sequence(
+                    &table.trailing_data,
+                    depth + 1,
+                    &mut nested_count,
+                    limits,
+                ) && !sequence.records.is_empty()
+                    && sequence.encoded_len() == table.trailing_data.len()
+                {
+                    *record_count = nested_count;
+                    table.trailing_data.clear();
+                    table.recovered_trailing = Some(Box::new(sequence));
+                }
+            }
+            OfficeArtIncompleteRecordData::PropertyTable(table)
+        } else {
+            OfficeArtIncompleteRecordData::Atom {
+                available_payload: available_payload.to_vec(),
+            }
+        };
+        records.push(OfficeArtPartialRecord::Incomplete(
+            OfficeArtIncompleteRecord { header, data },
+        ));
+        cursor = cursor
+            .checked_add(HEADER_LEN + available_len)
+            .ok_or_else(|| Error::Limit("OfficeArt partial offset overflow".into()))?;
+        if available_len < declared_len {
+            break;
+        }
+    }
+    Ok(OfficeArtPartialSequence {
+        records,
+        trailing_header: bytes[cursor..].to_vec(),
+    })
+}
+
+fn underreported_fbse_payload_len(
+    record: &OfficeArtRecord,
+    remaining: &[u8],
+    limits: Limits,
+) -> Option<usize> {
+    let OfficeArtRecordData::Fbse(fbse) = &record.data else {
+        return None;
+    };
+    let embedded_len = usize::try_from(fbse.declared_blip_size).ok()?;
+    let name_end = 36usize.checked_add(usize::from(fbse.declared_name_length))?;
+    let recovered_payload_len = name_end.checked_add(embedded_len)?;
+    if recovered_payload_len <= usize::try_from(record.header.declared_length).ok()?
+        || recovered_payload_len > limits.max_allocation
+        || HEADER_LEN.checked_add(recovered_payload_len)? > remaining.len()
+    {
+        return None;
+    }
+
+    let embedded = remaining.get(HEADER_LEN + name_end..HEADER_LEN + recovered_payload_len)?;
+    if embedded.len() < HEADER_LEN || !is_blip_record_prefix(embedded) {
+        return None;
+    }
+    let nested_declared_len = usize::try_from(u32::from_le_bytes(
+        embedded[4..8].try_into().expect("four bytes"),
+    ))
+    .ok()?;
+    (HEADER_LEN.checked_add(nested_declared_len)? == embedded_len).then_some(recovered_payload_len)
+}
+
+fn parse_one_record(
+    bytes: &[u8],
+    depth: usize,
+    record_count: &mut usize,
+    limits: Limits,
+) -> Result<(OfficeArtRecord, usize)> {
+    if depth > MAX_CONTAINER_DEPTH {
+        return Err(Error::Limit(format!(
+            "OfficeArt container depth exceeds {MAX_CONTAINER_DEPTH}"
+        )));
+    }
+    let header_bytes = bytes
+        .get(..HEADER_LEN)
+        .ok_or_else(|| Error::invalid(0, "truncated OfficeArt record header"))?;
+    let options = u16::from_le_bytes([header_bytes[0], header_bytes[1]]);
+    let header = OfficeArtRecordHeader {
+        version: (options & 0x000f) as u8,
+        instance: options >> 4,
+        record_type: u16::from_le_bytes([header_bytes[2], header_bytes[3]]),
+        declared_length: u32::from_le_bytes(header_bytes[4..8].try_into().expect("four bytes")),
+    };
+    let payload_len = usize::try_from(header.declared_length)
+        .map_err(|_| Error::Limit("OfficeArt payload length exceeds usize".into()))?;
+    if payload_len > limits.max_allocation {
+        return Err(Error::Limit(format!(
+            "OfficeArt payload length exceeds {}",
+            limits.max_allocation
+        )));
+    }
+    let payload_end = HEADER_LEN
+        .checked_add(payload_len)
+        .ok_or_else(|| Error::Limit("OfficeArt payload offset overflow".into()))?;
+    let payload = bytes
+        .get(HEADER_LEN..payload_end)
+        .ok_or_else(|| Error::invalid(4, "OfficeArt declared payload is truncated"))?;
+    *record_count += 1;
+    if *record_count > limits.max_entries {
+        return Err(Error::Limit(format!(
+            "OfficeArt record count exceeds {}",
+            limits.max_entries
+        )));
+    }
+    let data = if header.version == 0x0f {
+        OfficeArtRecordData::Container(parse_records(payload, depth + 1, record_count, limits)?)
+    } else if matches!(header.record_type, 0x0000 | 0xf002 | 0xf0f4) {
+        let mut compatibility_count = *record_count;
+        match parse_records(payload, depth + 1, &mut compatibility_count, limits) {
+            Ok(children) => {
+                *record_count = compatibility_count;
+                OfficeArtRecordData::CompatibilityContainer(children)
+            }
+            Err(_) => parse_typed_atom(header, payload, depth, record_count, limits)?
+                .unwrap_or_else(|| OfficeArtRecordData::Atom(payload.to_vec())),
+        }
+    } else {
+        parse_typed_atom(header, payload, depth, record_count, limits)?
+            .unwrap_or_else(|| OfficeArtRecordData::Atom(payload.to_vec()))
+    };
+    Ok((OfficeArtRecord { header, data }, payload_end))
+}
+
+fn parse_typed_atom(
+    header: OfficeArtRecordHeader,
+    payload: &[u8],
+    depth: usize,
+    record_count: &mut usize,
+    limits: Limits,
+) -> Result<Option<OfficeArtRecordData>> {
+    let data = match header.record_type {
+        0xf006 => OfficeArtDggBlock::parse(payload).map(OfficeArtRecordData::DggBlock),
+        0xe007 | 0xf007 => OfficeArtFbse::parse(payload, depth, record_count, limits)?
+            .map(OfficeArtRecordData::Fbse),
+        0xf008 if payload.len() == 8 => Some(OfficeArtRecordData::Drawing(
+            OfficeArtDrawing::parse(payload),
+        )),
+        0xf009 if payload.len() == 16 => Some(OfficeArtRecordData::GroupShape(
+            OfficeArtRect::parse(payload),
+        )),
+        0x0000 | 0xf0aa if payload.len() == 16 => Some(OfficeArtRecordData::ChildAnchor(
+            OfficeArtRect::parse(payload),
+        )),
+        0xf00a if payload.len() == 8 => {
+            Some(OfficeArtRecordData::Shape(OfficeArtShape::parse(payload)))
+        }
+        0xf00b | 0xf121 | 0xf122 => {
+            OfficeArtPropertyTable::parse(payload, usize::from(header.instance))
+                .map(OfficeArtRecordData::PropertyTable)
+                .or_else(|| {
+                    OfficeArtIncompletePropertyTable::parse(payload, usize::from(header.instance))
+                        .map(OfficeArtRecordData::IncompletePropertyTable)
+                })
+        }
+        0xf043 if payload.len() == 48 => {
+            OfficeArtPropertyTable::parse(payload, 8).map(OfficeArtRecordData::PropertyTable)
+        }
+        0xf051 | 0xf08d | 0xf10d if payload.is_empty() => {
+            Some(OfficeArtRecordData::EmptyCompatibilityAtom)
+        }
+        0xf150 => SoftMakerNativeProperties::parse(payload, limits.max_entries)
+            .map(OfficeArtRecordData::SoftMakerNativeProperties),
+        0xf00d if payload.is_empty() => Some(OfficeArtRecordData::ClientMarker(
+            OfficeArtClientMarker::Textbox,
+        )),
+        0xf00d if payload.len() == 16 => Some(OfficeArtRecordData::ChildAnchor(
+            OfficeArtRect::parse(payload),
+        )),
+        0xf00f if payload.len() == 16 => Some(OfficeArtRecordData::ChildAnchor(
+            OfficeArtRect::parse(payload),
+        )),
+        0xf010 => OfficeArtClientAnchor::parse(payload).map(OfficeArtRecordData::ClientAnchor),
+        0xf011 if payload.is_empty() => Some(OfficeArtRecordData::ClientMarker(
+            OfficeArtClientMarker::Data,
+        )),
+        0xf012 if payload.len() == 24 => Some(OfficeArtRecordData::ConnectorRule(
+            OfficeArtConnectorRule::parse(payload),
+        )),
+        0xf017 if payload.len() == 8 => Some(OfficeArtRecordData::CalloutRule(
+            OfficeArtCalloutRule::parse(payload),
+        )),
+        0xf11e if payload.len() == 16 => Some(OfficeArtRecordData::SplitMenuColors([
+            u32::from_le_bytes(payload[0..4].try_into().expect("four bytes")),
+            u32::from_le_bytes(payload[4..8].try_into().expect("four bytes")),
+            u32::from_le_bytes(payload[8..12].try_into().expect("four bytes")),
+            u32::from_le_bytes(payload[12..16].try_into().expect("four bytes")),
+        ])),
+        0xf118 if payload.len() == usize::from(header.instance) * 4 => Some(
+            OfficeArtRecordData::Frit(payload.chunks_exact(4).map(OfficeArtFrit::parse).collect()),
+        ),
+        0xf01a..=0xf01c => metafile_uid_count(header.record_type, header.instance)
+            .and_then(|uid_count| {
+                OfficeArtMetafileBlip::parse(
+                    payload,
+                    uid_count,
+                    header.record_type,
+                    limits.max_allocation,
+                )
+            })
+            .map(OfficeArtRecordData::MetafileBlip),
+        0xf01d | 0xf01e | 0xf01f | 0xf029 | 0xf02a => {
+            bitmap_uid_count(header.record_type, header.instance)
+                .and_then(|uid_count| {
+                    OfficeArtBitmapBlip::parse(payload, uid_count, header.record_type)
+                })
+                .map(OfficeArtRecordData::BitmapBlip)
+        }
+        _ => None,
+    };
+    Ok(data)
+}
+
+fn metafile_uid_count(record_type: u16, instance: u16) -> Option<usize> {
+    match (record_type, instance) {
+        (0xf01a, 0x3d4) | (0xf01b, 0x216) | (0xf01c, 0x542) => Some(1),
+        (0xf01a, 0x3d5) | (0xf01b, 0x217) | (0xf01c, 0x543) => Some(2),
+        _ => None,
+    }
+}
+
+fn bitmap_uid_count(record_type: u16, instance: u16) -> Option<usize> {
+    match (record_type, instance) {
+        (0xf01d | 0xf02a, 0x46a | 0x6e2) | (0xf01e, 0x6e0) | (0xf01f, 0x7a8) | (0xf029, 0x6e4) => {
+            Some(1)
+        }
+        (0xf01d | 0xf02a, 0x46b | 0x6e3) | (0xf01e, 0x6e1) | (0xf01f, 0x7a9) | (0xf029, 0x6e5) => {
+            Some(2)
+        }
+        _ => None,
+    }
+}
+
+impl OfficeArtBitmapBlip {
+    fn parse(payload: &[u8], uid_count: usize, record_type: u16) -> Option<Self> {
+        let prefix_len = uid_count.checked_mul(16)?.checked_add(1)?;
+        let prefix = payload.get(..prefix_len)?;
+        let encoded = payload[prefix_len..].to_vec();
+        let file_data = if record_type == 0xf01f {
+            DeviceIndependentBitmap::from_packed_slice(&encoded, DibColorUsage::RgbColors)
+                .map(|bitmap| OfficeArtBitmapData::Dib {
+                    bitmap,
+                    original_encoded: encoded.clone(),
+                })
+                .unwrap_or_else(|_| OfficeArtBitmapData::Encoded(encoded))
+        } else {
+            OfficeArtBitmapData::Encoded(encoded)
+        };
+        Some(Self {
+            uid1: prefix[..16].try_into().ok()?,
+            uid2: (uid_count == 2).then(|| prefix[16..32].try_into().expect("sixteen bytes")),
+            tag: prefix[prefix_len - 1],
+            file_data,
+        })
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) -> Result<()> {
+        payload.extend_from_slice(&self.uid1);
+        if let Some(uid2) = self.uid2 {
+            payload.extend_from_slice(&uid2);
+        }
+        payload.push(self.tag);
+        match &self.file_data {
+            OfficeArtBitmapData::Dib {
+                bitmap,
+                original_encoded,
+            } => {
+                let current = bitmap
+                    .to_packed_bytes()
+                    .map_err(|error| Error::invalid(0, error.to_string()))?;
+                if &current == original_encoded {
+                    payload.extend_from_slice(original_encoded);
+                } else {
+                    payload.extend_from_slice(&current);
+                }
+            }
+            OfficeArtBitmapData::Encoded(encoded) => payload.extend_from_slice(encoded),
+        }
+        Ok(())
+    }
+}
+
+impl OfficeArtMetafileBlip {
+    fn parse(
+        payload: &[u8],
+        uid_count: usize,
+        record_type: u16,
+        max_decoded_len: usize,
+    ) -> Option<Self> {
+        let uid_len = uid_count.checked_mul(16)?;
+        let header_end = uid_len.checked_add(34)?;
+        let prefix = payload.get(..header_end)?;
+        let metafile_header = OfficeArtMetafileHeader::parse(&prefix[uid_len..header_end])?;
+        let encoded = payload[header_end..].to_vec();
+        let decoded = decode_metafile_data(&encoded, metafile_header.compression, max_decoded_len);
+        let file_data = match (record_type, decoded) {
+            (0xf01a, Some(decoded)) => EmfMetafile::from_bytes(&decoded)
+                .map(|metafile| OfficeArtMetafileData::Emf {
+                    metafile,
+                    original_encoded: encoded.clone(),
+                })
+                .unwrap_or_else(|_| OfficeArtMetafileData::Opaque {
+                    reason: OfficeArtMetafileOpaqueReason::InvalidEmf,
+                    decoded: Some(decoded),
+                    original_encoded: encoded.clone(),
+                }),
+            (0xf01b, Some(decoded)) => WmfMetafile::from_bytes(&decoded)
+                .map(|metafile| OfficeArtMetafileData::Wmf {
+                    metafile,
+                    original_encoded: encoded.clone(),
+                })
+                .unwrap_or_else(|_| OfficeArtMetafileData::Opaque {
+                    reason: OfficeArtMetafileOpaqueReason::InvalidWmf,
+                    decoded: Some(decoded),
+                    original_encoded: encoded.clone(),
+                }),
+            (0xf01c, decoded @ Some(_)) => OfficeArtMetafileData::Opaque {
+                reason: OfficeArtMetafileOpaqueReason::Pict,
+                decoded,
+                original_encoded: encoded,
+            },
+            (_, None) => OfficeArtMetafileData::Opaque {
+                reason: match metafile_header.compression {
+                    0x00 | 0xfe => OfficeArtMetafileOpaqueReason::DecodeFailed,
+                    value => OfficeArtMetafileOpaqueReason::UnsupportedCompression(value),
+                },
+                decoded: None,
+                original_encoded: encoded,
+            },
+            _ => OfficeArtMetafileData::Opaque {
+                reason: OfficeArtMetafileOpaqueReason::DecodeFailed,
+                decoded: None,
+                original_encoded: encoded,
+            },
+        };
+        Some(Self {
+            uid1: prefix[..16].try_into().ok()?,
+            uid2: (uid_count == 2).then(|| prefix[16..32].try_into().expect("sixteen bytes")),
+            metafile_header,
+            file_data,
+        })
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) -> Result<()> {
+        payload.extend_from_slice(&self.uid1);
+        if let Some(uid2) = self.uid2 {
+            payload.extend_from_slice(&uid2);
+        }
+        self.metafile_header.write(payload);
+        match &self.file_data {
+            OfficeArtMetafileData::Emf {
+                metafile,
+                original_encoded,
+            } => write_typed_metafile(
+                payload,
+                &metafile
+                    .to_bytes()
+                    .map_err(|error| Error::invalid(0, error.to_string()))?,
+                original_encoded,
+                self.metafile_header.compression,
+            )?,
+            OfficeArtMetafileData::Wmf {
+                metafile,
+                original_encoded,
+            } => write_typed_metafile(
+                payload,
+                &metafile
+                    .to_bytes()
+                    .map_err(|error| Error::invalid(0, error.to_string()))?,
+                original_encoded,
+                self.metafile_header.compression,
+            )?,
+            OfficeArtMetafileData::Opaque {
+                original_encoded, ..
+            } => payload.extend_from_slice(original_encoded),
+        }
+        Ok(())
+    }
+}
+
+fn decode_metafile_data(
+    encoded: &[u8],
+    compression: u8,
+    max_decoded_len: usize,
+) -> Option<Vec<u8>> {
+    match compression {
+        0x00 => {
+            let mut decoded = Vec::new();
+            let read_limit = u64::try_from(max_decoded_len).ok()?.checked_add(1)?;
+            ZlibDecoder::new(encoded)
+                .take(read_limit)
+                .read_to_end(&mut decoded)
+                .ok()?;
+            (decoded.len() <= max_decoded_len).then_some(decoded)
+        }
+        0xfe if encoded.len() <= max_decoded_len => Some(encoded.to_vec()),
+        _ => None,
+    }
+}
+
+fn write_typed_metafile(
+    payload: &mut Vec<u8>,
+    current_decoded: &[u8],
+    original_encoded: &[u8],
+    compression: u8,
+) -> Result<()> {
+    if decode_metafile_data(original_encoded, compression, current_decoded.len()).as_deref()
+        == Some(current_decoded)
+    {
+        payload.extend_from_slice(original_encoded);
+        return Ok(());
+    }
+    match compression {
+        0x00 => {
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(current_decoded)?;
+            payload.extend_from_slice(&encoder.finish()?);
+            Ok(())
+        }
+        0xfe => {
+            payload.extend_from_slice(current_decoded);
+            Ok(())
+        }
+        _ => Err(Error::invalid(
+            0,
+            "cannot encode modified OfficeArt metafile with unknown compression",
+        )),
+    }
+}
+
+impl OfficeArtMetafileHeader {
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 34 {
+            return None;
+        }
+        let i32_at = |offset| i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let u32_at = |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        Some(Self {
+            uncompressed_size: u32_at(0),
+            bounds: OfficeArtRect {
+                left: i32_at(4),
+                top: i32_at(8),
+                right: i32_at(12),
+                bottom: i32_at(16),
+            },
+            render_size: OfficeArtPoint {
+                x: i32_at(20),
+                y: i32_at(24),
+            },
+            saved_size: u32_at(28),
+            compression: bytes[32],
+            filter: bytes[33],
+        })
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) {
+        payload.extend_from_slice(&self.uncompressed_size.to_le_bytes());
+        payload.extend_from_slice(&self.bounds.left.to_le_bytes());
+        payload.extend_from_slice(&self.bounds.top.to_le_bytes());
+        payload.extend_from_slice(&self.bounds.right.to_le_bytes());
+        payload.extend_from_slice(&self.bounds.bottom.to_le_bytes());
+        payload.extend_from_slice(&self.render_size.x.to_le_bytes());
+        payload.extend_from_slice(&self.render_size.y.to_le_bytes());
+        payload.extend_from_slice(&self.saved_size.to_le_bytes());
+        payload.push(self.compression);
+        payload.push(self.filter);
+    }
+}
+
+impl OfficeArtFbse {
+    fn encoded_len(&self) -> usize {
+        36usize
+            .saturating_add(self.name_data.len().saturating_mul(2))
+            .saturating_add(self.embedded_blip.as_deref().map_or(0, |blip| {
+                HEADER_LEN.saturating_add(blip.header.declared_length as usize)
+            }))
+            .saturating_add(self.trailing.len())
+    }
+
+    fn parse(
+        payload: &[u8],
+        depth: usize,
+        record_count: &mut usize,
+        limits: Limits,
+    ) -> Result<Option<Self>> {
+        let fixed = match payload.get(..36) {
+            Some(fixed) => fixed,
+            None => return Ok(None),
+        };
+        let declared_name_length = fixed[33];
+        if declared_name_length % 2 != 0 {
+            return Ok(None);
+        }
+        let name_end = match 36usize.checked_add(usize::from(declared_name_length)) {
+            Some(end) if end <= payload.len() => end,
+            _ => return Ok(None),
+        };
+        let name_data = payload[36..name_end]
+            .chunks_exact(2)
+            .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
+            .collect::<Vec<_>>();
+        let remainder = &payload[name_end..];
+        let (embedded_blip, trailing) = if is_blip_record_prefix(remainder) {
+            let mut nested_count = *record_count;
+            match parse_one_record(remainder, depth + 1, &mut nested_count, limits) {
+                Ok((record, consumed)) => {
+                    *record_count = nested_count;
+                    (Some(Box::new(record)), remainder[consumed..].to_vec())
+                }
+                Err(_) => (None, remainder.to_vec()),
+            }
+        } else {
+            (None, remainder.to_vec())
+        };
+        Ok(Some(Self {
+            win32_blip_type: fixed[0],
+            macos_blip_type: fixed[1],
+            uid: fixed[2..18].try_into().expect("sixteen bytes"),
+            tag: u16::from_le_bytes(fixed[18..20].try_into().expect("two bytes")),
+            declared_blip_size: u32::from_le_bytes(fixed[20..24].try_into().expect("four bytes")),
+            reference_count: u32::from_le_bytes(fixed[24..28].try_into().expect("four bytes")),
+            delay_offset: u32::from_le_bytes(fixed[28..32].try_into().expect("four bytes")),
+            unused1: fixed[32],
+            declared_name_length,
+            unused2: fixed[34],
+            unused3: fixed[35],
+            name_data,
+            embedded_blip,
+            trailing,
+        }))
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) -> Result<()> {
+        let name_length = self
+            .name_data
+            .len()
+            .checked_mul(2)
+            .ok_or_else(|| Error::Limit("OfficeArt FBSE name length overflow".into()))?;
+        if usize::from(self.declared_name_length) != name_length {
+            return Err(Error::invalid(0, "OfficeArt FBSE name length mismatch"));
+        }
+        payload.push(self.win32_blip_type);
+        payload.push(self.macos_blip_type);
+        payload.extend_from_slice(&self.uid);
+        payload.extend_from_slice(&self.tag.to_le_bytes());
+        payload.extend_from_slice(&self.declared_blip_size.to_le_bytes());
+        payload.extend_from_slice(&self.reference_count.to_le_bytes());
+        payload.extend_from_slice(&self.delay_offset.to_le_bytes());
+        payload.push(self.unused1);
+        payload.push(self.declared_name_length);
+        payload.push(self.unused2);
+        payload.push(self.unused3);
+        for unit in &self.name_data {
+            payload.extend_from_slice(&unit.to_le_bytes());
+        }
+        if let Some(blip) = &self.embedded_blip {
+            blip.write(payload)?;
+        }
+        payload.extend_from_slice(&self.trailing);
+        Ok(())
+    }
+}
+
+fn is_blip_record_prefix(bytes: &[u8]) -> bool {
+    bytes
+        .get(2..4)
+        .map(|record_type| {
+            let record_type = u16::from_le_bytes([record_type[0], record_type[1]]);
+            (0xf018..=0xf117).contains(&record_type)
+        })
+        .unwrap_or(false)
+}
+
+impl OfficeArtDrawing {
+    fn parse(payload: &[u8]) -> Self {
+        Self {
+            shape_count: u32::from_le_bytes(payload[0..4].try_into().expect("four bytes")),
+            current_shape_id: u32::from_le_bytes(payload[4..8].try_into().expect("four bytes")),
+        }
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) {
+        payload.extend_from_slice(&self.shape_count.to_le_bytes());
+        payload.extend_from_slice(&self.current_shape_id.to_le_bytes());
+    }
+}
+
+impl OfficeArtRect {
+    fn parse(payload: &[u8]) -> Self {
+        Self {
+            left: i32::from_le_bytes(payload[0..4].try_into().expect("four bytes")),
+            top: i32::from_le_bytes(payload[4..8].try_into().expect("four bytes")),
+            right: i32::from_le_bytes(payload[8..12].try_into().expect("four bytes")),
+            bottom: i32::from_le_bytes(payload[12..16].try_into().expect("four bytes")),
+        }
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) {
+        payload.extend_from_slice(&self.left.to_le_bytes());
+        payload.extend_from_slice(&self.top.to_le_bytes());
+        payload.extend_from_slice(&self.right.to_le_bytes());
+        payload.extend_from_slice(&self.bottom.to_le_bytes());
+    }
+}
+
+impl OfficeArtShape {
+    fn parse(payload: &[u8]) -> Self {
+        Self {
+            shape_id: u32::from_le_bytes(payload[0..4].try_into().expect("four bytes")),
+            flags: OfficeArtShapeFlags::from_bits_retain(u32::from_le_bytes(
+                payload[4..8].try_into().expect("four bytes"),
+            )),
+        }
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) {
+        payload.extend_from_slice(&self.shape_id.to_le_bytes());
+        payload.extend_from_slice(&self.flags.bits().to_le_bytes());
+    }
+}
+
+impl OfficeArtClientAnchor {
+    fn parse(payload: &[u8]) -> Option<Self> {
+        match payload.len() {
+            18 => Some(Self::Words18 {
+                flags: u16::from_le_bytes(payload[0..2].try_into().expect("two bytes")),
+                coordinates: std::array::from_fn(|index| {
+                    let offset = 2 + index * 2;
+                    u16::from_le_bytes([payload[offset], payload[offset + 1]])
+                }),
+            }),
+            8 => Some(Self::HeaderFooter {
+                width: i32::from_le_bytes(payload[0..4].try_into().expect("four bytes")),
+                height: i32::from_le_bytes(payload[4..8].try_into().expect("four bytes")),
+            }),
+            _ => None,
+        }
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) {
+        match self {
+            Self::Words18 { flags, coordinates } => {
+                payload.extend_from_slice(&flags.to_le_bytes());
+                for coordinate in coordinates {
+                    payload.extend_from_slice(&coordinate.to_le_bytes());
+                }
+            }
+            Self::HeaderFooter { width, height } => {
+                payload.extend_from_slice(&width.to_le_bytes());
+                payload.extend_from_slice(&height.to_le_bytes());
+            }
+        }
+    }
+}
+
+impl OfficeArtConnectorRule {
+    fn parse(payload: &[u8]) -> Self {
+        let field = |index: usize| {
+            let offset = index * 4;
+            u32::from_le_bytes(payload[offset..offset + 4].try_into().expect("four bytes"))
+        };
+        Self {
+            rule_id: field(0),
+            start_shape_id: field(1),
+            end_shape_id: field(2),
+            connector_shape_id: field(3),
+            start_connection_site: field(4),
+            end_connection_site: field(5),
+        }
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) {
+        for value in [
+            self.rule_id,
+            self.start_shape_id,
+            self.end_shape_id,
+            self.connector_shape_id,
+            self.start_connection_site,
+            self.end_connection_site,
+        ] {
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+impl OfficeArtCalloutRule {
+    fn parse(payload: &[u8]) -> Self {
+        Self {
+            rule_id: u32::from_le_bytes(payload[0..4].try_into().expect("four bytes")),
+            shape_id: u32::from_le_bytes(payload[4..8].try_into().expect("four bytes")),
+        }
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) {
+        payload.extend_from_slice(&self.rule_id.to_le_bytes());
+        payload.extend_from_slice(&self.shape_id.to_le_bytes());
+    }
+}
+
+impl OfficeArtFrit {
+    fn parse(payload: &[u8]) -> Self {
+        Self {
+            new_group_id: u16::from_le_bytes(payload[0..2].try_into().expect("two bytes")),
+            old_group_id: u16::from_le_bytes(payload[2..4].try_into().expect("two bytes")),
+        }
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) {
+        payload.extend_from_slice(&self.new_group_id.to_le_bytes());
+        payload.extend_from_slice(&self.old_group_id.to_le_bytes());
+    }
+}
+
+impl SoftMakerNativeProperties {
+    fn parse(payload: &[u8], max_entries: usize) -> Option<Self> {
+        let mut cursor = 0usize;
+        let mut properties = Vec::new();
+        while cursor < payload.len() {
+            if properties.len() >= max_entries {
+                return None;
+            }
+            let header = payload.get(cursor..cursor.checked_add(8)?)?;
+            let declared_length = u32::from_le_bytes(header[4..8].try_into().ok()?);
+            let length = usize::try_from(declared_length).ok()?;
+            let data_start = cursor.checked_add(8)?;
+            let data_end = data_start.checked_add(length)?;
+            let raw = payload.get(data_start..data_end)?;
+            let selector = u16::from_le_bytes(header[0..2].try_into().ok()?);
+            let reserved = u16::from_le_bytes(header[2..4].try_into().ok()?);
+            properties.push(SoftMakerNativeProperty {
+                selector,
+                reserved,
+                declared_length,
+                data: SoftMakerNativePropertyData::parse(selector, reserved, raw),
+            });
+            cursor = data_end;
+        }
+        Some(Self { properties })
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) -> Result<()> {
+        for property in &self.properties {
+            let encoded = property.data.to_bytes();
+            if usize::try_from(property.declared_length).ok() != Some(encoded.len()) {
+                return Err(Error::invalid(
+                    0,
+                    "SoftMaker native property length does not match payload",
+                ));
+            }
+            payload.extend_from_slice(&property.selector.to_le_bytes());
+            payload.extend_from_slice(&property.reserved.to_le_bytes());
+            payload.extend_from_slice(&property.declared_length.to_le_bytes());
+            payload.extend_from_slice(&encoded);
+        }
+        Ok(())
+    }
+}
+
+impl SoftMakerNativePropertyData {
+    fn parse(selector: u16, reserved: u16, payload: &[u8]) -> Self {
+        fn words<const N: usize>(payload: &[u8]) -> [u32; N] {
+            std::array::from_fn(|index| {
+                let start = index * 4;
+                u32::from_le_bytes(
+                    payload[start..start + 4]
+                        .try_into()
+                        .expect("validated fixed-size native property"),
+                )
+            })
+        }
+        match (selector, reserved, payload.len()) {
+            (0, 0, 37) => Self::Selector0 {
+                leading: payload[0],
+                words: words(&payload[1..]),
+            },
+            (1, 0, 80) => Self::Selector1 {
+                double_bits: std::array::from_fn(|index| {
+                    let start = index * 8;
+                    u64::from_le_bytes(
+                        payload[start..start + 8]
+                            .try_into()
+                            .expect("validated fixed-size native property"),
+                    )
+                }),
+            },
+            (2, 0, 140) => Self::Selector2 {
+                words: words(payload),
+            },
+            (3, 0, 60) => Self::Selector3 {
+                words: words(payload),
+            },
+            (4, 0, 96) => Self::Selector4 {
+                words: words(payload),
+            },
+            (6, 0, 81) => Self::Selector6 {
+                font_name: std::array::from_fn(|index| {
+                    let start = index * 2;
+                    u16::from_le_bytes(
+                        payload[start..start + 2]
+                            .try_into()
+                            .expect("validated fixed-size native property"),
+                    )
+                }),
+                words: words(&payload[12..80]),
+                trailing: payload[80],
+            },
+            (8, 0, 20) => Self::Selector8 {
+                words: words(payload),
+            },
+            (9, 0, 4) => Self::Selector9(u32::from_le_bytes(
+                payload
+                    .try_into()
+                    .expect("validated fixed-size native property"),
+            )),
+            (12, 0, 16) => Self::Selector12 {
+                words: words(payload),
+            },
+            _ => Self::Unknown(payload.to_vec()),
+        }
+    }
+
+    pub fn encoded_len(&self) -> usize {
+        match self {
+            Self::Selector0 { .. } => 37,
+            Self::Selector1 { .. } => 80,
+            Self::Selector2 { .. } => 140,
+            Self::Selector3 { .. } => 60,
+            Self::Selector4 { .. } => 96,
+            Self::Selector6 { .. } => 81,
+            Self::Selector8 { .. } => 20,
+            Self::Selector9(_) => 4,
+            Self::Selector12 { .. } => 16,
+            Self::Unknown(payload) => payload.len(),
+        }
+    }
+
+    pub fn unparsed_byte_count(&self) -> usize {
+        match self {
+            Self::Unknown(payload) => payload.len(),
+            _ => 0,
+        }
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        fn extend_words<const N: usize>(bytes: &mut Vec<u8>, words: &[u32; N]) {
+            for word in words {
+                bytes.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        let mut bytes = Vec::with_capacity(self.encoded_len());
+        match self {
+            Self::Selector0 { leading, words } => {
+                bytes.push(*leading);
+                extend_words(&mut bytes, words);
+            }
+            Self::Selector1 { double_bits } => {
+                for value in double_bits {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            Self::Selector2 { words } => extend_words(&mut bytes, words),
+            Self::Selector3 { words } => extend_words(&mut bytes, words),
+            Self::Selector4 { words } => extend_words(&mut bytes, words),
+            Self::Selector6 {
+                font_name,
+                words,
+                trailing,
+            } => {
+                for character in font_name {
+                    bytes.extend_from_slice(&character.to_le_bytes());
+                }
+                extend_words(&mut bytes, words);
+                bytes.push(*trailing);
+            }
+            Self::Selector8 { words } => extend_words(&mut bytes, words),
+            Self::Selector9(value) => bytes.extend_from_slice(&value.to_le_bytes()),
+            Self::Selector12 { words } => extend_words(&mut bytes, words),
+            Self::Unknown(payload) => bytes.extend_from_slice(payload),
+        }
+        bytes
+    }
+}
+
+impl OfficeArtDggBlock {
+    fn parse(payload: &[u8]) -> Option<Self> {
+        if payload.len() < 16 || !(payload.len() - 16).is_multiple_of(8) {
+            return None;
+        }
+        let declared_cluster_count = u32::from_le_bytes(payload[4..8].try_into().ok()?);
+        let cluster_count = usize::try_from(declared_cluster_count.checked_sub(1)?).ok()?;
+        if payload.len() != 16usize.checked_add(cluster_count.checked_mul(8)?)? {
+            return None;
+        }
+        let clusters = payload[16..]
+            .chunks_exact(8)
+            .map(|cluster| OfficeArtIdCluster {
+                drawing_id: u32::from_le_bytes(cluster[0..4].try_into().expect("four bytes")),
+                current_shape_id: u32::from_le_bytes(cluster[4..8].try_into().expect("four bytes")),
+            })
+            .collect::<Vec<_>>();
+        Some(Self {
+            maximum_shape_id: u32::from_le_bytes(payload[0..4].try_into().ok()?),
+            declared_cluster_count,
+            saved_shape_count: u32::from_le_bytes(payload[8..12].try_into().ok()?),
+            saved_drawing_count: u32::from_le_bytes(payload[12..16].try_into().ok()?),
+            clusters,
+        })
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) -> Result<()> {
+        if usize::try_from(
+            self.declared_cluster_count
+                .checked_sub(1)
+                .unwrap_or(u32::MAX),
+        )
+        .ok()
+            != Some(self.clusters.len())
+        {
+            return Err(Error::invalid(0, "OfficeArt FDGG cluster count mismatch"));
+        }
+        payload.extend_from_slice(&self.maximum_shape_id.to_le_bytes());
+        payload.extend_from_slice(&self.declared_cluster_count.to_le_bytes());
+        payload.extend_from_slice(&self.saved_shape_count.to_le_bytes());
+        payload.extend_from_slice(&self.saved_drawing_count.to_le_bytes());
+        for cluster in &self.clusters {
+            payload.extend_from_slice(&cluster.drawing_id.to_le_bytes());
+            payload.extend_from_slice(&cluster.current_shape_id.to_le_bytes());
+        }
+        Ok(())
+    }
+}
+
+impl OfficeArtPropertyTable {
+    fn parse(payload: &[u8], property_count: usize) -> Option<Self> {
+        let fixed_len = property_count.checked_mul(6)?;
+        if fixed_len > payload.len() {
+            return None;
+        }
+        let mut properties = Vec::with_capacity(property_count);
+        for entry in payload[..fixed_len].chunks_exact(6) {
+            let opid = u16::from_le_bytes([entry[0], entry[1]]);
+            let op = u32::from_le_bytes(entry[2..6].try_into().expect("four bytes"));
+            properties.push(OfficeArtProperty {
+                property_id: opid & 0x3fff,
+                is_blip_id: opid & 0x4000 != 0,
+                value: if opid & 0x8000 != 0 {
+                    OfficeArtPropertyValue::Complex {
+                        declared_length: op,
+                        data: Vec::new(),
+                    }
+                } else {
+                    OfficeArtPropertyValue::Simple(op)
+                },
+            });
+        }
+        let mut cursor = fixed_len;
+        for property in &mut properties {
+            if let OfficeArtPropertyValue::Complex {
+                declared_length,
+                data,
+            } = &mut property.value
+            {
+                let length = usize::try_from(*declared_length).ok()?;
+                let end = cursor.checked_add(length)?;
+                *data = payload.get(cursor..end)?.to_vec();
+                cursor = end;
+            }
+        }
+        Some(Self {
+            properties,
+            trailing: payload[cursor..].to_vec(),
+        })
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) -> Result<()> {
+        for property in &self.properties {
+            let (complex, op) = match &property.value {
+                OfficeArtPropertyValue::Simple(value) => (false, *value),
+                OfficeArtPropertyValue::Complex {
+                    declared_length,
+                    data,
+                } => {
+                    if usize::try_from(*declared_length).ok() != Some(data.len()) {
+                        return Err(Error::invalid(
+                            0,
+                            "OfficeArt complex property length mismatch",
+                        ));
+                    }
+                    (true, *declared_length)
+                }
+            };
+            if property.property_id > 0x3fff {
+                return Err(Error::invalid(0, "OfficeArt property id exceeds 14 bits"));
+            }
+            let opid = property.property_id
+                | if property.is_blip_id { 0x4000 } else { 0 }
+                | if complex { 0x8000 } else { 0 };
+            payload.extend_from_slice(&opid.to_le_bytes());
+            payload.extend_from_slice(&op.to_le_bytes());
+        }
+        for property in &self.properties {
+            if let OfficeArtPropertyValue::Complex { data, .. } = &property.value {
+                payload.extend_from_slice(data);
+            }
+        }
+        payload.extend_from_slice(&self.trailing);
+        Ok(())
+    }
+}
+
+impl OfficeArtIncompletePropertyTable {
+    pub fn available_complex_len(&self) -> usize {
+        self.complex_fragments
+            .iter()
+            .map(|fragment| fragment.data.encoded_len())
+            .sum::<usize>()
+            + self.trailing_data.len()
+    }
+
+    pub fn unparsed_complex_len(&self) -> usize {
+        self.complex_fragments
+            .iter()
+            .filter(|fragment| !fragment.is_complete)
+            .map(|fragment| fragment.data.unparsed_byte_count())
+            .sum::<usize>()
+            + self.trailing_data.len()
+    }
+
+    fn split_complex_data(
+        entries: &[OfficeArtPropertyEntry],
+        payload: &[u8],
+    ) -> (Vec<OfficeArtComplexPropertyFragment>, Vec<u8>) {
+        let mut cursor = 0usize;
+        let mut fragments = Vec::new();
+        for (entry_index, entry) in entries.iter().enumerate() {
+            if !entry.is_complex {
+                continue;
+            }
+            let declared_length = entry.value_or_declared_length;
+            let declared = usize::try_from(declared_length).unwrap_or(usize::MAX);
+            let available = declared.min(payload.len().saturating_sub(cursor));
+            let end = cursor + available;
+            let raw = &payload[cursor..end];
+            let data = if entry.property_id == 326 && available == 50 && available < declared {
+                OfficeArtComplexPropertyData::Words12AndU16 {
+                    words: std::array::from_fn(|index| {
+                        let start = index * 4;
+                        u32::from_le_bytes(
+                            raw[start..start + 4]
+                                .try_into()
+                                .expect("validated fixed complex property"),
+                        )
+                    }),
+                    trailing: u16::from_le_bytes(
+                        raw[48..50]
+                            .try_into()
+                            .expect("validated fixed complex property"),
+                    ),
+                }
+            } else {
+                OfficeArtComplexPropertyData::Bytes(raw.to_vec())
+            };
+            fragments.push(OfficeArtComplexPropertyFragment {
+                entry_index,
+                property_id: entry.property_id,
+                declared_length,
+                data,
+                is_complete: available == declared,
+            });
+            cursor = end;
+            if available < declared {
+                return (fragments, Vec::new());
+            }
+        }
+        (fragments, payload[cursor..].to_vec())
+    }
+
+    fn parse(payload: &[u8], property_count: usize) -> Option<Self> {
+        let fixed_len = property_count.checked_mul(6)?;
+        let fixed = payload.get(..fixed_len)?;
+        let entries = fixed
+            .chunks_exact(6)
+            .map(|entry| {
+                let opid = u16::from_le_bytes([entry[0], entry[1]]);
+                OfficeArtPropertyEntry {
+                    property_id: opid & 0x3fff,
+                    is_blip_id: opid & 0x4000 != 0,
+                    is_complex: opid & 0x8000 != 0,
+                    value_or_declared_length: u32::from_le_bytes(
+                        entry[2..6].try_into().expect("four bytes"),
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        let (complex_fragments, trailing_data) =
+            Self::split_complex_data(&entries, &payload[fixed_len..]);
+        Some(Self {
+            entries,
+            incomplete_fixed_entry: OfficeArtIncompletePropertyEntry::None,
+            complex_fragments,
+            trailing_data,
+            recovered_trailing: None,
+        })
+    }
+
+    fn parse_partial(payload: &[u8], property_count: usize) -> Self {
+        let available_entry_count = (payload.len() / 6).min(property_count);
+        let complete_fixed_len = available_entry_count * 6;
+        let entries = payload[..complete_fixed_len]
+            .chunks_exact(6)
+            .map(|entry| {
+                let opid = u16::from_le_bytes([entry[0], entry[1]]);
+                OfficeArtPropertyEntry {
+                    property_id: opid & 0x3fff,
+                    is_blip_id: opid & 0x4000 != 0,
+                    is_complex: opid & 0x8000 != 0,
+                    value_or_declared_length: u32::from_le_bytes(
+                        entry[2..6].try_into().expect("four bytes"),
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        let declared_fixed_len = property_count.saturating_mul(6);
+        let incomplete_end = payload.len().min(declared_fixed_len);
+        let (complex_fragments, trailing_data) =
+            Self::split_complex_data(&entries, &payload[incomplete_end..]);
+        Self {
+            entries,
+            incomplete_fixed_entry: OfficeArtIncompletePropertyEntry::parse(
+                &payload[complete_fixed_len..incomplete_end],
+            ),
+            complex_fragments,
+            trailing_data,
+            recovered_trailing: None,
+        }
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) -> Result<()> {
+        for entry in &self.entries {
+            let opid = entry.property_id
+                | if entry.is_blip_id { 0x4000 } else { 0 }
+                | if entry.is_complex { 0x8000 } else { 0 };
+            payload.extend_from_slice(&opid.to_le_bytes());
+            payload.extend_from_slice(&entry.value_or_declared_length.to_le_bytes());
+        }
+        self.incomplete_fixed_entry.write(payload);
+        for fragment in &self.complex_fragments {
+            fragment.data.write(payload);
+        }
+        payload.extend_from_slice(&self.trailing_data);
+        if let Some(sequence) = &self.recovered_trailing {
+            payload.extend_from_slice(&sequence.to_bytes()?);
+        }
+        Ok(())
+    }
+}
+
+impl OfficeArtRecoveredPrefix {
+    pub fn encoded_len(&self) -> usize {
+        match self {
+            Self::Words2(_) => 8,
+            Self::ClientAnchor(_) => 18,
+        }
+    }
+
+    pub fn unparsed_byte_count(&self) -> usize {
+        match self {
+            Self::Words2(_) => 0,
+            Self::ClientAnchor(_) => 0,
+        }
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) {
+        match self {
+            Self::Words2(words) => {
+                for word in words {
+                    payload.extend_from_slice(&word.to_le_bytes());
+                }
+            }
+            Self::ClientAnchor(anchor) => anchor.write(payload),
+        }
+    }
+}
+
+impl OfficeArtComplexPropertyData {
+    pub fn encoded_len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::Words12AndU16 { .. } => 50,
+        }
+    }
+
+    pub fn unparsed_byte_count(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::Words12AndU16 { .. } => 0,
+        }
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) {
+        match self {
+            Self::Bytes(bytes) => payload.extend_from_slice(bytes),
+            Self::Words12AndU16 { words, trailing } => {
+                for word in words {
+                    payload.extend_from_slice(&word.to_le_bytes());
+                }
+                payload.extend_from_slice(&trailing.to_le_bytes());
+            }
+        }
+    }
+}
+
+impl OfficeArtIncompletePropertyEntry {
+    fn parse(bytes: &[u8]) -> Self {
+        match bytes {
+            [] => Self::None,
+            [opid0, opid1, value0, value1] => {
+                let opid = u16::from_le_bytes([*opid0, *opid1]);
+                Self::LowWord {
+                    property_id: opid & 0x3fff,
+                    is_blip_id: opid & 0x4000 != 0,
+                    is_complex: opid & 0x8000 != 0,
+                    value_low: u16::from_le_bytes([*value0, *value1]),
+                }
+            }
+            _ => Self::Other(bytes.to_vec()),
+        }
+    }
+
+    pub fn encoded_len(&self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::LowWord { .. } => 4,
+            Self::Other(bytes) => bytes.len(),
+        }
+    }
+
+    pub fn unparsed_byte_count(&self) -> usize {
+        match self {
+            Self::None | Self::LowWord { .. } => 0,
+            Self::Other(bytes) => bytes.len(),
+        }
+    }
+
+    fn write(&self, payload: &mut Vec<u8>) {
+        match self {
+            Self::None => {}
+            Self::LowWord {
+                property_id,
+                is_blip_id,
+                is_complex,
+                value_low,
+            } => {
+                let opid = *property_id
+                    | if *is_blip_id { 0x4000 } else { 0 }
+                    | if *is_complex { 0x8000 } else { 0 };
+                payload.extend_from_slice(&opid.to_le_bytes());
+                payload.extend_from_slice(&value_low.to_le_bytes());
+            }
+            Self::Other(bytes) => payload.extend_from_slice(bytes),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_container_and_atom_round_trip() {
+        let bytes = [
+            0x0f, 0x00, 0x00, 0xf0, 0x0b, 0, 0, 0, 0x12, 0x00, 0x08, 0xf0, 0x03, 0, 0, 0, 1, 2, 3,
+        ];
+        let parsed = OfficeArtStream::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.records.len(), 1);
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn known_container_with_atom_recver_keeps_typed_children() {
+        let bytes = [
+            0x00, 0x00, 0x02, 0xf0, 0x10, 0, 0, 0, 0x10, 0x00, 0x08, 0xf0, 0x08, 0, 0, 0, 3, 0, 0,
+            0, 2, 4, 0, 0,
+        ];
+        let parsed = OfficeArtStream::from_bytes(&bytes).unwrap();
+        let OfficeArtRecordData::CompatibilityContainer(children) = &parsed.records[0].data else {
+            panic!("expected a compatibility container");
+        };
+        assert!(matches!(
+            children.as_slice(),
+            [OfficeArtRecord {
+                data: OfficeArtRecordData::Drawing(_),
+                ..
+            }]
+        ));
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn damaged_record_ids_keep_property_table_and_anchors_typed() {
+        let property_payload = [
+            0xbf, 0x00, 0x08, 0x00, 0x08, 0x00, 0x44, 0x01, 0x04, 0x00, 0x00, 0x00, 0x7f, 0x01,
+            0x00, 0x00, 0x01, 0x00, 0xbf, 0x01, 0x00, 0x00, 0x11, 0x00, 0xc0, 0x01, 0x40, 0x00,
+            0x00, 0x08, 0xd1, 0x01, 0x01, 0x00, 0x00, 0x00, 0xff, 0x01, 0x10, 0x00, 0x10, 0x00,
+            0xbf, 0x03, 0x00, 0x00, 0x08, 0x00,
+        ];
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0100u16.to_le_bytes());
+        bytes.extend_from_slice(&0xf043u16.to_le_bytes());
+        bytes.extend_from_slice(&48u32.to_le_bytes());
+        bytes.extend_from_slice(&property_payload);
+        bytes.extend_from_slice(&0x0001u16.to_le_bytes());
+        bytes.extend_from_slice(&0xf0aau16.to_le_bytes());
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        for coordinate in [5904i32, 576, 6552, 3888] {
+            bytes.extend_from_slice(&coordinate.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0x002du16.to_le_bytes());
+        bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        for coordinate in [5904i32, 3888, 6048, 3888] {
+            bytes.extend_from_slice(&coordinate.to_le_bytes());
+        }
+
+        let parsed = OfficeArtStream::from_bytes(&bytes).unwrap();
+        assert!(matches!(
+            &parsed.records[0].data,
+            OfficeArtRecordData::PropertyTable(table) if table.properties.len() == 8
+        ));
+        assert!(matches!(
+            parsed.records[1].data,
+            OfficeArtRecordData::ChildAnchor(_)
+        ));
+        assert!(matches!(
+            parsed.records[2].data,
+            OfficeArtRecordData::ChildAnchor(_)
+        ));
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn softmaker_native_properties_have_bounded_static_subrecords() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&9u16.to_le_bytes());
+        payload.extend_from_slice(&0u16.to_le_bytes());
+        payload.extend_from_slice(&4u32.to_le_bytes());
+        payload.extend_from_slice(&0x1234_5678u32.to_le_bytes());
+        payload.extend_from_slice(&12u16.to_le_bytes());
+        payload.extend_from_slice(&0u16.to_le_bytes());
+        payload.extend_from_slice(&16u32.to_le_bytes());
+        for word in [1u32, 2, 3, 4] {
+            payload.extend_from_slice(&word.to_le_bytes());
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0040u16.to_le_bytes());
+        bytes.extend_from_slice(&0xf150u16.to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+
+        let parsed = OfficeArtStream::from_bytes(&bytes).unwrap();
+        let OfficeArtRecordData::SoftMakerNativeProperties(value) = &parsed.records[0].data else {
+            panic!("expected SoftMaker native properties");
+        };
+        assert!(matches!(
+            value.properties[0].data,
+            SoftMakerNativePropertyData::Selector9(0x1234_5678)
+        ));
+        assert!(matches!(
+            value.properties[1].data,
+            SoftMakerNativePropertyData::Selector12 {
+                words: [1, 2, 3, 4]
+            }
+        ));
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn damaged_fbse_id_and_empty_marker_are_static() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0002u16.to_le_bytes());
+        bytes.extend_from_slice(&0xe007u16.to_le_bytes());
+        bytes.extend_from_slice(&36u32.to_le_bytes());
+        let mut fbse = [0u8; 36];
+        fbse[18] = 0xff;
+        bytes.extend_from_slice(&fbse);
+        bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+        bytes.extend_from_slice(&0xf08du16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        let parsed = OfficeArtStream::from_bytes(&bytes).unwrap();
+        assert!(matches!(
+            parsed.records[0].data,
+            OfficeArtRecordData::Fbse(OfficeArtFbse { tag: 0x00ff, .. })
+        ));
+        assert!(matches!(
+            parsed.records[1].data,
+            OfficeArtRecordData::EmptyCompatibilityAtom
+        ));
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn rejects_container_garbage_and_truncated_atoms() {
+        let container = [0x0f, 0, 0, 0xf0, 1, 0, 0, 0, 0];
+        assert!(OfficeArtStream::from_bytes(&container).is_err());
+        let atom = [0, 0, 8, 0xf0, 4, 0, 0, 0, 1];
+        assert!(OfficeArtStream::from_bytes(&atom).is_err());
+    }
+
+    #[test]
+    fn partial_tree_preserves_typed_prefix_and_recursive_truncation() {
+        let bytes = [
+            0x0f, 0x00, 0x02, 0xf0, 40, 0, 0, 0, 0x10, 0x00, 0x08, 0xf0, 8, 0, 0, 0, 3, 0, 0, 0, 2,
+            4, 0, 0, 0x0f, 0x00, 0x03, 0xf0, 16, 0, 0, 0, 1, 2, 3, 4,
+        ];
+        assert!(OfficeArtStream::from_bytes(&bytes).is_err());
+        let partial = OfficeArtPartialStream::from_bytes_with_limits(
+            &bytes,
+            Limits::default(),
+            "truncated fixture".into(),
+        )
+        .unwrap();
+        assert_eq!(partial.complete_record_count(), 1);
+        assert_eq!(partial.incomplete_record_count(), 2);
+        assert_eq!(partial.unparsed_byte_count(), 4);
+        assert_eq!(partial.available_len(), bytes.len());
+        assert_eq!(partial.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn partial_tree_recovers_fbse_with_underreported_length() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0062u16.to_le_bytes());
+        bytes.extend_from_slice(&0xf007u16.to_le_bytes());
+        bytes.extend_from_slice(&65u32.to_le_bytes());
+
+        let mut fbse = [0u8; 36];
+        fbse[0] = 6;
+        fbse[1] = 6;
+        fbse[20..24].copy_from_slice(&33u32.to_le_bytes());
+        fbse[24..28].copy_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&fbse);
+
+        bytes.extend_from_slice(&0x6e00u16.to_le_bytes());
+        bytes.extend_from_slice(&0xf01eu16.to_le_bytes());
+        bytes.extend_from_slice(&25u32.to_le_bytes());
+        bytes.extend_from_slice(&[0x55; 16]);
+        bytes.push(0xff);
+        bytes.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+
+        assert!(OfficeArtStream::from_bytes(&bytes).is_err());
+        let partial = OfficeArtPartialStream::from_bytes_with_limits(
+            &bytes,
+            Limits::default(),
+            "underreported FBSE fixture".into(),
+        )
+        .unwrap();
+        assert_eq!(partial.complete_record_count(), 1);
+        assert_eq!(partial.incomplete_record_count(), 1);
+        assert_eq!(partial.unparsed_byte_count(), 0);
+        partial.visit_incomplete(|record| {
+            let OfficeArtIncompleteRecordData::FbseWithUnderreportedLength(fbse) = &record.data
+            else {
+                panic!("expected an underreported FBSE");
+            };
+            assert_eq!(record.header.declared_length, 65);
+            assert!(fbse.trailing.is_empty());
+            assert!(fbse.embedded_blip.is_some());
+        });
+        assert_eq!(partial.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn property_table_preserves_simple_and_complex_properties() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0023u16.to_le_bytes());
+        bytes.extend_from_slice(&0xf00bu16.to_le_bytes());
+        bytes.extend_from_slice(&15u32.to_le_bytes());
+        bytes.extend_from_slice(&5u16.to_le_bytes());
+        bytes.extend_from_slice(&42u32.to_le_bytes());
+        bytes.extend_from_slice(&0x8007u16.to_le_bytes());
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(b"abc");
+
+        let parsed = OfficeArtStream::from_bytes(&bytes).unwrap();
+        let OfficeArtRecordData::PropertyTable(table) = &parsed.records[0].data else {
+            panic!("expected a typed property table");
+        };
+        assert_eq!(table.properties.len(), 2);
+        assert_eq!(
+            table.properties[0].value,
+            OfficeArtPropertyValue::Simple(42)
+        );
+        assert_eq!(
+            table.properties[1].value,
+            OfficeArtPropertyValue::Complex {
+                declared_length: 3,
+                data: b"abc".to_vec(),
+            }
+        );
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn incomplete_property_table_preserves_fixed_entries_and_available_complex_data() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0023u16.to_le_bytes());
+        bytes.extend_from_slice(&0xf00bu16.to_le_bytes());
+        bytes.extend_from_slice(&14u32.to_le_bytes());
+        bytes.extend_from_slice(&5u16.to_le_bytes());
+        bytes.extend_from_slice(&42u32.to_le_bytes());
+        bytes.extend_from_slice(&0x8007u16.to_le_bytes());
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.extend_from_slice(b"ab");
+
+        let parsed = OfficeArtStream::from_bytes(&bytes).unwrap();
+        let OfficeArtRecordData::IncompletePropertyTable(table) = &parsed.records[0].data else {
+            panic!("expected an incomplete property table");
+        };
+        assert_eq!(table.entries.len(), 2);
+        assert_eq!(table.complex_fragments.len(), 1);
+        assert_eq!(
+            table.complex_fragments[0].data,
+            OfficeArtComplexPropertyData::Bytes(b"ab".to_vec())
+        );
+        assert!(!table.complex_fragments[0].is_complete);
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn fbse_exposes_the_embedded_blip_record() {
+        let mut payload = vec![0; 36];
+        payload[0] = 6;
+        payload[1] = 6;
+        payload[20..24].copy_from_slice(&18u32.to_le_bytes());
+        payload[28..32].copy_from_slice(&u32::MAX.to_le_bytes());
+        payload.extend_from_slice(&0x6e00u16.to_le_bytes());
+        payload.extend_from_slice(&0xf01eu16.to_le_bytes());
+        payload.extend_from_slice(&18u32.to_le_bytes());
+        payload.extend_from_slice(&[0x11; 16]);
+        payload.push(0xff);
+        payload.push(0x89);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0062u16.to_le_bytes());
+        bytes.extend_from_slice(&0xf007u16.to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+
+        let parsed = OfficeArtStream::from_bytes(&bytes).unwrap();
+        let OfficeArtRecordData::Fbse(fbse) = &parsed.records[0].data else {
+            panic!("expected a typed FBSE");
+        };
+        assert!(matches!(
+            fbse.embedded_blip.as_deref().map(|record| &record.data),
+            Some(OfficeArtRecordData::BitmapBlip(_))
+        ));
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+}

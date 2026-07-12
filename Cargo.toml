@@ -13,13 +13,17 @@ documentation = "https://docs.rs/olecfsdk"
 description = "Typed Rust SDK for Microsoft Office compound binary file formats"
 
 [workspace.dependencies]
+bitflags = "2.13"
+emfsdk = { version = "0.1.0", path = "../emfsdk/crates/emfsdk" }
+flate2 = "1.1"
 olecfsdk = { version = "0.1.0", path = "crates/olecfsdk" }
 olecfsdk-derive = { version = "0.1.0", path = "crates/olecfsdk-derive" }
 cfb = { version = "0.14.0", path = "../rust-cfb" }
+codepage = "0.1"
+encoding_rs = "0.8"
 proc-macro2 = "1.0.95"
 quote = "1.0.40"
 syn = { version = "2.0.104", features = ["full"] }
 thiserror = "2.0.12"
 uuid = "1.17.0"
 web-time = "1.1.0"
-
