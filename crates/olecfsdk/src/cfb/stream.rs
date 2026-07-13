@@ -1,7 +1,8 @@
-use uuid::Uuid;
-use web_time::{Duration, SystemTime, UNIX_EPOCH};
-
-use crate::{Error, Result, limits::Limits};
+use crate::{
+    Error, Result,
+    common::{FileTime, Guid},
+    limits::Limits,
+};
 
 use super::{
     Entry, EntryKind,
@@ -12,7 +13,6 @@ use super::{
 };
 
 const MINI_SECTOR_LEN: usize = 64;
-const UNIX_EPOCH_FILETIME: u64 = 116_444_736_000_000_000;
 
 pub(crate) fn read_entries(
     header: &Header,
@@ -64,17 +64,9 @@ pub(crate) fn read_entries(
             read_regular_stream(fat, source, raw.start_sector, stream_len, limits)?
         };
         let clsid = if kind == EntryKind::Stream {
-            Uuid::nil()
+            Guid::ZERO
         } else {
-            clsid_from_bytes(raw.clsid)
-        };
-        let (created, modified) = if kind == EntryKind::Stream {
-            (filetime_to_system_time(0), filetime_to_system_time(0))
-        } else {
-            (
-                filetime_to_system_time(raw.creation_time),
-                filetime_to_system_time(raw.modified_time),
-            )
+            raw.clsid
         };
         entries.push(Entry {
             path,
@@ -82,8 +74,16 @@ pub(crate) fn read_entries(
             kind,
             clsid,
             state_bits: raw.state_bits,
-            created,
-            modified,
+            created: if kind == EntryKind::Stream {
+                FileTime::ZERO
+            } else {
+                raw.creation_time
+            },
+            modified: if kind == EntryKind::Stream {
+                FileTime::ZERO
+            } else {
+                raw.modified_time
+            },
             data,
         });
     }
@@ -201,39 +201,4 @@ fn checked_stream_len(len: u64, limits: Limits) -> Result<usize> {
         )));
     }
     usize::try_from(len).map_err(|_| Error::Limit("stream length does not fit usize".into()))
-}
-
-fn clsid_from_bytes(bytes: [u8; 16]) -> Uuid {
-    let d4 = [
-        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-    ];
-    Uuid::from_fields(
-        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-        u16::from_le_bytes([bytes[4], bytes[5]]),
-        u16::from_le_bytes([bytes[6], bytes[7]]),
-        &d4,
-    )
-}
-
-fn filetime_to_system_time(value: u64) -> SystemTime {
-    let delta = |ticks: u64| Duration::new(ticks / 10_000_000, (ticks % 10_000_000) as u32 * 100);
-    if value >= UNIX_EPOCH_FILETIME {
-        UNIX_EPOCH
-            .checked_add(delta(value - UNIX_EPOCH_FILETIME))
-            .unwrap_or(UNIX_EPOCH)
-    } else {
-        UNIX_EPOCH
-            .checked_sub(delta(UNIX_EPOCH_FILETIME - value))
-            .unwrap_or(UNIX_EPOCH)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn filetime_unix_epoch_conversion_is_exact() {
-        assert_eq!(filetime_to_system_time(UNIX_EPOCH_FILETIME), UNIX_EPOCH);
-    }
 }

@@ -12,8 +12,6 @@ use std::{
     io::{Cursor, Read, Seek, Write},
 };
 
-use emfsdk::{DeviceIndependentBitmap, DibColorUsage};
-
 use crate::{
     Error, Result, SdkEnum, SdkObject,
     io::{Reader, SdkEnumValue, SdkRead, SdkSize, SdkWrite, Writer},
@@ -2881,7 +2879,8 @@ pub struct EntExU2Record {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BkHimImage {
-    Bitmap(DeviceIndependentBitmap),
+    /// Packed DIB bytes. The bitmap format is external to MS-XLS.
+    Bitmap(Vec<u8>),
     /// Native image bytes whose application-specific format is opaque by specification.
     Native(Vec<u8>),
 }
@@ -13491,10 +13490,7 @@ impl BkHimRecord {
 
         let image_blob = &logical[8..];
         let image = match image_format {
-            0x0009 => BkHimImage::Bitmap(
-                DeviceIndependentBitmap::from_packed_slice(image_blob, DibColorUsage::RgbColors)
-                    .map_err(|error| Error::invalid(8, format!("invalid BkHim bitmap: {error}")))?,
-            ),
+            0x0009 => BkHimImage::Bitmap(image_blob.to_vec()),
             0x000e => BkHimImage::Native(image_blob.to_vec()),
             _ => return Err(Error::invalid(0, "unsupported BkHim image format")),
         };
@@ -13513,12 +13509,7 @@ impl BkHimRecord {
             return Err(Error::invalid(2, "BkHim reserved field must be 1"));
         }
         let (image_format, image_blob) = match &self.image {
-            BkHimImage::Bitmap(bitmap) => (
-                0x0009i16,
-                bitmap
-                    .to_packed_bytes()
-                    .map_err(|error| Error::invalid(8, format!("invalid BkHim bitmap: {error}")))?,
-            ),
+            BkHimImage::Bitmap(bytes) => (0x0009i16, bytes.clone()),
             BkHimImage::Native(bytes) => (0x000ei16, bytes.clone()),
         };
         if image_blob.is_empty() {

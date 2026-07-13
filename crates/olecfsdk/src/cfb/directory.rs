@@ -2,6 +2,7 @@ use std::{collections::BTreeSet, io::Cursor, path::PathBuf};
 
 use crate::{
     Error, Result, SdkEnum, SdkObject,
+    common::{FileTime, Guid},
     io::{Reader, SdkRead, SdkSize, SdkWrite, Writer},
     limits::Limits,
 };
@@ -85,10 +86,10 @@ pub struct DirectoryEntry {
     pub left_sibling: DirectoryPointer,
     pub right_sibling: DirectoryPointer,
     pub child: DirectoryPointer,
-    pub clsid: [u8; 16],
+    pub clsid: Guid,
     pub state_bits: u32,
-    pub creation_time: u64,
-    pub modified_time: u64,
+    pub creation_time: FileTime,
+    pub modified_time: FileTime,
     pub start_sector: u32,
     pub stream_size: u64,
 }
@@ -320,10 +321,10 @@ mod tests {
             left_sibling: DirectoryPointer::None,
             right_sibling: DirectoryPointer::None,
             child: DirectoryPointer::None,
-            clsid: [0; 16],
+            clsid: Guid::ZERO,
             state_bits: 0,
-            creation_time: 0,
-            modified_time: 0,
+            creation_time: FileTime::ZERO,
+            modified_time: FileTime::ZERO,
             start_sector: super::super::allocation::END_OF_CHAIN,
             stream_size: 0,
         }

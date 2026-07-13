@@ -608,7 +608,7 @@ impl EnvelopeAttachment {
             }
             let size_low = reader.read_u32()?;
             let size_high = reader.read_u32()?;
-            let size = usize::try_from(FileTime::from_parts(size_low, size_high).0)
+            let size = usize::try_from(FileTime::from_parts(size_low, size_high).ticks())
                 .map_err(|_| Error::Limit("attachment size exceeds usize".into()))?;
             let data = reader.read_vec(size)?;
             values.push(Self { method, name, data });
@@ -807,7 +807,7 @@ mod tests {
             },
             EnvelopeRecipientProperty {
                 property_id: 4,
-                value: EnvelopeRecipientPropertyValue::SystemTime(FileTime(9)),
+                value: EnvelopeRecipientPropertyValue::SystemTime(FileTime::from_ticks(9)),
             },
             EnvelopeRecipientProperty {
                 property_id: 5,

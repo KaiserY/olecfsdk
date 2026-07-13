@@ -3,7 +3,6 @@
 use std::io::{Read, Write};
 
 use crate::{Error, Result, limits::Limits};
-use emfsdk::{DeviceIndependentBitmap, DibColorUsage, EmfMetafile, WmfMetafile};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 
 const HEADER_LEN: usize = 8;
@@ -205,11 +204,9 @@ pub struct OfficeArtBitmapBlip {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OfficeArtBitmapData {
-    Dib {
-        bitmap: DeviceIndependentBitmap,
-        original_encoded: Vec<u8>,
-    },
-    /// Encoded JPEG, PNG, or TIFF data, or a DIB rejected by the typed SDK.
+    /// Encoded DIB data. The image format is external to MS-ODRAW.
+    Dib(Vec<u8>),
+    /// Encoded JPEG, PNG, or TIFF data.
     Encoded(Vec<u8>),
 }
 
@@ -224,11 +221,11 @@ pub struct OfficeArtMetafileBlip {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OfficeArtMetafileData {
     Emf {
-        metafile: EmfMetafile,
+        decoded: Vec<u8>,
         original_encoded: Vec<u8>,
     },
     Wmf {
-        metafile: WmfMetafile,
+        decoded: Vec<u8>,
         original_encoded: Vec<u8>,
     },
     /// Encoded Macintosh PICT file data. MS-ODRAW treats this as an image leaf;
@@ -248,8 +245,6 @@ pub enum OfficeArtMetafileData {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OfficeArtMetafileOpaqueReason {
-    InvalidEmf,
-    InvalidWmf,
     DecodeFailed,
     UnsupportedCompression(u8),
 }
@@ -1484,12 +1479,7 @@ impl OfficeArtBitmapBlip {
         let prefix = payload.get(..prefix_len)?;
         let encoded = payload[prefix_len..].to_vec();
         let file_data = if record_type == 0xf01f {
-            DeviceIndependentBitmap::from_packed_slice(&encoded, DibColorUsage::RgbColors)
-                .map(|bitmap| OfficeArtBitmapData::Dib {
-                    bitmap,
-                    original_encoded: encoded.clone(),
-                })
-                .unwrap_or_else(|_| OfficeArtBitmapData::Encoded(encoded))
+            OfficeArtBitmapData::Dib(encoded)
         } else {
             OfficeArtBitmapData::Encoded(encoded)
         };
@@ -1508,19 +1498,7 @@ impl OfficeArtBitmapBlip {
         }
         payload.push(self.tag);
         match &self.file_data {
-            OfficeArtBitmapData::Dib {
-                bitmap,
-                original_encoded,
-            } => {
-                let current = bitmap
-                    .to_packed_bytes()
-                    .map_err(|error| Error::invalid(0, error.to_string()))?;
-                if &current == original_encoded {
-                    payload.extend_from_slice(original_encoded);
-                } else {
-                    payload.extend_from_slice(&current);
-                }
-            }
+            OfficeArtBitmapData::Dib(encoded) => payload.extend_from_slice(encoded),
             OfficeArtBitmapData::Encoded(encoded) => payload.extend_from_slice(encoded),
         }
         Ok(())
@@ -1541,26 +1519,14 @@ impl OfficeArtMetafileBlip {
         let encoded = payload[header_end..].to_vec();
         let decoded = decode_metafile_data(&encoded, metafile_header.compression, max_decoded_len);
         let file_data = match (record_type, decoded) {
-            (0xf01a, Some(decoded)) => EmfMetafile::from_bytes(&decoded)
-                .map(|metafile| OfficeArtMetafileData::Emf {
-                    metafile,
-                    original_encoded: encoded.clone(),
-                })
-                .unwrap_or_else(|_| OfficeArtMetafileData::Opaque {
-                    reason: OfficeArtMetafileOpaqueReason::InvalidEmf,
-                    decoded: Some(decoded),
-                    original_encoded: encoded.clone(),
-                }),
-            (0xf01b, Some(decoded)) => WmfMetafile::from_bytes(&decoded)
-                .map(|metafile| OfficeArtMetafileData::Wmf {
-                    metafile,
-                    original_encoded: encoded.clone(),
-                })
-                .unwrap_or_else(|_| OfficeArtMetafileData::Opaque {
-                    reason: OfficeArtMetafileOpaqueReason::InvalidWmf,
-                    decoded: Some(decoded),
-                    original_encoded: encoded.clone(),
-                }),
+            (0xf01a, Some(decoded)) => OfficeArtMetafileData::Emf {
+                decoded,
+                original_encoded: encoded.clone(),
+            },
+            (0xf01b, Some(decoded)) => OfficeArtMetafileData::Wmf {
+                decoded,
+                original_encoded: encoded.clone(),
+            },
             (0xf01c, Some(decoded)) => OfficeArtMetafileData::Pict {
                 decoded,
                 original_encoded: encoded,
@@ -1595,24 +1561,20 @@ impl OfficeArtMetafileBlip {
         self.metafile_header.write(payload);
         match &self.file_data {
             OfficeArtMetafileData::Emf {
-                metafile,
+                decoded,
                 original_encoded,
             } => write_typed_metafile(
                 payload,
-                &metafile
-                    .to_bytes()
-                    .map_err(|error| Error::invalid(0, error.to_string()))?,
+                decoded,
                 original_encoded,
                 self.metafile_header.compression,
             )?,
             OfficeArtMetafileData::Wmf {
-                metafile,
+                decoded,
                 original_encoded,
             } => write_typed_metafile(
                 payload,
-                &metafile
-                    .to_bytes()
-                    .map_err(|error| Error::invalid(0, error.to_string()))?,
+                decoded,
                 original_encoded,
                 self.metafile_header.compression,
             )?,

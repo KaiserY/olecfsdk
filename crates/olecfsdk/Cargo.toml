@@ -12,16 +12,10 @@ description.workspace = true
 [dependencies]
 bitflags = { workspace = true }
 codepage = { workspace = true }
-emfsdk = { workspace = true }
 encoding_rs = { workspace = true }
 flate2 = { workspace = true }
-ooxmlsdk = { workspace = true }
 olecfsdk-derive = { workspace = true }
-quick-xml = { workspace = true }
 thiserror = { workspace = true }
-uuid = { workspace = true }
-web-time = { workspace = true }
-zip = { workspace = true }
 
 [dev-dependencies]
 cfb = { workspace = true }

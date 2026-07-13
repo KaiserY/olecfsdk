@@ -1,9 +1,10 @@
 use std::path::{Component, Path, PathBuf};
 
-use uuid::Uuid;
-use web_time::{SystemTime, UNIX_EPOCH};
-
-use crate::{Error, Result, limits::Limits};
+use crate::{
+    Error, Result,
+    common::{FileTime, Guid},
+    limits::Limits,
+};
 
 mod allocation;
 mod directory;
@@ -37,10 +38,10 @@ pub struct Entry {
     pub path: PathBuf,
     pub name: String,
     pub kind: EntryKind,
-    pub clsid: Uuid,
+    pub clsid: Guid,
     pub state_bits: u32,
-    pub created: SystemTime,
-    pub modified: SystemTime,
+    pub created: FileTime,
+    pub modified: FileTime,
     pub data: Vec<u8>,
 }
 
@@ -332,10 +333,10 @@ impl CompoundFile {
             path: path.to_path_buf(),
             name: name.to_owned(),
             kind,
-            clsid: Uuid::nil(),
+            clsid: Guid::ZERO,
             state_bits: 0,
-            created: UNIX_EPOCH,
-            modified: UNIX_EPOCH,
+            created: FileTime::ZERO,
+            modified: FileTime::ZERO,
             data,
         });
         Ok(())

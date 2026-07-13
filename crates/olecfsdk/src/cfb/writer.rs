@@ -1,10 +1,8 @@
 use std::{cmp::Ordering, collections::BTreeMap, io::Cursor, path::Path};
 
-use uuid::Uuid;
-use web_time::{Duration, SystemTime, UNIX_EPOCH};
-
 use crate::{
     Error, Result,
+    common::{FileTime, Guid},
     io::{SdkWrite, Writer},
 };
 
@@ -19,7 +17,6 @@ use super::{
 
 const MINI_SECTOR_LEN: usize = 64;
 const HEADER_DIFAT_LEN: usize = 109;
-const UNIX_EPOCH_FILETIME: u64 = 116_444_736_000_000_000;
 
 pub(crate) fn write_compound(compound: &CompoundFile) -> Result<Vec<u8>> {
     write_logical_compound(
@@ -35,10 +32,10 @@ pub(crate) fn write_empty_compound(version: Version) -> Result<Vec<u8>> {
         path: "/".into(),
         name: "Root Entry".into(),
         kind: EntryKind::Root,
-        clsid: Uuid::nil(),
+        clsid: Guid::ZERO,
         state_bits: 0,
-        created: UNIX_EPOCH,
-        modified: UNIX_EPOCH,
+        created: FileTime::ZERO,
+        modified: FileTime::ZERO,
         data: Vec::new(),
     }];
     write_logical_compound(version, &entries, &[], &[])
@@ -304,20 +301,20 @@ fn build_directory_entries(
             right_sibling: DirectoryPointer::None,
             child: DirectoryPointer::None,
             clsid: if entry.kind == EntryKind::Stream {
-                [0; 16]
+                Guid::ZERO
             } else {
-                clsid_bytes(entry.clsid)
+                entry.clsid
             },
             state_bits: entry.state_bits,
             creation_time: if entry.kind == EntryKind::Stream {
-                0
+                FileTime::ZERO
             } else {
-                system_time_to_filetime(entry.created)
+                entry.created
             },
             modified_time: if entry.kind == EntryKind::Stream {
-                0
+                FileTime::ZERO
             } else {
-                system_time_to_filetime(entry.modified)
+                entry.modified
             },
             start_sector,
             stream_size,
@@ -477,10 +474,10 @@ fn unallocated_directory_entry() -> DirectoryEntry {
         left_sibling: DirectoryPointer::None,
         right_sibling: DirectoryPointer::None,
         child: DirectoryPointer::None,
-        clsid: [0; 16],
+        clsid: Guid::ZERO,
         state_bits: 0,
-        creation_time: 0,
-        modified_time: 0,
+        creation_time: FileTime::ZERO,
+        modified_time: FileTime::ZERO,
         start_sector: 0,
         stream_size: 0,
     }
@@ -535,30 +532,6 @@ fn cfb_simple_uppercase(value: char) -> char {
         'ß' => 'ß',
         value => value.to_uppercase().next().unwrap_or(value),
     }
-}
-
-fn clsid_bytes(clsid: Uuid) -> [u8; 16] {
-    let (d1, d2, d3, d4) = clsid.as_fields();
-    let mut bytes = [0; 16];
-    bytes[..4].copy_from_slice(&d1.to_le_bytes());
-    bytes[4..6].copy_from_slice(&d2.to_le_bytes());
-    bytes[6..8].copy_from_slice(&d3.to_le_bytes());
-    bytes[8..].copy_from_slice(d4);
-    bytes
-}
-
-fn system_time_to_filetime(value: SystemTime) -> u64 {
-    match value.duration_since(UNIX_EPOCH) {
-        Ok(duration) => UNIX_EPOCH_FILETIME.saturating_add(duration_ticks(duration)),
-        Err(error) => UNIX_EPOCH_FILETIME.saturating_sub(duration_ticks(error.duration())),
-    }
-}
-
-fn duration_ticks(duration: Duration) -> u64 {
-    duration
-        .as_secs()
-        .saturating_mul(10_000_000)
-        .saturating_add((duration.subsec_nanos() / 100) as u64)
 }
 
 fn div_ceil(value: usize, divisor: usize) -> usize {

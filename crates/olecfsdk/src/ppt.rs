@@ -6,18 +6,6 @@ use std::{
 };
 
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
-use ooxmlsdk::{
-    schemas::{
-        opc_content_types::{Types as OpcContentTypes, TypesChoice},
-        schemas_openxmlformats_org_drawingml_2006_main::{TableStyleList, Theme, ThemeOverride},
-        schemas_openxmlformats_org_presentationml_2006_main::{
-            ColorMap, ColorMapOverride, SlideLayout, TextStyles, Timing,
-        },
-    },
-    sdk::SdkType,
-};
-use quick_xml::{Reader as XmlReader, XmlVersion, escape::unescape, events::Event as XmlEvent};
-use zip::ZipArchive;
 
 use crate::{
     Error, Result, SdkObject,
@@ -315,15 +303,7 @@ pub enum PptRecordData {
         reason: String,
     },
     RoundTripColorMapping12(RoundTripColorMapping12Atom),
-    MalformedRoundTripColorMapping12 {
-        body: Vec<u8>,
-        reason: String,
-    },
     RoundTripAnimation12(Box<RoundTripAnimation12Atom>),
-    MalformedRoundTripAnimation12 {
-        body: Vec<u8>,
-        reason: String,
-    },
     RoundTripAnimationHash12(HashCodeAtom),
     SlideShowSlideInfo(SlideShowSlideInfoAtom),
     Guide(GuideAtom),
@@ -359,20 +339,8 @@ pub enum PptRecordData {
     DocToolbarStates10(ByteAtom),
     ExternalStorage(ExternalStorageAtom),
     RoundTripContentMasterInfo12(Box<RoundTripContentMasterInfo12Atom>),
-    MalformedRoundTripContentMasterInfo12 {
-        body: Vec<u8>,
-        reason: String,
-    },
     RoundTripTheme12(Box<RoundTripTheme12Atom>),
-    MalformedRoundTripTheme12 {
-        body: Vec<u8>,
-        reason: String,
-    },
     RoundTripStyle12(Box<RoundTripStyle12Atom>),
-    MalformedRoundTripStyle12 {
-        body: Vec<u8>,
-        reason: String,
-    },
     BinaryTagData(BinaryTagData),
     OfficeArt(Box<OfficeArtRecord>),
     UserEdit(UserEditAtom),
@@ -1353,34 +1321,8 @@ pub enum RecolorEntrySource {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MacPlistAtom {
+    /// Exact XML payload. Property-list XML is an external format.
     pub physical_xml: Vec<u8>,
-    pub document: PlistDocument,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct PlistDocument {
-    pub version: Option<String>,
-    pub value: PlistValue,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum PlistValue {
-    Dictionary(Vec<(String, PlistValue)>),
-    Array(Vec<PlistValue>),
-    String(String),
-    Integer(String),
-    Real(String),
-    Boolean(bool),
-    Data(String),
-    Date(String),
-}
-
-#[derive(Clone, Debug)]
-struct PlistXmlNode {
-    name: String,
-    attributes: Vec<(String, String)>,
-    text: String,
-    children: Vec<PlistXmlNode>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1520,23 +1462,8 @@ pub struct RoundTripContentMasterInfo12Atom {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlideLayoutOpcPackage {
-    /// Exact physical ZIP representation retained for byte-identical PPT writes.
+    /// Exact OPC package payload. OPC and its XML parts are external formats.
     pub physical_bytes: Vec<u8>,
-    pub entries: Vec<OpcZipEntry>,
-    pub content_types: OpcContentTypes,
-    pub slide_layout_part_name: String,
-    pub slide_layout: SlideLayout,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OpcZipEntry {
-    pub name: String,
-    pub compression_method: u16,
-    pub crc32: u32,
-    pub compressed_size: u64,
-    pub uncompressed_size: u64,
-    pub unix_mode: Option<u32>,
-    pub data: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1546,30 +1473,14 @@ pub struct RoundTripTheme12Atom {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThemeOpcPackage {
+    /// Exact OPC package payload. OPC and its XML parts are external formats.
     pub physical_bytes: Vec<u8>,
-    pub entries: Vec<OpcZipEntry>,
-    pub content_types: OpcContentTypes,
-    pub theme_part_name: String,
-    pub root: ThemeRoot,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum ThemeRoot {
-    Theme(Theme),
-    ThemeOverride(ThemeOverride),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RoundTripColorMapping12Atom {
-    /// Exact original UTF-8 XML retained for byte-identical PPT writes.
+    /// Exact XML payload. DrawingML is an external format.
     pub physical_xml: Vec<u8>,
-    pub root: ColorMappingRoot,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum ColorMappingRoot {
-    ColorMap(ColorMap),
-    ColorMapOverride(ColorMapOverride),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1579,11 +1490,8 @@ pub struct RoundTripAnimation12Atom {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TimingOpcPackage {
+    /// Exact OPC package payload. OPC and its XML parts are external formats.
     pub physical_bytes: Vec<u8>,
-    pub entries: Vec<OpcZipEntry>,
-    pub content_types: OpcContentTypes,
-    pub timing_part_name: String,
-    pub timing: Timing,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1594,17 +1502,8 @@ pub struct RoundTripStyle12Atom {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StyleOpcPackage {
+    /// Exact OPC package payload. OPC and its XML parts are external formats.
     pub physical_bytes: Vec<u8>,
-    pub entries: Vec<OpcZipEntry>,
-    pub content_types: OpcContentTypes,
-    pub root_part_name: String,
-    pub root: StyleOpcRoot,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum StyleOpcRoot {
-    TextStyles(TextStyles),
-    TableStyles(TableStyleList),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2019,13 +1918,9 @@ impl PptRecordSequence {
                     .map(PptRecordData::RecolorInfo)
                     .unwrap_or_else(|| PptRecordData::Atom(body.to_vec()))
             } else if header.record_type == MAC_PRINT_SETTINGS_ATOM {
-                MacPlistAtom::parse(body)
-                    .map(PptRecordData::MacPrintSettings)
-                    .unwrap_or_else(|_| PptRecordData::Atom(body.to_vec()))
+                PptRecordData::MacPrintSettings(MacPlistAtom::from_bytes(body))
             } else if header.record_type == MAC_PAGE_FORMAT_ATOM {
-                MacPlistAtom::parse(body)
-                    .map(PptRecordData::MacPageFormat)
-                    .unwrap_or_else(|_| PptRecordData::Atom(body.to_vec()))
+                PptRecordData::MacPageFormat(MacPlistAtom::from_bytes(body))
             } else if header.record_type == PPT11_FONT_DESCRIPTOR_ATOM {
                 Ppt11FontDescriptorAtom::parse(body)
                     .map(PptRecordData::Ppt11FontDescriptors)
@@ -2157,17 +2052,9 @@ impl PptRecordSequence {
                     },
                 }
             } else if header.record_type == ROUND_TRIP_ANIMATION_12_ATOM {
-                match TimingOpcPackage::parse(body, limits) {
-                    Ok(package) => {
-                        PptRecordData::RoundTripAnimation12(Box::new(RoundTripAnimation12Atom {
-                            package,
-                        }))
-                    }
-                    Err(error) => PptRecordData::MalformedRoundTripAnimation12 {
-                        body: body.to_vec(),
-                        reason: error.to_string(),
-                    },
-                }
+                PptRecordData::RoundTripAnimation12(Box::new(RoundTripAnimation12Atom {
+                    package: TimingOpcPackage::from_bytes(body),
+                }))
             } else if header.record_type == ROUND_TRIP_ANIMATION_HASH_12_ATOM && body.len() == 4 {
                 PptRecordData::RoundTripAnimationHash12(
                     parse_fixed(body).expect("fixed RoundTripAnimationHashAtom"),
@@ -2286,54 +2173,30 @@ impl PptRecordSequence {
                     limits,
                 ))
             } else if header.record_type == ROUND_TRIP_CONTENT_MASTER_INFO_12_ATOM {
-                match SlideLayoutOpcPackage::parse(body, limits) {
-                    Ok(package) => PptRecordData::RoundTripContentMasterInfo12(Box::new(
-                        RoundTripContentMasterInfo12Atom {
-                            layout_index: header.instance,
-                            package,
-                        },
-                    )),
-                    Err(error) => PptRecordData::MalformedRoundTripContentMasterInfo12 {
-                        body: body.to_vec(),
-                        reason: error.to_string(),
+                PptRecordData::RoundTripContentMasterInfo12(Box::new(
+                    RoundTripContentMasterInfo12Atom {
+                        layout_index: header.instance,
+                        package: SlideLayoutOpcPackage::from_bytes(body),
                     },
-                }
+                ))
             } else if header.record_type == ROUND_TRIP_COLOR_MAPPING_12_ATOM {
-                match RoundTripColorMapping12Atom::parse(body) {
-                    Ok(value) => PptRecordData::RoundTripColorMapping12(value),
-                    Err(error) => PptRecordData::MalformedRoundTripColorMapping12 {
-                        body: body.to_vec(),
-                        reason: error.to_string(),
-                    },
-                }
+                PptRecordData::RoundTripColorMapping12(RoundTripColorMapping12Atom::from_bytes(
+                    body,
+                ))
             } else if header.record_type == ROUND_TRIP_THEME_12_ATOM {
-                match ThemeOpcPackage::parse(body, limits) {
-                    Ok(package) => {
-                        PptRecordData::RoundTripTheme12(Box::new(RoundTripTheme12Atom { package }))
-                    }
-                    Err(error) => PptRecordData::MalformedRoundTripTheme12 {
-                        body: body.to_vec(),
-                        reason: error.to_string(),
-                    },
-                }
+                PptRecordData::RoundTripTheme12(Box::new(RoundTripTheme12Atom {
+                    package: ThemeOpcPackage::from_bytes(body),
+                }))
             } else if matches!(
                 header.record_type,
                 ROUND_TRIP_OART_TEXT_STYLES_12_ATOM
                     | ROUND_TRIP_NOTES_MASTER_TEXT_STYLES_12_ATOM
                     | ROUND_TRIP_CUSTOM_TABLE_STYLES_12_ATOM
             ) {
-                match StyleOpcPackage::parse(body, header.record_type, limits) {
-                    Ok(package) => {
-                        PptRecordData::RoundTripStyle12(Box::new(RoundTripStyle12Atom {
-                            record_type: header.record_type,
-                            package,
-                        }))
-                    }
-                    Err(error) => PptRecordData::MalformedRoundTripStyle12 {
-                        body: body.to_vec(),
-                        reason: error.to_string(),
-                    },
-                }
+                PptRecordData::RoundTripStyle12(Box::new(RoundTripStyle12Atom {
+                    record_type: header.record_type,
+                    package: StyleOpcPackage::from_bytes(body),
+                }))
             } else if matches!(
                 header.record_type,
                 PERSIST_DIRECTORY_FULL_BLOCK | PERSIST_DIRECTORY_ATOM
@@ -3001,15 +2864,6 @@ impl PptRecord {
                 }
                 value.package.physical_bytes.clone()
             }
-            PptRecordData::MalformedRoundTripAnimation12 { body, .. } => {
-                if self.header.record_type != ROUND_TRIP_ANIMATION_12_ATOM {
-                    return Err(Error::invalid(
-                        0,
-                        "malformed RoundTripAnimationAtom header changed",
-                    ));
-                }
-                body.clone()
-            }
             PptRecordData::RoundTripAnimationHash12(value) => {
                 if self.header.record_type != ROUND_TRIP_ANIMATION_HASH_12_ATOM {
                     return Err(Error::invalid(
@@ -3186,15 +3040,6 @@ impl PptRecord {
                 }
                 value.package.physical_bytes.clone()
             }
-            PptRecordData::MalformedRoundTripContentMasterInfo12 { body, .. } => {
-                if self.header.record_type != ROUND_TRIP_CONTENT_MASTER_INFO_12_ATOM {
-                    return Err(Error::invalid(
-                        0,
-                        "malformed RoundTripContentMasterInfo12Atom header changed",
-                    ));
-                }
-                body.clone()
-            }
             PptRecordData::RoundTripColorMapping12(value) => {
                 if self.header.record_type != ROUND_TRIP_COLOR_MAPPING_12_ATOM {
                     return Err(Error::invalid(
@@ -3204,30 +3049,12 @@ impl PptRecord {
                 }
                 value.physical_xml.clone()
             }
-            PptRecordData::MalformedRoundTripColorMapping12 { body, .. } => {
-                if self.header.record_type != ROUND_TRIP_COLOR_MAPPING_12_ATOM {
-                    return Err(Error::invalid(
-                        0,
-                        "malformed RoundTripColorMapping12Atom header changed",
-                    ));
-                }
-                body.clone()
-            }
             PptRecordData::RoundTripTheme12(value) => {
                 if self.header.record_type != ROUND_TRIP_THEME_12_ATOM || self.header.instance != 0
                 {
                     return Err(Error::invalid(0, "RoundTripTheme12Atom header changed"));
                 }
                 value.package.physical_bytes.clone()
-            }
-            PptRecordData::MalformedRoundTripTheme12 { body, .. } => {
-                if self.header.record_type != ROUND_TRIP_THEME_12_ATOM {
-                    return Err(Error::invalid(
-                        0,
-                        "malformed RoundTripTheme12Atom header changed",
-                    ));
-                }
-                body.clone()
             }
             PptRecordData::RoundTripStyle12(value) => {
                 if self.header.record_type != value.record_type
@@ -3241,20 +3068,6 @@ impl PptRecord {
                     return Err(Error::invalid(0, "RoundTripStyle12Atom header changed"));
                 }
                 value.package.physical_bytes.clone()
-            }
-            PptRecordData::MalformedRoundTripStyle12 { body, .. } => {
-                if !matches!(
-                    self.header.record_type,
-                    ROUND_TRIP_OART_TEXT_STYLES_12_ATOM
-                        | ROUND_TRIP_NOTES_MASTER_TEXT_STYLES_12_ATOM
-                        | ROUND_TRIP_CUSTOM_TABLE_STYLES_12_ATOM
-                ) {
-                    return Err(Error::invalid(
-                        0,
-                        "malformed RoundTripStyle12Atom header changed",
-                    ));
-                }
-                body.clone()
             }
             PptRecordData::OfficeArt(value) => {
                 if self.header.version == 0x0f
@@ -3981,203 +3794,6 @@ impl RecolorInfoAtom {
     }
 }
 
-impl MacPlistAtom {
-    fn parse(bytes: &[u8]) -> Result<Self> {
-        let mut reader = XmlReader::from_reader(bytes);
-        reader.config_mut().trim_text(false);
-        let mut stack = Vec::<PlistXmlNode>::new();
-        let mut roots = Vec::<PlistXmlNode>::new();
-        loop {
-            match reader.read_event().map_err(|error| {
-                Error::invalid(
-                    reader.buffer_position(),
-                    format!("invalid plist XML: {error}"),
-                )
-            })? {
-                XmlEvent::Start(start) => {
-                    let name = String::from_utf8(start.name().as_ref().to_vec()).map_err(|_| {
-                        Error::invalid(reader.buffer_position(), "non-UTF-8 plist element")
-                    })?;
-                    let attributes = start
-                        .attributes()
-                        .map(|attribute| {
-                            let attribute = attribute.map_err(|error| {
-                                Error::invalid(
-                                    reader.buffer_position(),
-                                    format!("invalid plist attribute: {error}"),
-                                )
-                            })?;
-                            let key = String::from_utf8(attribute.key.as_ref().to_vec()).map_err(
-                                |_| {
-                                    Error::invalid(
-                                        reader.buffer_position(),
-                                        "non-UTF-8 plist attribute name",
-                                    )
-                                },
-                            )?;
-                            let value = attribute
-                                .decoded_and_normalized_value(
-                                    XmlVersion::Explicit1_0,
-                                    reader.decoder(),
-                                )
-                                .map_err(|error| {
-                                    Error::invalid(
-                                        reader.buffer_position(),
-                                        format!("invalid plist attribute value: {error}"),
-                                    )
-                                })?
-                                .into_owned();
-                            Ok((key, value))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    stack.push(PlistXmlNode {
-                        name,
-                        attributes,
-                        text: String::new(),
-                        children: Vec::new(),
-                    });
-                }
-                XmlEvent::Empty(empty) => {
-                    let name = String::from_utf8(empty.name().as_ref().to_vec()).map_err(|_| {
-                        Error::invalid(reader.buffer_position(), "non-UTF-8 plist element")
-                    })?;
-                    let node = PlistXmlNode {
-                        name,
-                        attributes: Vec::new(),
-                        text: String::new(),
-                        children: Vec::new(),
-                    };
-                    if let Some(parent) = stack.last_mut() {
-                        parent.children.push(node);
-                    } else {
-                        roots.push(node);
-                    }
-                }
-                XmlEvent::End(end) => {
-                    let node = stack.pop().ok_or_else(|| {
-                        Error::invalid(reader.buffer_position(), "unbalanced plist XML")
-                    })?;
-                    if node.name.as_bytes() != end.name().as_ref() {
-                        return Err(Error::invalid(
-                            reader.buffer_position(),
-                            "mismatched plist XML element",
-                        ));
-                    }
-                    if let Some(parent) = stack.last_mut() {
-                        parent.children.push(node);
-                    } else {
-                        roots.push(node);
-                    }
-                }
-                XmlEvent::Text(text) => {
-                    if let Some(node) = stack.last_mut() {
-                        let decoded =
-                            text.xml_content(XmlVersion::Explicit1_0).map_err(|error| {
-                                Error::invalid(
-                                    reader.buffer_position(),
-                                    format!("invalid plist text: {error}"),
-                                )
-                            })?;
-                        node.text.push_str(&unescape(&decoded).map_err(|error| {
-                            Error::invalid(
-                                reader.buffer_position(),
-                                format!("invalid plist entity: {error}"),
-                            )
-                        })?);
-                    }
-                }
-                XmlEvent::CData(text) => {
-                    if let Some(node) = stack.last_mut() {
-                        node.text.push_str(&text.decode().map_err(|error| {
-                            Error::invalid(
-                                reader.buffer_position(),
-                                format!("invalid plist CDATA: {error}"),
-                            )
-                        })?);
-                    }
-                }
-                XmlEvent::GeneralRef(reference) => {
-                    if let Some(node) = stack.last_mut() {
-                        let reference = reference.decode().map_err(|error| {
-                            Error::invalid(
-                                reader.buffer_position(),
-                                format!("invalid plist entity name: {error}"),
-                            )
-                        })?;
-                        let encoded = format!("&{reference};");
-                        node.text.push_str(&unescape(&encoded).map_err(|error| {
-                            Error::invalid(
-                                reader.buffer_position(),
-                                format!("invalid plist entity: {error}"),
-                            )
-                        })?);
-                    }
-                }
-                XmlEvent::Eof => break,
-                XmlEvent::Decl(_)
-                | XmlEvent::DocType(_)
-                | XmlEvent::Comment(_)
-                | XmlEvent::PI(_) => {}
-            }
-        }
-        if !stack.is_empty() || roots.len() != 1 || roots[0].name != "plist" {
-            return Err(Error::invalid(0, "plist XML lacks one plist root"));
-        }
-        let root = roots.pop().expect("one plist root");
-        if root.children.len() != 1 {
-            return Err(Error::invalid(
-                0,
-                "plist root does not contain exactly one value",
-            ));
-        }
-        let version = root
-            .attributes
-            .iter()
-            .find_map(|(key, value)| (key == "version").then(|| value.clone()));
-        let value =
-            PlistValue::from_node(root.children.into_iter().next().expect("one plist value"))?;
-        Ok(Self {
-            physical_xml: bytes.to_vec(),
-            document: PlistDocument { version, value },
-        })
-    }
-}
-
-impl PlistValue {
-    fn from_node(node: PlistXmlNode) -> Result<Self> {
-        Ok(match node.name.as_str() {
-            "dict" => {
-                let mut entries = Vec::new();
-                let mut children = node.children.into_iter();
-                while let Some(key) = children.next() {
-                    if key.name != "key" {
-                        return Err(Error::invalid(0, "plist dictionary entry lacks key"));
-                    }
-                    let value = children
-                        .next()
-                        .ok_or_else(|| Error::invalid(0, "plist dictionary key lacks value"))?;
-                    entries.push((key.text, Self::from_node(value)?));
-                }
-                Self::Dictionary(entries)
-            }
-            "array" => Self::Array(
-                node.children
-                    .into_iter()
-                    .map(Self::from_node)
-                    .collect::<Result<_>>()?,
-            ),
-            "string" => Self::String(node.text),
-            "integer" => Self::Integer(node.text.trim().to_owned()),
-            "real" => Self::Real(node.text.trim().to_owned()),
-            "true" => Self::Boolean(true),
-            "false" => Self::Boolean(false),
-            "data" => Self::Data(node.text.split_whitespace().collect()),
-            "date" => Self::Date(node.text.trim().to_owned()),
-            name => return Err(Error::invalid(0, format!("unsupported plist value {name}"))),
-        })
-    }
-}
-
 impl Ppt11FontDescriptorAtom {
     fn parse(bytes: &[u8]) -> Option<Self> {
         if bytes.is_empty() || !bytes.len().is_multiple_of(276) {
@@ -4430,489 +4046,52 @@ impl ParsedExternalStorage {
     }
 }
 
+impl MacPlistAtom {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
+            physical_xml: bytes.to_vec(),
+        }
+    }
+}
+
 impl SlideLayoutOpcPackage {
-    fn parse(bytes: &[u8], limits: Limits) -> Result<Self> {
-        let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|error| {
-            Error::invalid(0, format!("slide-layout OPC ZIP is invalid: {error}"))
-        })?;
-        if archive.len() > limits.max_entries {
-            return Err(Error::Limit(format!(
-                "slide-layout OPC entry count {} exceeds {}",
-                archive.len(),
-                limits.max_entries
-            )));
-        }
-        let mut entries = Vec::with_capacity(archive.len());
-        let mut total_uncompressed = 0usize;
-        for index in 0..archive.len() {
-            let mut file = archive.by_index(index).map_err(|error| {
-                Error::invalid(0, format!("cannot read slide-layout OPC entry: {error}"))
-            })?;
-            let uncompressed_size = file.size();
-            let entry_size = usize::try_from(uncompressed_size)
-                .map_err(|_| Error::Limit("OPC entry size exceeds usize".into()))?;
-            total_uncompressed = total_uncompressed
-                .checked_add(entry_size)
-                .ok_or_else(|| Error::Limit("OPC package size overflow".into()))?;
-            if entry_size > limits.max_allocation || total_uncompressed > limits.max_allocation {
-                return Err(Error::Limit(format!(
-                    "slide-layout OPC allocation {total_uncompressed} exceeds {}",
-                    limits.max_allocation
-                )));
-            }
-            let mut data = Vec::with_capacity(entry_size);
-            file.read_to_end(&mut data)?;
-            if data.len() != entry_size {
-                return Err(Error::invalid(0, "OPC entry uncompressed size mismatch"));
-            }
-            entries.push(OpcZipEntry {
-                name: file.name().to_owned(),
-                compression_method: if file.compression() == zip::CompressionMethod::STORE {
-                    0
-                } else if file.compression() == zip::CompressionMethod::DEFLATE {
-                    8
-                } else {
-                    u16::MAX
-                },
-                crc32: file.crc32(),
-                compressed_size: file.compressed_size(),
-                uncompressed_size,
-                unix_mode: file.unix_mode(),
-                data,
-            });
-        }
-        let content_types_entry = entries
-            .iter()
-            .find(|entry| entry.name == "[Content_Types].xml")
-            .ok_or_else(|| Error::invalid(0, "slide-layout OPC lacks [Content_Types].xml"))?;
-        let content_types =
-            OpcContentTypes::from_bytes(&content_types_entry.data).map_err(|error| {
-                Error::invalid(0, format!("invalid OPC content types XML: {error}"))
-            })?;
-        let slide_layout_part_name = content_types
-            .types_choice
-            .iter()
-            .find_map(|choice| match choice {
-                TypesChoice::Override(value)
-                    if value
-                        .content_type
-                        .eq_ignore_ascii_case("application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml") =>
-                {
-                    Some(value.part_name.trim_start_matches('/').to_owned())
-                }
-                _ => None,
-            })
-            .ok_or_else(|| Error::invalid(0, "OPC content types lacks slide-layout override"))?;
-        let layout_entry = entries
-            .iter()
-            .find(|entry| entry.name == slide_layout_part_name)
-            .ok_or_else(|| Error::invalid(0, "OPC slide-layout part is missing"))?;
-        let slide_layout = SlideLayout::from_bytes(&layout_entry.data)
-            .map_err(|error| Error::invalid(0, format!("invalid CT_SlideLayout XML: {error}")))?;
-        Ok(Self {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
             physical_bytes: bytes.to_vec(),
-            entries,
-            content_types,
-            slide_layout_part_name,
-            slide_layout,
-        })
-    }
-
-    pub fn validate_typed_xml_round_trip(&self) -> Result<()> {
-        let mut content_types_xml = Vec::new();
-        self.content_types.write_to(&mut content_types_xml)?;
-        let reparsed_content_types = OpcContentTypes::from_bytes(&content_types_xml)
-            .map_err(|error| Error::invalid(0, format!("content types reparse failed: {error}")))?;
-        if reparsed_content_types != self.content_types {
-            return Err(Error::invalid(0, "content types typed round-trip changed"));
         }
-        let layout_xml = self.slide_layout_xml()?;
-        let reparsed_layout = SlideLayout::from_bytes(&layout_xml)
-            .map_err(|error| Error::invalid(0, format!("slide layout reparse failed: {error}")))?;
-        if reparsed_layout != self.slide_layout {
-            let before = format!("{:?}", self.slide_layout);
-            let after = format!("{:?}", reparsed_layout);
-            let difference = before
-                .bytes()
-                .zip(after.bytes())
-                .position(|(left, right)| left != right)
-                .unwrap_or_else(|| before.len().min(after.len()));
-            let start = difference.saturating_sub(120);
-            let before_end = before.len().min(difference.saturating_add(240));
-            let after_end = after.len().min(difference.saturating_add(240));
-            return Err(Error::invalid(
-                0,
-                format!(
-                    "slide layout typed round-trip changed near debug byte {difference}: before {:?}, after {:?}",
-                    String::from_utf8_lossy(&before.as_bytes()[start..before_end]),
-                    String::from_utf8_lossy(&after.as_bytes()[start..after_end])
-                ),
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn slide_layout_xml(&self) -> Result<Vec<u8>> {
-        let mut xml = Vec::new();
-        self.slide_layout.write_to(&mut xml)?;
-        Ok(escape_xml_attribute_control_characters(&xml))
     }
 }
 
 impl ThemeOpcPackage {
-    fn parse(bytes: &[u8], limits: Limits) -> Result<Self> {
-        let (entries, content_types) = parse_opc_entries(bytes, limits, "theme")?;
-        let (theme_part_name, is_override) = content_types
-            .types_choice
-            .iter()
-            .find_map(|choice| match choice {
-                TypesChoice::Override(value)
-                    if value.content_type.eq_ignore_ascii_case(
-                        "application/vnd.openxmlformats-officedocument.theme+xml",
-                    ) =>
-                {
-                    Some((value.part_name.trim_start_matches('/').to_owned(), false))
-                }
-                TypesChoice::Override(value)
-                    if value.content_type.eq_ignore_ascii_case(
-                        "application/vnd.openxmlformats-officedocument.themeOverride+xml",
-                    ) =>
-                {
-                    Some((value.part_name.trim_start_matches('/').to_owned(), true))
-                }
-                _ => None,
-            })
-            .ok_or_else(|| Error::invalid(0, "OPC content types lacks theme override"))?;
-        let theme_entry = entries
-            .iter()
-            .find(|entry| entry.name == theme_part_name)
-            .ok_or_else(|| Error::invalid(0, "OPC theme part is missing"))?;
-        let root = if is_override {
-            ThemeRoot::ThemeOverride(ThemeOverride::from_bytes(&theme_entry.data).map_err(
-                |error| Error::invalid(0, format!("invalid CT_BaseStylesOverride XML: {error}")),
-            )?)
-        } else {
-            ThemeRoot::Theme(Theme::from_bytes(&theme_entry.data).map_err(|error| {
-                Error::invalid(0, format!("invalid CT_OfficeStyleSheet XML: {error}"))
-            })?)
-        };
-        Ok(Self {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
             physical_bytes: bytes.to_vec(),
-            entries,
-            content_types,
-            theme_part_name,
-            root,
-        })
-    }
-
-    pub fn validate_typed_xml_round_trip(&self) -> Result<()> {
-        let mut content_types_xml = Vec::new();
-        self.content_types.write_to(&mut content_types_xml)?;
-        if OpcContentTypes::from_bytes(&content_types_xml)
-            .map_err(|error| Error::invalid(0, format!("content types reparse failed: {error}")))?
-            != self.content_types
-        {
-            return Err(Error::invalid(0, "content types typed round-trip changed"));
         }
-        let mut xml = Vec::new();
-        match &self.root {
-            ThemeRoot::Theme(value) => value.write_to(&mut xml)?,
-            ThemeRoot::ThemeOverride(value) => value.write_to(&mut xml)?,
-        }
-        let xml = escape_xml_attribute_control_characters(&xml);
-        let equal = match &self.root {
-            ThemeRoot::Theme(value) => {
-                Theme::from_bytes(&xml)
-                    .map_err(|error| Error::invalid(0, format!("theme reparse failed: {error}")))?
-                    == *value
-            }
-            ThemeRoot::ThemeOverride(value) => {
-                ThemeOverride::from_bytes(&xml).map_err(|error| {
-                    Error::invalid(0, format!("theme override reparse failed: {error}"))
-                })? == *value
-            }
-        };
-        if !equal {
-            return Err(Error::invalid(0, "theme typed round-trip changed"));
-        }
-        Ok(())
     }
 }
 
 impl RoundTripColorMapping12Atom {
-    fn parse(bytes: &[u8]) -> Result<Self> {
-        let root = match ColorMap::from_bytes(bytes) {
-            Ok(value) => ColorMappingRoot::ColorMap(value),
-            Err(color_map_error) => match ColorMapOverride::from_bytes(bytes) {
-                Ok(value) => ColorMappingRoot::ColorMapOverride(value),
-                Err(override_error) => {
-                    return Err(Error::invalid(
-                        0,
-                        format!(
-                            "invalid CT_ColorMapping/CT_ColorMappingOverride XML: {color_map_error}; {override_error}"
-                        ),
-                    ));
-                }
-            },
-        };
-        Ok(Self {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
             physical_xml: bytes.to_vec(),
-            root,
-        })
-    }
-
-    pub fn validate_typed_xml_round_trip(&self) -> Result<()> {
-        let mut xml = Vec::new();
-        match &self.root {
-            ColorMappingRoot::ColorMap(value) => value.write_to(&mut xml)?,
-            ColorMappingRoot::ColorMapOverride(value) => value.write_to(&mut xml)?,
         }
-        let xml = escape_xml_attribute_control_characters(&xml);
-        let equal = match &self.root {
-            ColorMappingRoot::ColorMap(value) => {
-                ColorMap::from_bytes(&xml).map_err(|error| {
-                    Error::invalid(0, format!("color map reparse failed: {error}"))
-                })? == *value
-            }
-            ColorMappingRoot::ColorMapOverride(value) => {
-                ColorMapOverride::from_bytes(&xml).map_err(|error| {
-                    Error::invalid(0, format!("color map override reparse failed: {error}"))
-                })? == *value
-            }
-        };
-        if !equal {
-            return Err(Error::invalid(0, "color mapping typed round-trip changed"));
-        }
-        Ok(())
     }
 }
 
 impl TimingOpcPackage {
-    fn parse(bytes: &[u8], limits: Limits) -> Result<Self> {
-        let (entries, content_types) = parse_opc_entries(bytes, limits, "animation")?;
-        let mut timing_root = None;
-        for entry in &entries {
-            if let Ok(value) = Timing::from_bytes(&entry.data) {
-                if timing_root.is_some() {
-                    return Err(Error::invalid(
-                        0,
-                        "animation OPC contains multiple Timing roots",
-                    ));
-                }
-                timing_root = Some((entry.name.clone(), value));
-            }
-        }
-        let (timing_part_name, timing) = timing_root
-            .ok_or_else(|| Error::invalid(0, "animation OPC lacks a CT_SlideTiming root"))?;
-        Ok(Self {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
             physical_bytes: bytes.to_vec(),
-            entries,
-            content_types,
-            timing_part_name,
-            timing,
-        })
-    }
-
-    pub fn validate_typed_xml_round_trip(&self) -> Result<()> {
-        let mut content_types_xml = Vec::new();
-        self.content_types.write_to(&mut content_types_xml)?;
-        if OpcContentTypes::from_bytes(&content_types_xml)
-            .map_err(|error| Error::invalid(0, format!("content types reparse failed: {error}")))?
-            != self.content_types
-        {
-            return Err(Error::invalid(0, "content types typed round-trip changed"));
         }
-        let mut timing_xml = Vec::new();
-        self.timing.write_to(&mut timing_xml)?;
-        let timing_xml = escape_xml_attribute_control_characters(&timing_xml);
-        if Timing::from_bytes(&timing_xml)
-            .map_err(|error| Error::invalid(0, format!("timing reparse failed: {error}")))?
-            != self.timing
-        {
-            return Err(Error::invalid(0, "timing typed round-trip changed"));
-        }
-        Ok(())
     }
 }
 
 impl StyleOpcPackage {
-    fn parse(bytes: &[u8], record_type: u16, limits: Limits) -> Result<Self> {
-        let label = match record_type {
-            ROUND_TRIP_OART_TEXT_STYLES_12_ATOM => "text-styles",
-            ROUND_TRIP_NOTES_MASTER_TEXT_STYLES_12_ATOM => "notes-text-styles",
-            _ => "table-styles",
-        };
-        let (entries, content_types) = parse_opc_entries(bytes, limits, label)?;
-        let expected_content_type = match record_type {
-            ROUND_TRIP_OART_TEXT_STYLES_12_ATOM | ROUND_TRIP_NOTES_MASTER_TEXT_STYLES_12_ATOM => {
-                "application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"
-            }
-            _ => "application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml",
-        };
-        let root_part_name = content_types
-            .types_choice
-            .iter()
-            .find_map(|choice| match choice {
-                TypesChoice::Override(value)
-                    if value
-                        .content_type
-                        .eq_ignore_ascii_case(expected_content_type) =>
-                {
-                    Some(value.part_name.trim_start_matches('/').to_owned())
-                }
-                _ => None,
-            })
-            .ok_or_else(|| Error::invalid(0, format!("OPC content types lacks {label} part")))?;
-        let root_entry = entries
-            .iter()
-            .find(|entry| entry.name == root_part_name)
-            .ok_or_else(|| Error::invalid(0, format!("OPC {label} part is missing")))?;
-        let root = if matches!(
-            record_type,
-            ROUND_TRIP_OART_TEXT_STYLES_12_ATOM | ROUND_TRIP_NOTES_MASTER_TEXT_STYLES_12_ATOM
-        ) {
-            StyleOpcRoot::TextStyles(TextStyles::from_bytes(&root_entry.data).map_err(|error| {
-                Error::invalid(0, format!("invalid CT_SlideMasterTextStyles XML: {error}"))
-            })?)
-        } else {
-            StyleOpcRoot::TableStyles(TableStyleList::from_bytes(&root_entry.data).map_err(
-                |error| Error::invalid(0, format!("invalid CT_TableStyleList XML: {error}")),
-            )?)
-        };
-        Ok(Self {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
             physical_bytes: bytes.to_vec(),
-            entries,
-            content_types,
-            root_part_name,
-            root,
-        })
-    }
-
-    pub fn validate_typed_xml_round_trip(&self) -> Result<()> {
-        let mut content_types_xml = Vec::new();
-        self.content_types.write_to(&mut content_types_xml)?;
-        if OpcContentTypes::from_bytes(&content_types_xml)
-            .map_err(|error| Error::invalid(0, format!("content types reparse failed: {error}")))?
-            != self.content_types
-        {
-            return Err(Error::invalid(0, "content types typed round-trip changed"));
-        }
-        let mut xml = Vec::new();
-        match &self.root {
-            StyleOpcRoot::TextStyles(value) => value.write_to(&mut xml)?,
-            StyleOpcRoot::TableStyles(value) => value.write_to(&mut xml)?,
-        }
-        let xml = escape_xml_attribute_control_characters(&xml);
-        let equal = match &self.root {
-            StyleOpcRoot::TextStyles(value) => {
-                TextStyles::from_bytes(&xml).map_err(|error| {
-                    Error::invalid(0, format!("text styles reparse failed: {error}"))
-                })? == *value
-            }
-            StyleOpcRoot::TableStyles(value) => {
-                TableStyleList::from_bytes(&xml).map_err(|error| {
-                    Error::invalid(0, format!("table styles reparse failed: {error}"))
-                })? == *value
-            }
-        };
-        if !equal {
-            return Err(Error::invalid(0, "style typed round-trip changed"));
-        }
-        Ok(())
-    }
-}
-
-fn parse_opc_entries(
-    bytes: &[u8],
-    limits: Limits,
-    label: &str,
-) -> Result<(Vec<OpcZipEntry>, OpcContentTypes)> {
-    let mut archive = ZipArchive::new(Cursor::new(bytes))
-        .map_err(|error| Error::invalid(0, format!("{label} OPC ZIP is invalid: {error}")))?;
-    if archive.len() > limits.max_entries {
-        return Err(Error::Limit(format!(
-            "{label} OPC entry count {} exceeds {}",
-            archive.len(),
-            limits.max_entries
-        )));
-    }
-    let mut entries = Vec::with_capacity(archive.len());
-    let mut total_uncompressed = 0usize;
-    for index in 0..archive.len() {
-        let mut file = archive.by_index(index).map_err(|error| {
-            Error::invalid(0, format!("cannot read {label} OPC entry: {error}"))
-        })?;
-        let uncompressed_size = file.size();
-        let entry_size = usize::try_from(uncompressed_size)
-            .map_err(|_| Error::Limit("OPC entry size exceeds usize".into()))?;
-        total_uncompressed = total_uncompressed
-            .checked_add(entry_size)
-            .ok_or_else(|| Error::Limit("OPC package size overflow".into()))?;
-        if entry_size > limits.max_allocation || total_uncompressed > limits.max_allocation {
-            return Err(Error::Limit(format!(
-                "{label} OPC allocation {total_uncompressed} exceeds {}",
-                limits.max_allocation
-            )));
-        }
-        let mut data = Vec::with_capacity(entry_size);
-        file.read_to_end(&mut data)?;
-        entries.push(OpcZipEntry {
-            name: file.name().to_owned(),
-            compression_method: if file.compression() == zip::CompressionMethod::STORE {
-                0
-            } else if file.compression() == zip::CompressionMethod::DEFLATE {
-                8
-            } else {
-                u16::MAX
-            },
-            crc32: file.crc32(),
-            compressed_size: file.compressed_size(),
-            uncompressed_size,
-            unix_mode: file.unix_mode(),
-            data,
-        });
-    }
-    let content_types_entry = entries
-        .iter()
-        .find(|entry| entry.name == "[Content_Types].xml")
-        .ok_or_else(|| Error::invalid(0, format!("{label} OPC lacks [Content_Types].xml")))?;
-    let content_types = OpcContentTypes::from_bytes(&content_types_entry.data)
-        .map_err(|error| Error::invalid(0, format!("invalid OPC content types XML: {error}")))?;
-    Ok((entries, content_types))
-}
-
-/// XML 1.0 normalizes literal tabs and line breaks in attributes, while character
-/// references retain their exact value. Schema writers therefore have to emit
-/// these controls as references when a typed string contains them.
-fn escape_xml_attribute_control_characters(xml: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(xml.len());
-    let mut in_tag = false;
-    let mut quote = None;
-    for &byte in xml {
-        match (in_tag, quote, byte) {
-            (false, _, b'<') => {
-                in_tag = true;
-                output.push(byte);
-            }
-            (true, None, b'>') => {
-                in_tag = false;
-                output.push(byte);
-            }
-            (true, None, b'\'' | b'"') => {
-                quote = Some(byte);
-                output.push(byte);
-            }
-            (true, Some(delimiter), value) if value == delimiter => {
-                quote = None;
-                output.push(value);
-            }
-            (true, Some(_), b'\n') => output.extend_from_slice(b"&#xA;"),
-            (true, Some(_), b'\r') => output.extend_from_slice(b"&#xD;"),
-            (true, Some(_), b'\t') => output.extend_from_slice(b"&#x9;"),
-            _ => output.push(byte),
         }
     }
-    output
 }
 
 impl StyleTextPropAtom {
@@ -5764,17 +4943,9 @@ mod tests {
     }
 
     #[test]
-    fn mac_plist_builds_typed_dictionary_and_unescapes_text() {
+    fn mac_plist_preserves_external_xml_bytes() {
         let xml = br#"<?xml version="1.0"?><plist version="1.0"><dict><key>name</key><string>A &amp; B</string><key>enabled</key><true/><key>items</key><array><integer>7</integer><real>1.5</real></array></dict></plist>"#;
-        let value = MacPlistAtom::parse(xml).unwrap();
-        assert_eq!(value.document.version.as_deref(), Some("1.0"));
-        assert!(matches!(
-            &value.document.value,
-            PlistValue::Dictionary(entries)
-                if entries[0] == ("name".into(), PlistValue::String("A & B".into()))
-                    && entries[1] == ("enabled".into(), PlistValue::Boolean(true))
-                    && matches!(&entries[2].1, PlistValue::Array(items) if items.len() == 2)
-        ));
+        let value = MacPlistAtom::from_bytes(xml);
         assert_eq!(value.physical_xml, xml);
     }
 
@@ -6090,15 +5261,6 @@ mod tests {
                 ExternalStorageAtom::Parsed(value) => value.encoding,
                 _ => unreachable!(),
             }
-        );
-    }
-
-    #[test]
-    fn xml_attribute_controls_are_written_as_character_references() {
-        let xml = b"<root value=\"a\nb\tc\r\"><text>line\n</text></root>";
-        assert_eq!(
-            escape_xml_attribute_control_characters(xml),
-            b"<root value=\"a&#xA;b&#x9;c&#xD;\"><text>line\n</text></root>"
         );
     }
 }
