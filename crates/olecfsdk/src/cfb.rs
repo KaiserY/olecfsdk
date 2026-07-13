@@ -204,6 +204,29 @@ impl CompoundFile {
         }
         Ok(std::mem::replace(&mut entry.data, data))
     }
+
+    pub fn replace_storage_class_id(
+        &mut self,
+        path: impl AsRef<Path>,
+        class_id: Guid,
+    ) -> Result<Guid> {
+        let path = path.as_ref();
+        let entry = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.path == path)
+            .ok_or_else(|| {
+                Error::invalid(0, format!("CFB entry {} does not exist", path.display()))
+            })?;
+        if !entry.is_storage() {
+            return Err(Error::invalid(
+                0,
+                format!("CFB entry {} is not a storage", path.display()),
+            ));
+        }
+        Ok(std::mem::replace(&mut entry.clsid, class_id))
+    }
+
     pub fn create_storage(&mut self, path: impl AsRef<Path>) -> Result<()> {
         self.create_entry(path.as_ref(), EntryKind::Storage, Vec::new())
     }
