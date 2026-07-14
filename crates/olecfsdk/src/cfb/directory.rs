@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, io::Cursor, path::PathBuf};
+use std::{cmp::Ordering, collections::BTreeSet, io::Cursor, path::PathBuf};
 
 use crate::{
     Error, Result, SdkEnum, SdkObject,
@@ -7,7 +7,7 @@ use crate::{
     limits::Limits,
 };
 
-use super::{SectorId, Version, sector::SectorSource};
+use super::{SectorId, Version, name, sector::SectorSource};
 
 pub const DIRECTORY_ENTRY_LEN: usize = 128;
 pub const NO_STREAM: u32 = 0xffff_ffff;
@@ -249,6 +249,195 @@ impl Directory {
             }
         }
         Ok(output)
+    }
+
+    pub(crate) fn validate_strict(&self, version: Version) -> Result<()> {
+        if version == Version::V3 && self.declared_sector_count != 0 {
+            return Err(Error::invalid(
+                40,
+                "CFB v3 directory sector count must be zero",
+            ));
+        }
+        if version == Version::V4 && self.declared_sector_count as usize != self.sectors.len() {
+            return Err(Error::invalid(
+                40,
+                "CFB v4 directory sector count does not match its chain",
+            ));
+        }
+
+        for (id, entry) in self.entries.iter().enumerate() {
+            if entry.object_type == DirectoryObjectType::Unallocated {
+                if entry.name_buffer != [0; 32]
+                    || entry.name_length != 0
+                    || entry.color != DirectoryColor::Red
+                    || entry.left_sibling != DirectoryPointer::None
+                    || entry.right_sibling != DirectoryPointer::None
+                    || entry.child != DirectoryPointer::None
+                    || !entry.clsid.is_zero()
+                    || entry.state_bits != 0
+                    || entry.creation_time != FileTime::ZERO
+                    || entry.modified_time != FileTime::ZERO
+                    || entry.start_sector != 0
+                    || entry.stream_size != 0
+                {
+                    return Err(Error::invalid(
+                        id as u64 * DIRECTORY_ENTRY_LEN as u64,
+                        "unallocated CFB directory entries must have canonical zero fields",
+                    ));
+                }
+                continue;
+            }
+            let raw_name = entry.raw_name()?;
+            let terminator = entry.name_char_len()?;
+            if entry.name_buffer[terminator] != 0 {
+                return Err(Error::invalid(
+                    id as u64 * DIRECTORY_ENTRY_LEN as u64,
+                    "CFB directory name is not NUL-terminated",
+                ));
+            }
+            match entry.object_type {
+                DirectoryObjectType::Root => {
+                    if id != 0 || raw_name != "Root Entry" {
+                        return Err(Error::invalid(
+                            id as u64 * DIRECTORY_ENTRY_LEN as u64,
+                            "CFB root entry has the wrong ID or name",
+                        ));
+                    }
+                    if entry.left_sibling != DirectoryPointer::None
+                        || entry.right_sibling != DirectoryPointer::None
+                    {
+                        return Err(Error::invalid(
+                            id as u64 * DIRECTORY_ENTRY_LEN as u64 + 68,
+                            "CFB root entry cannot have siblings",
+                        ));
+                    }
+                    if entry.creation_time != FileTime::ZERO {
+                        return Err(Error::invalid(
+                            id as u64 * DIRECTORY_ENTRY_LEN as u64 + 100,
+                            "CFB root creation time must be zero",
+                        ));
+                    }
+                }
+                DirectoryObjectType::Storage => {
+                    name::validate_entry_name(&raw_name)?;
+                    if entry.start_sector != 0 || entry.stream_size != 0 {
+                        return Err(Error::invalid(
+                            id as u64 * DIRECTORY_ENTRY_LEN as u64 + 116,
+                            "CFB storage start sector and stream size must be zero",
+                        ));
+                    }
+                }
+                DirectoryObjectType::Stream => {
+                    name::validate_entry_name(&raw_name)?;
+                    if !entry.clsid.is_zero()
+                        || entry.creation_time != FileTime::ZERO
+                        || entry.modified_time != FileTime::ZERO
+                    {
+                        return Err(Error::invalid(
+                            id as u64 * DIRECTORY_ENTRY_LEN as u64 + 80,
+                            "CFB stream CLSID and timestamps must be zero",
+                        ));
+                    }
+                }
+                DirectoryObjectType::Unallocated => unreachable!(),
+            }
+            if version == Version::V3
+                && matches!(
+                    entry.object_type,
+                    DirectoryObjectType::Root | DirectoryObjectType::Stream
+                )
+                && (entry.stream_size > 0x8000_0000 || entry.stream_size >> 32 != 0)
+            {
+                return Err(Error::invalid(
+                    id as u64 * DIRECTORY_ENTRY_LEN as u64 + 120,
+                    "CFB v3 stream size must fit the specified 2 GiB range",
+                ));
+            }
+        }
+
+        let mut visited = BTreeSet::new();
+        self.validate_strict_node(0, false, None, None, &mut visited)?;
+        if self.entries.iter().enumerate().any(|(id, entry)| {
+            entry.object_type != DirectoryObjectType::Unallocated && !visited.contains(&(id as u32))
+        }) {
+            return Err(Error::invalid(
+                0,
+                "CFB directory contains an allocated entry outside the hierarchy",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_strict_node(
+        &self,
+        id: u32,
+        parent_is_red: bool,
+        lower_bound: Option<u32>,
+        upper_bound: Option<u32>,
+        visited: &mut BTreeSet<u32>,
+    ) -> Result<()> {
+        if !visited.insert(id) {
+            return Err(Error::invalid(0, "CFB directory tree contains a cycle"));
+        }
+        let entry = self
+            .entries
+            .get(id as usize)
+            .ok_or_else(|| Error::invalid(0, "CFB directory pointer is out of bounds"))?;
+        let is_red = entry.color == DirectoryColor::Red;
+        if parent_is_red && is_red {
+            return Err(Error::invalid(
+                id as u64 * DIRECTORY_ENTRY_LEN as u64 + 67,
+                "CFB directory tree contains adjacent red nodes",
+            ));
+        }
+
+        let entry_name = entry.name()?;
+        for (bound, required) in [
+            (lower_bound, Ordering::Greater),
+            (upper_bound, Ordering::Less),
+        ] {
+            let Some(bound) = bound else { continue };
+            let bound_entry = self
+                .entries
+                .get(bound as usize)
+                .ok_or_else(|| Error::invalid(0, "CFB directory bound is out of bounds"))?;
+            if name::compare_names(&entry_name, &bound_entry.name()?) != required {
+                return Err(Error::invalid(
+                    id as u64 * DIRECTORY_ENTRY_LEN as u64,
+                    "CFB directory sibling names are not in MS-CFB order or are not unique",
+                ));
+            }
+        }
+
+        for (pointer, expected) in [
+            (entry.left_sibling, Ordering::Less),
+            (entry.right_sibling, Ordering::Greater),
+        ] {
+            let DirectoryPointer::Entry(sibling) = pointer else {
+                continue;
+            };
+            let sibling_entry = self
+                .entries
+                .get(sibling as usize)
+                .ok_or_else(|| Error::invalid(0, "CFB sibling pointer is out of bounds"))?;
+            let ordering = name::compare_names(&sibling_entry.name()?, &entry.name()?);
+            if ordering != expected {
+                return Err(Error::invalid(
+                    sibling as u64 * DIRECTORY_ENTRY_LEN as u64,
+                    "CFB directory sibling names are not in MS-CFB order",
+                ));
+            }
+            let (lower, upper) = if expected == Ordering::Less {
+                (lower_bound, Some(id))
+            } else {
+                (Some(id), upper_bound)
+            };
+            self.validate_strict_node(sibling, is_red, lower, upper, visited)?;
+        }
+        if let DirectoryPointer::Entry(child) = entry.child {
+            self.validate_strict_node(child, false, None, None, visited)?;
+        }
+        Ok(())
     }
 
     fn validate_tree(&self) -> Result<()> {

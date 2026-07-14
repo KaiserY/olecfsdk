@@ -74,7 +74,11 @@ pub(crate) fn read_entries(
             kind,
             clsid,
             state_bits: raw.state_bits,
-            created: if kind == EntryKind::Stream {
+            // Keep the raw directory entry available through `Directory`, but
+            // expose a spec-normalized logical model for editing and rewrite.
+            // MS-CFB requires both stream times and the root creation time to
+            // be zero.
+            created: if matches!(kind, EntryKind::Root | EntryKind::Stream) {
                 FileTime::ZERO
             } else {
                 raw.creation_time

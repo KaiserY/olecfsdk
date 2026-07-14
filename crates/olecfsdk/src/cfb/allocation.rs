@@ -77,6 +77,8 @@ impl FatEntry {
 pub struct Difat {
     fat_sectors: Vec<SectorId>,
     difat_sectors: Vec<SectorId>,
+    canonical_entries: bool,
+    canonical_terminator: bool,
 }
 
 impl Difat {
@@ -104,6 +106,13 @@ impl Difat {
             }
             push_unique_sector(raw, "header DIFAT", &mut fat_sectors, &mut seen_fat)?;
         }
+        let header_used = expected_fat.min(header.difat.len());
+        let mut canonical_entries = header.difat[..header_used]
+            .iter()
+            .all(|raw| *raw != FREE_SECTOR)
+            && header.difat[header_used..]
+                .iter()
+                .all(|raw| *raw == FREE_SECTOR);
 
         let expected_difat = usize::try_from(header.number_of_difat_sectors)
             .map_err(|_| Error::Limit("DIFAT sector count does not fit usize".into()))?;
@@ -132,14 +141,18 @@ impl Difat {
             let (chain, entries) = values
                 .split_last()
                 .ok_or_else(|| Error::invalid(0, "empty DIFAT sector"))?;
+            let needed = expected_fat.saturating_sub(fat_sectors.len());
+            let used = needed.min(entries.len());
+            canonical_entries &= entries[..used].iter().all(|raw| *raw != FREE_SECTOR);
             if fat_sectors.len() < expected_fat {
-                for &raw in entries {
+                for &raw in &entries[..used] {
                     if fat_sectors.len() == expected_fat || raw == FREE_SECTOR {
                         break;
                     }
                     push_unique_sector(raw, "DIFAT", &mut fat_sectors, &mut seen_fat)?;
                 }
             }
+            canonical_entries &= entries[used..].iter().all(|raw| *raw == FREE_SECTOR);
             next = *chain;
         }
         if fat_sectors.len() != expected_fat {
@@ -154,6 +167,8 @@ impl Difat {
         Ok(Self {
             fat_sectors,
             difat_sectors,
+            canonical_entries,
+            canonical_terminator: next == END_OF_CHAIN,
         })
     }
 
@@ -164,12 +179,29 @@ impl Difat {
     pub fn difat_sectors(&self) -> &[SectorId] {
         &self.difat_sectors
     }
+
+    pub(crate) fn validate_strict(&self) -> Result<()> {
+        if !self.canonical_entries {
+            return Err(Error::invalid(
+                76,
+                "CFB DIFAT FAT locations must be contiguous and remaining entries FREESECT",
+            ));
+        }
+        if !self.canonical_terminator {
+            return Err(Error::invalid(
+                68,
+                "CFB DIFAT chain must terminate with ENDOFCHAIN",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fat {
     entries: Vec<FatEntry>,
     marker_mismatches: Vec<FatMarkerMismatch>,
+    file_sector_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,6 +265,48 @@ impl MiniFat {
 
     pub fn sector_count_matches_header(&self) -> bool {
         self.sectors.len() == self.declared_sector_count as usize
+    }
+
+    pub(crate) fn validate_strict(&self, mini_sector_count: usize) -> Result<()> {
+        if self.entries.len() < mini_sector_count {
+            return Err(Error::invalid(
+                0,
+                "CFB MiniFAT does not cover the root mini stream",
+            ));
+        }
+        let mut pointees = BTreeSet::new();
+        for entry in &self.entries[..mini_sector_count] {
+            match *entry {
+                MiniFatEntry::MiniSector(target) => {
+                    if target.get() as usize >= mini_sector_count {
+                        return Err(Error::invalid(
+                            0,
+                            "CFB MiniFAT points beyond the mini stream",
+                        ));
+                    }
+                    if !pointees.insert(target) {
+                        return Err(Error::invalid(0, "CFB mini-sector is pointed to twice"));
+                    }
+                }
+                MiniFatEntry::Invalid(value) => {
+                    return Err(Error::invalid(
+                        0,
+                        format!("invalid MiniFAT marker 0x{value:08x}"),
+                    ));
+                }
+                MiniFatEntry::EndOfChain | MiniFatEntry::Free => {}
+            }
+        }
+        if self.entries[mini_sector_count..]
+            .iter()
+            .any(|entry| *entry != MiniFatEntry::Free)
+        {
+            return Err(Error::invalid(
+                0,
+                "CFB MiniFAT entries beyond the mini stream must be FREESECT",
+            ));
+        }
+        Ok(())
     }
 
     pub fn chain(&self, start: u32, mini_sector_count: usize) -> Result<Vec<MiniSectorId>> {
@@ -324,6 +398,7 @@ impl Fat {
         Ok(Self {
             entries,
             marker_mismatches,
+            file_sector_count: source.sector_count() - usize::from(source.has_partial_sector()),
         })
     }
 
@@ -335,6 +410,48 @@ impl Fat {
     /// mode. The original FAT entries remain available in `entries()`.
     pub fn marker_mismatches(&self) -> &[FatMarkerMismatch] {
         &self.marker_mismatches
+    }
+
+    pub(crate) fn validate_strict(&self) -> Result<()> {
+        if self.entries.len() < self.file_sector_count {
+            return Err(Error::invalid(
+                44,
+                "CFB FAT does not cover every file sector",
+            ));
+        }
+        let mut pointees = BTreeSet::new();
+        for entry in &self.entries[..self.file_sector_count] {
+            match *entry {
+                FatEntry::Sector(target) => {
+                    if target.get() as usize >= self.file_sector_count {
+                        return Err(Error::invalid(0, "CFB FAT points beyond the file"));
+                    }
+                    if !pointees.insert(target) {
+                        return Err(Error::invalid(0, "CFB sector is pointed to twice"));
+                    }
+                }
+                FatEntry::Invalid(value) => {
+                    return Err(Error::invalid(
+                        0,
+                        format!("invalid FAT marker 0x{value:08x}"),
+                    ));
+                }
+                FatEntry::DifatSector
+                | FatEntry::FatSector
+                | FatEntry::EndOfChain
+                | FatEntry::Free => {}
+            }
+        }
+        if self.entries[self.file_sector_count..]
+            .iter()
+            .any(|entry| *entry != FatEntry::Free)
+        {
+            return Err(Error::invalid(
+                0,
+                "CFB FAT entries beyond end-of-file must be FREESECT",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn is_free_or_unaddressed(&self, sector: SectorId) -> bool {
@@ -447,6 +564,7 @@ mod tests {
                 FatEntry::EndOfChain,
             ],
             marker_mismatches: Vec::new(),
+            file_sector_count: 2,
         };
         assert_eq!(
             fat.chain(0, 2).unwrap(),
@@ -456,6 +574,7 @@ mod tests {
         let cyclic = Fat {
             entries: vec![FatEntry::Sector(SectorId::new(0).unwrap())],
             marker_mismatches: Vec::new(),
+            file_sector_count: 1,
         };
         assert!(cyclic.chain(0, 1).is_err());
         assert!(fat.chain(FREE_SECTOR, 2).is_err());

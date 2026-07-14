@@ -9,7 +9,7 @@ The initial workspace contains:
 
 The project is developed round-trip first: unknown bounded payloads are preserved while corpus-driven work replaces them with static Rust types.
 
-## Phase 1 baseline
+## CFB baseline
 
 - CFB v3/v4 containers open into an owned logical storage/stream model and are
   rebuilt deterministically.
@@ -18,10 +18,12 @@ The project is developed round-trip first: unknown bounded payloads are preserve
 - Bounded readers, writers, allocation limits, and `SdkObject`/`SdkEnum` derives
   provide the base for typed DOC/XLS/PPT records.
 - CFB reading and deterministic writing use SDK-owned static header,
-  DIFAT/FAT, MiniFAT, directory, and regular/mini-stream types. The sibling
-  `rust-cfb` crate is dev-only and provides strict differential validation.
+  DIFAT/FAT, MiniFAT, directory, and regular/mini-stream types. Strict reopen,
+  name ordering, allocation validation, stream/storage editing, and corpus
+  assertions are all provided by `olecfsdk`; neither this workspace nor the
+  external test suite depends on the sibling `rust-cfb` crate.
 
-The external corpus workspace contains 1533 generated legacy Office tests:
+The external corpus workspace contains 1,533 generated legacy Office CFB tests:
 
 ```sh
 cd ../ooxmlsdk-test-suite

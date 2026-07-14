@@ -13,6 +13,7 @@ use super::{
         DIRECTORY_ENTRY_LEN, DirectoryColor, DirectoryEntry, DirectoryObjectType, DirectoryPointer,
     },
     header::{BYTE_ORDER_LE, FREE_SECTOR, Header, MAGIC, MINI_SECTOR_SHIFT, MINI_STREAM_CUTOFF},
+    name::{compare_names, validate_entry_name},
 };
 
 const MINI_SECTOR_LEN: usize = 64;
@@ -52,6 +53,15 @@ fn write_logical_compound(
         Version::V4 => 4096,
     };
     let ordered = ordered_entries(entries)?;
+    if version == Version::V3
+        && ordered
+            .iter()
+            .any(|entry| entry.kind == EntryKind::Stream && entry.data.len() > 0x8000_0000)
+    {
+        return Err(Error::Limit(
+            "CFB v3 streams cannot exceed the specified 2 GiB limit".into(),
+        ));
+    }
     let mut starts = vec![END_OF_CHAIN; ordered.len()];
     let mut mini_starts = vec![END_OF_CHAIN; ordered.len()];
     let mut mini_stream = Vec::new();
@@ -81,6 +91,11 @@ fn write_logical_compound(
             mini_stream.extend_from_slice(&entry.data[begin..end]);
             mini_stream.resize(mini_stream.len().next_multiple_of(MINI_SECTOR_LEN), 0);
         }
+    }
+    if version == Version::V3 && mini_stream.len() > 0x8000_0000 {
+        return Err(Error::Limit(
+            "CFB v3 mini stream cannot exceed the specified 2 GiB limit".into(),
+        ));
     }
 
     let mut sectors = Vec::<Vec<u8>>::new();
@@ -134,7 +149,9 @@ fn write_logical_compound(
     let fat_entries_per_sector = sector_len / 4;
     let difat_entries_per_sector = fat_entries_per_sector - 1;
     let (fat_sector_count, difat_sector_count) = allocation_table_counts(
-        data_sector_count,
+        data_sector_count
+            .checked_add(unallocated_sectors.len())
+            .ok_or_else(|| Error::Limit("CFB sector count overflow".into()))?,
         fat_entries_per_sector,
         difat_entries_per_sector,
     )?;
@@ -306,7 +323,7 @@ fn build_directory_entries(
                 entry.clsid
             },
             state_bits: entry.state_bits,
-            creation_time: if entry.kind == EntryKind::Stream {
+            creation_time: if matches!(entry.kind, EntryKind::Root | EntryKind::Stream) {
                 FileTime::ZERO
             } else {
                 entry.created
@@ -484,54 +501,16 @@ fn unallocated_directory_entry() -> DirectoryEntry {
 }
 
 fn encode_name(name: &str) -> Result<[u16; 32]> {
+    validate_entry_name(name)?;
     let chars: Vec<_> = name.encode_utf16().collect();
-    if chars.len() > 31 {
-        return Err(Error::invalid(0, "CFB name exceeds 31 UTF-16 code units"));
-    }
-    if name
-        .chars()
-        .any(|value| matches!(value, '/' | '\\' | ':' | '!'))
-    {
-        return Err(Error::invalid(0, "CFB name contains a forbidden character"));
-    }
     let mut buffer = [0; 32];
     buffer[..chars.len()].copy_from_slice(&chars);
     Ok(buffer)
 }
 
-pub(crate) fn validate_entry_name(name: &str) -> Result<()> {
-    if name.contains('\0') {
-        return Err(Error::invalid(0, "new CFB name contains NUL"));
-    }
-    encode_name(name).map(|_| ())
-}
-
 fn name_length(name: &str) -> Result<u16> {
     let chars = name.encode_utf16().count();
     u16::try_from((chars + 1) * 2).map_err(|_| Error::invalid(0, "CFB name length overflow"))
-}
-
-fn compare_names(left: &str, right: &str) -> Ordering {
-    let left_len = left.encode_utf16().count();
-    let right_len = right.encode_utf16().count();
-    left_len.cmp(&right_len).then_with(|| {
-        left.chars()
-            .map(cfb_simple_uppercase)
-            .cmp(right.chars().map(cfb_simple_uppercase))
-    })
-}
-
-pub(crate) fn names_equal(left: &str, right: &str) -> bool {
-    compare_names(left, right) == Ordering::Equal
-}
-
-fn cfb_simple_uppercase(value: char) -> char {
-    // MS-CFB uses one-to-one invariant uppercase mapping. In particular,
-    // U+00DF must not expand to the full-uppercase string "SS".
-    match value {
-        'ß' => 'ß',
-        value => value.to_uppercase().next().unwrap_or(value),
-    }
 }
 
 fn div_ceil(value: usize, divisor: usize) -> usize {
@@ -553,10 +532,5 @@ mod tests {
         assert!(fat > HEADER_DIFAT_LEN);
         assert!(difat > 0);
         assert!(20_000 + fat + difat <= fat * 128);
-    }
-
-    #[test]
-    fn directory_comparison_uses_simple_uppercase_for_sharp_s() {
-        assert_eq!(compare_names("ßY", "UF"), Ordering::Greater);
     }
 }
