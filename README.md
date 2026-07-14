@@ -9,6 +9,16 @@ The initial workspace contains:
 
 The project is developed round-trip first: unknown bounded payloads are preserved while corpus-driven work replaces them with static Rust types.
 
+## Typed file roots
+
+`doc::DocFile`, `ppt::PptFile`, and `xls::XlsFile` open a compound file into
+owned Rust structure trees and rebuild their managed streams from those trees.
+They deliberately preserve physical and semantic hierarchy: DOC text pieces
+retain CP/FC and encoding, PPT remains a recursive record/container tree, and
+XLS retains BIFF records plus nested BOF/EOF substreams (including files that
+contain both `/Workbook` and `/Book`). The SDK does not substitute lossy
+plain-text, slide-summary, or cell-string projections for these trees.
+
 ## CFB baseline
 
 - CFB v3/v4 containers open into an owned logical storage/stream model and are

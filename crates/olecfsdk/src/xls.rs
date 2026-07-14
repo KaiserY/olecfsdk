@@ -2,6 +2,13 @@
 
 pub mod formula;
 
+mod file;
+
+pub use file::{
+    BiffSubstreamKind, BiffSubstreamNode, BiffWorkbookTree, XlsFile, XlsRevisionLog, XlsStreamName,
+    XlsWorkbookStream,
+};
+
 pub use formula::{
     BiffConstant, FormulaArray, FormulaMemExtra, FormulaOperator, FormulaRange, FormulaToken,
     FormulaTokenData, FormulaTokenStream,

@@ -1,5 +1,9 @@
 //! Static framing and incremental-save structures for the PPT97 binary stream.
 
+mod file;
+
+pub use file::PptFile;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{Cursor, Read, Write},

@@ -4,6 +4,13 @@
 //! the remainder of the `WordDocument` stream so callers can replace or edit
 //! it without losing physical bytes outside the structure.
 
+mod file;
+
+pub use file::{
+    DocDataStream, DocFile, DocFkpPage, DocLocated, DocLocatedBookmarks, DocSectionProperties,
+    DocTableStream, DocTableStreamName, DocTextPiece, DocWordDocumentStream,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use bitflags::bitflags;
