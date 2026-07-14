@@ -17,6 +17,13 @@ impl Error {
             message: message.into(),
         }
     }
+
+    pub const fn offset(&self) -> Option<u64> {
+        match self {
+            Self::InvalidData { offset, .. } => Some(*offset),
+            Self::Io(_) | Self::Limit(_) => None,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

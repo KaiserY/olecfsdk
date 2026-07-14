@@ -10,11 +10,18 @@ pub mod forms;
 pub mod io;
 pub mod limits;
 pub mod office_art;
+pub mod parse;
 pub mod ppt;
 pub mod property_set;
+pub mod save;
 pub mod shared;
 pub mod vba;
 pub mod xls;
 
 pub use error::{Error, Result};
 pub use olecfsdk_derive::{SdkEnum, SdkObject};
+pub use parse::{
+    ParseDiagnostic, ParseDiagnosticCode, ParseDiagnosticLocation, ParseDiagnosticSeverity,
+    ParseOptions, ParseOutcome, SpecificationReference,
+};
+pub use save::{CompatibilityWritePolicy, SaveOptions};

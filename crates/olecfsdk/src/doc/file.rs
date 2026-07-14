@@ -2,7 +2,15 @@
 
 use std::{collections::BTreeMap, path::Path};
 
-use crate::{Error, Result, cfb::CompoundFile, limits::Limits};
+use crate::{
+    Error, Result,
+    cfb::CompoundFile,
+    io::BinaryFormat,
+    limits::Limits,
+    parse::{
+        ParseOptions, ParseOutcome, compound_from_bytes, compound_from_path, compound_outcome,
+    },
+};
 
 use super::{
     Bookmarks, ChpxFkp, Clx, DocOfficeArtContent, Fib, FibBaseFlags, FibFcLcb, FieldDocumentPart,
@@ -115,28 +123,84 @@ pub struct DocFile {
 
 impl DocFile {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::from_compound_file(CompoundFile::open(path)?)
+        Ok(Self::open_with_options(path, ParseOptions::default())?.into_value())
+    }
+
+    pub fn open_compatible(path: impl AsRef<Path>) -> Result<ParseOutcome<Self>> {
+        Self::open_with_options(path, ParseOptions::compatible(Limits::default()))
+    }
+
+    pub fn open_with_options(
+        path: impl AsRef<Path>,
+        options: ParseOptions,
+    ) -> Result<ParseOutcome<Self>> {
+        let compound = compound_from_path(path.as_ref(), options, BinaryFormat::Doc)?;
+        Self::from_compound_outcome(compound, options)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        Self::from_bytes_with_limits(bytes, Limits::default())
+        Ok(Self::from_bytes_with_options(bytes, ParseOptions::default())?.into_value())
+    }
+
+    pub fn from_bytes_compatible(bytes: &[u8]) -> Result<ParseOutcome<Self>> {
+        Self::from_bytes_with_options(bytes, ParseOptions::compatible(Limits::default()))
     }
 
     pub fn from_bytes_with_limits(bytes: &[u8], limits: Limits) -> Result<Self> {
-        Self::from_compound_file_with_limits(
-            CompoundFile::from_bytes_with_limits(bytes, limits)?,
-            limits,
-        )
+        Ok(Self::from_bytes_with_options(bytes, ParseOptions::strict(limits))?.into_value())
+    }
+
+    pub fn from_bytes_with_options(
+        bytes: &[u8],
+        options: ParseOptions,
+    ) -> Result<ParseOutcome<Self>> {
+        let compound = compound_from_bytes(bytes, options, BinaryFormat::Doc)?;
+        Self::from_compound_outcome(compound, options)
     }
 
     pub fn from_compound_file(compound_file: CompoundFile) -> Result<Self> {
-        Self::from_compound_file_with_limits(compound_file, Limits::default())
+        Ok(
+            Self::from_compound_file_with_options(compound_file, ParseOptions::default())?
+                .into_value(),
+        )
+    }
+
+    pub fn from_compound_file_compatible(
+        compound_file: CompoundFile,
+    ) -> Result<ParseOutcome<Self>> {
+        Self::from_compound_file_with_options(
+            compound_file,
+            ParseOptions::compatible(Limits::default()),
+        )
     }
 
     pub fn from_compound_file_with_limits(
         compound_file: CompoundFile,
         limits: Limits,
     ) -> Result<Self> {
+        Ok(
+            Self::from_compound_file_with_options(compound_file, ParseOptions::strict(limits))?
+                .into_value(),
+        )
+    }
+
+    pub fn from_compound_file_with_options(
+        compound_file: CompoundFile,
+        options: ParseOptions,
+    ) -> Result<ParseOutcome<Self>> {
+        let compound = compound_outcome(compound_file, options, BinaryFormat::Doc)?;
+        Self::from_compound_outcome(compound, options)
+    }
+
+    fn from_compound_outcome(
+        compound: ParseOutcome<CompoundFile>,
+        options: ParseOptions,
+    ) -> Result<ParseOutcome<Self>> {
+        let ParseOutcome {
+            value: compound_file,
+            diagnostics,
+        } = compound;
+        let limits = options.limits;
         let word_bytes = required_stream(&compound_file, WORD_DOCUMENT_STREAM)?.to_vec();
         ensure_stream_limit("WordDocument", &word_bytes, limits)?;
         let fib = Fib::from_word_document(&word_bytes)?;
@@ -264,12 +328,15 @@ impl DocFile {
             .map(|bytes| DocDataStream {
                 physical_bytes: bytes.to_vec(),
             });
-        Ok(Self {
-            compound_file,
-            word_document,
-            table,
-            data,
-        })
+        Ok(ParseOutcome::new(
+            Self {
+                compound_file,
+                word_document,
+                table,
+                data,
+            },
+            diagnostics,
+        ))
     }
 
     pub fn to_compound_file(&self) -> Result<CompoundFile> {

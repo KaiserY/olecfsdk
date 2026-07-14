@@ -16,8 +16,8 @@ pub enum BinaryFormat {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ParseMode {
-    Strict,
     #[default]
+    Strict,
     Compatible,
 }
 
@@ -36,7 +36,7 @@ impl Default for IoContext {
             format: BinaryFormat::Unknown,
             version: 0,
             code_page: None,
-            mode: ParseMode::Compatible,
+            mode: ParseMode::Strict,
             limits: Limits::default(),
         }
     }

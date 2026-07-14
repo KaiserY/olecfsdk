@@ -410,7 +410,10 @@ pub enum PptRecordData {
     OfficeArt(Box<OfficeArtRecord>),
     UserEdit(UserEditAtom),
     PersistDirectory(PersistDirectoryAtom),
-    UnknownCompatibility(UnknownPptRecord),
+    /// A record whose `recType` is not specified by the RecordType
+    /// enumeration. MS-PPT requires readers to ignore these records and
+    /// permits preserving them.
+    Unknown(UnknownPptRecord),
     /// A record whose type is defined by MS-PPT but whose body violates its schema.
     MalformedSpecRecord(UnknownPptRecord),
     /// All bytes physically available for a record whose declared body crosses its boundary.
@@ -1633,7 +1636,7 @@ fn malformed_spec_record(record_type: u16, body: &[u8]) -> PptRecordData {
     if is_ms_ppt_record_type(record_type) {
         PptRecordData::MalformedSpecRecord(value)
     } else {
-        PptRecordData::UnknownCompatibility(value)
+        PptRecordData::Unknown(value)
     }
 }
 
@@ -1902,7 +1905,19 @@ impl PowerPointDocument {
                     "PPT current-edit offset does not reference UserEditAtom",
                 ));
             };
+            if user_edit.offset_last_edit != 0 && user_edit.offset_last_edit >= offset {
+                return Err(Error::invalid(
+                    u64::from(user_edit.offset_last_edit),
+                    "PPT previous UserEditAtom offset is not before the current UserEditAtom",
+                ));
+            }
             let persist_offset = user_edit.offset_persist_directory;
+            if persist_offset <= user_edit.offset_last_edit || persist_offset >= offset {
+                return Err(Error::invalid(
+                    u64::from(persist_offset),
+                    "PPT PersistDirectoryAtom offset is not between the previous and current UserEditAtom offsets",
+                ));
+            }
             let persist_record = self.top_level_record(persist_offset).ok_or_else(|| {
                 Error::invalid(
                     u64::from(persist_offset),
@@ -3662,9 +3677,9 @@ impl PptRecord {
                 }
                 value.to_bytes()?
             }
-            PptRecordData::UnknownCompatibility(value) => {
+            PptRecordData::Unknown(value) => {
                 if self.header.record_type != value.record_type {
-                    return Err(Error::invalid(0, "unknown compatibility header changed"));
+                    return Err(Error::invalid(0, "unknown record header changed"));
                 }
                 value.body.clone()
             }
@@ -5720,7 +5735,7 @@ mod tests {
         assert_eq!(parsed.records.records.len(), cases.len());
         assert!(parsed.records.records.iter().all(|record| !matches!(
             record.data,
-            PptRecordData::MalformedSpecRecord(_) | PptRecordData::UnknownCompatibility(_)
+            PptRecordData::MalformedSpecRecord(_) | PptRecordData::Unknown(_)
         )));
         assert!(matches!(
             parsed.records.records[0].data,
@@ -5760,7 +5775,7 @@ mod tests {
         ));
         assert!(matches!(
             parsed.records.records[1].data,
-            PptRecordData::UnknownCompatibility(UnknownPptRecord {
+            PptRecordData::Unknown(UnknownPptRecord {
                 record_type: 0x7777,
                 ..
             })
@@ -6050,14 +6065,16 @@ mod tests {
             }],
         };
         let persist_body = persist.to_bytes().unwrap();
-        let user_offset = (HEADER_LEN + persist_body.len()) as u32;
+        let prefix_len = HEADER_LEN;
+        let persist_offset = prefix_len as u32;
+        let user_offset = (prefix_len + HEADER_LEN + persist_body.len()) as u32;
         let user = UserEditAtom {
             last_slide_id_ref: 0,
             version: 0,
             minor_version: 0,
             major_version: 3,
             offset_last_edit: 0,
-            offset_persist_directory: 0,
+            offset_persist_directory: persist_offset,
             doc_persist_id_ref: 1,
             persist_id_seed: 3,
             last_view: 0,
@@ -6066,6 +6083,14 @@ mod tests {
         };
         let user_body = user.to_bytes();
         let mut bytes = Vec::new();
+        PptRecordHeader {
+            version: 0,
+            instance: 0,
+            record_type: 0x779f,
+            declared_length: 0,
+        }
+        .write(&mut bytes)
+        .unwrap();
         PptRecordHeader {
             version: 0,
             instance: 0,
@@ -6085,7 +6110,7 @@ mod tests {
         .unwrap();
         bytes.extend_from_slice(&user_body);
 
-        let document = PowerPointDocument::from_bytes(&bytes).unwrap();
+        let mut document = PowerPointDocument::from_bytes(&bytes).unwrap();
         let current = CurrentUserAtom {
             fixed_size: 20,
             header_token: 0xe391_c05f,
@@ -6106,6 +6131,14 @@ mod tests {
             chain.persist_object_offsets,
             BTreeMap::from([(1, 100), (2, 200)])
         );
+
+        let PptRecordData::UserEdit(user_edit) =
+            &mut document.records.records.last_mut().unwrap().data
+        else {
+            panic!("last record is not UserEditAtom");
+        };
+        user_edit.offset_persist_directory = 0;
+        assert!(document.incremental_save_chain(&current).is_err());
     }
 
     #[test]
