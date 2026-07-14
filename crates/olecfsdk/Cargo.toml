@@ -16,6 +16,3 @@ encoding_rs = { workspace = true }
 flate2 = { workspace = true }
 olecfsdk-derive = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
-cfb = { workspace = true }

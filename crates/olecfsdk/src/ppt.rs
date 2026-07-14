@@ -140,6 +140,36 @@ pub const PPT10_RESERVED_ATOM: u16 = 0x101d;
 pub const MAC_LEGACY_PRINT_INFO_ATOM: u16 = 0x1773;
 pub const MAC_PRINT_DRIVER_INFO_ATOM: u16 = 0x1789;
 pub const HANDOUT_COMPATIBILITY_ATOM: u16 = 0x200a;
+pub const NAMED_SHOW_SLIDES_ATOM: u16 = 0x0412;
+pub const BOOKMARK_SEED_ATOM: u16 = 0x07e9;
+pub const SHAPE_ATOM: u16 = 0x0bdb;
+pub const SHAPE_FLAGS10_ATOM: u16 = 0x0bdc;
+pub const ROUND_TRIP_NEW_PLACEHOLDER_ID_12_ATOM: u16 = 0x0bdd;
+pub const FONT_EMBED_DATA_BLOB: u16 = 0x0fb8;
+pub const BOOKMARK_ENTITY_ATOM: u16 = 0x0fd0;
+pub const RTF_DATE_TIME_META_CHARACTER_ATOM: u16 = 0x1015;
+pub const CHART_BUILD_ATOM: u16 = 0x2b05;
+pub const DIAGRAM_BUILD_ATOM: u16 = 0x2b07;
+pub const LINKED_SHAPE10_ATOM: u16 = 0x2ee6;
+pub const LINKED_SLIDE10_ATOM: u16 = 0x2ee7;
+pub const DIFF10_ATOM: u16 = 0x2eee;
+pub const SLIDE_LIST_TABLE_SIZE10_ATOM: u16 = 0x2eef;
+pub const SLIDE_LIST_ENTRY10_ATOM: u16 = 0x2ef0;
+pub const FONT_EMBED_FLAGS10_ATOM: u16 = 0x32c8;
+pub const PHOTO_ALBUM_INFO10_ATOM: u16 = 0x36b2;
+pub const TIME_ITERATE_DATA_ATOM: u16 = 0xf140;
+pub const TEXT_DEFAULTS9_ATOM: u16 = 0x0fb0;
+pub const EXTERNAL_OLE_LINK_ATOM: u16 = 0x0fd1;
+pub const EXTERNAL_OLE_CONTROL_ATOM: u16 = 0x0ffb;
+pub const EXTERNAL_CD_AUDIO_ATOM: u16 = 0x1012;
+pub const BROADCAST_DOC_INFO9_ATOM: u16 = 0x177f;
+pub const ENVELOPE_FLAGS9_ATOM: u16 = 0x1784;
+pub const ENVELOPE_DATA9_ATOM: u16 = 0x1785;
+pub const DOC_ROUTING_SLIP_ATOM: u16 = 0x0406;
+pub const METAFILE_BLOB: u16 = 0x0fc1;
+pub const ROUND_TRIP_SLIDE_SYNC_INFO12_ATOM: u16 = 0x3715;
+pub const TIME_COLOR_BEHAVIOR_ATOM: u16 = 0xf135;
+pub const TIME_ROTATION_BEHAVIOR_ATOM: u16 = 0xf138;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PptRecordHeader {
@@ -261,6 +291,37 @@ pub enum PptRecordData {
     MacLegacyPrintInfo(MacLegacyPrintInfoAtom),
     MacPrintDriverInfo(MacPrintDriverInfoAtom),
     HandoutCompatibility(HandoutCompatibilityAtom),
+    NamedShowSlides(Vec<u32>),
+    BookmarkSeed(UnsignedIdAtom),
+    ShapeFlags(ByteAtom),
+    ShapeFlags10(ByteAtom),
+    RoundTripNewPlaceholderId12(ByteAtom),
+    FontEmbedDataBlob(Vec<u8>),
+    BookmarkEntity(BookmarkEntityAtom),
+    RtfDateTimeMeta(RtfDateTimeMetaCharacterAtom),
+    ChartBuild(ChartBuildAtom),
+    DiagramBuild(DiagramBuildAtom),
+    LinkedShape10(LinkedShape10Atom),
+    LinkedSlide10(LinkedSlide10Atom),
+    Diff10(Diff10Atom),
+    SlideListTableSize10(SignedCountAtom),
+    SlideListEntry10(SlideListEntry10Atom),
+    FontEmbedFlags10(HashCodeAtom),
+    PhotoAlbumInfo10(PhotoAlbumInfo10Atom),
+    TimeIterateData(TimeIterateDataAtom),
+    TextDefaults9(TextDefaults9Atom),
+    ExternalOleLink(ExternalOleLinkAtom),
+    ExternalOleControl(UnsignedIdAtom),
+    ExternalCdAudio(ExternalCdAudioAtom),
+    BroadcastDocInfo9(BroadcastDocInfo9Atom),
+    EnvelopeFlags9(HashCodeAtom),
+    /// MsoEnvelopeCLSID is defined by MS-OSHARED, outside the MS-PPT schema.
+    EnvelopeData9(Vec<u8>),
+    DocRoutingSlip(DocRoutingSlipAtom),
+    Metafile(MetafileBlob),
+    RoundTripSlideSyncInfo12(SlideSyncInfoAtom12),
+    TimeColorBehavior(TimeColorBehaviorAtom),
+    TimeRotationBehavior(TimeRotationBehaviorAtom),
     TimeNode(TimeNodeAtom),
     TimeCondition(TimeConditionAtom),
     TimeModifier(TimeModifierAtom),
@@ -346,8 +407,8 @@ pub enum PptRecordData {
     UserEdit(UserEditAtom),
     PersistDirectory(PersistDirectoryAtom),
     UnknownCompatibility(UnknownPptRecord),
-    /// A bounded atom whose record type has not yet been promoted to a static type.
-    Atom(Vec<u8>),
+    /// A record whose type is defined by MS-PPT but whose body violates its schema.
+    MalformedSpecRecord(UnknownPptRecord),
     /// All bytes physically available for a record whose declared body crosses its boundary.
     Truncated(Vec<u8>),
 }
@@ -550,6 +611,196 @@ pub struct PlaceholderAtom {
 pub struct HeadersFootersAtom {
     pub format_id: i16,
     pub flags: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct BookmarkEntityAtom {
+    pub bookmark_id: u32,
+    pub bookmark_name: [u16; 32],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct RtfDateTimeMetaCharacterAtom {
+    pub position: u32,
+    pub format: [u16; 64],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct ChartBuildAtom {
+    pub chart_build: u32,
+    pub animate_background: u8,
+    pub unused: [u8; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct DiagramBuildAtom {
+    pub diagram_build: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct LinkedShape10Atom {
+    pub shape_id_ref: u32,
+    pub linked_shape_id_ref: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct LinkedSlide10Atom {
+    pub linked_slide_id_ref: u32,
+    pub linked_shape_count: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct Diff10Atom {
+    pub index: u8,
+    pub unused1: u8,
+    pub unused2: u8,
+    pub unused3: u8,
+    pub diff_type: u32,
+    pub unused4: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SignedCountAtom {
+    pub count: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SlideListEntry10Atom {
+    pub slide_id_ref: u32,
+    pub high_date_time: u32,
+    pub low_date_time: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct PhotoAlbumInfo10Atom {
+    pub use_black_white: u8,
+    pub has_caption: u8,
+    pub layout: u8,
+    pub unused: u8,
+    pub frame_shape: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct TimeIterateDataAtom {
+    pub iterate_interval: u32,
+    pub iterate_type: u32,
+    pub iterate_direction: u32,
+    pub iterate_interval_type: u32,
+    pub property_flags: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct ExternalOleLinkAtom {
+    pub slide_id_ref: u32,
+    pub update_mode: u32,
+    pub unused: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct TmsfTime {
+    pub track: u8,
+    pub minute: u8,
+    pub second: u8,
+    pub frame: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct ExternalCdAudioAtom {
+    pub start: TmsfTime,
+    pub end: TmsfTime,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct BroadcastDocInfo9Atom {
+    pub flags: u16,
+    pub start_time: SystemTime,
+    pub end_time: SystemTime,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextDefaults9Atom {
+    pub character: TextCharacterException9,
+    pub paragraph: TextParagraphException9,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocRoutingSlipAtom {
+    pub unused1: u32,
+    pub current_recipient: u32,
+    pub flags: u32,
+    pub unused2: u32,
+    pub originator: DocRoutingSlipString,
+    pub recipients: Vec<DocRoutingSlipString>,
+    pub subject: DocRoutingSlipString,
+    pub message: DocRoutingSlipString,
+    pub unused3: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocRoutingSlipString {
+    pub string_type: u16,
+    /// Physical bytes, including the final required NUL/ignored byte.
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MetafileBlob {
+    pub mapping_mode: i16,
+    pub x_extent: i16,
+    pub y_extent: i16,
+    /// WMF data is defined by MS-WMF and intentionally remains an external payload.
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SlideSyncInfoAtom12 {
+    pub modified: SystemTime,
+    pub inserted: SystemTime,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimeColorBehaviorAtom {
+    pub property_flags: u32,
+    pub color_by: TimeAnimateColorBy,
+    pub color_from: TimeAnimateColor,
+    pub color_to: TimeAnimateColor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeAnimateColorBy {
+    Rgb {
+        red: i32,
+        green: i32,
+        blue: i32,
+    },
+    Hsl {
+        hue: i32,
+        saturation: i32,
+        luminance: i32,
+    },
+    Scheme(IndexSchemeColor),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeAnimateColor {
+    Rgb { red: u32, green: u32, blue: u32 },
+    Scheme(IndexSchemeColor),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct IndexSchemeColor {
+    pub index: u32,
+    pub reserved1: u32,
+    pub reserved2: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, SdkObject)]
+pub struct TimeRotationBehaviorAtom {
+    pub property_flags: u32,
+    pub by: f32,
+    pub from: f32,
+    pub to: f32,
+    pub direction: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
@@ -1370,6 +1621,78 @@ pub struct UnknownPptRecord {
     pub body: Vec<u8>,
 }
 
+fn malformed_spec_record(record_type: u16, body: &[u8]) -> PptRecordData {
+    let value = UnknownPptRecord {
+        record_type,
+        body: body.to_vec(),
+    };
+    if is_ms_ppt_record_type(record_type) {
+        PptRecordData::MalformedSpecRecord(value)
+    } else {
+        PptRecordData::UnknownCompatibility(value)
+    }
+}
+
+fn preserved_unparsed_record(record_type: u16, body: &[u8]) -> PptRecordData {
+    malformed_spec_record(record_type, body)
+}
+
+fn is_ms_ppt_record_type(record_type: u16) -> bool {
+    matches!(
+        record_type,
+        0x03e8..=0x03ea
+            | 0x03ee..=0x03f3
+            | 0x03f8..=0x03fb
+            | 0x03fd..=0x0402
+            | 0x0406..=0x0415
+            | 0x041c..=0x0420
+            | 0x0422..=0x0428
+            | 0x07d0
+            | 0x07d5..=0x07d6
+            | 0x07e3..=0x07e7
+            | 0x07e9
+            | 0x07f0
+            | 0x07f8..=0x07f9
+            | 0x0bc1
+            | 0x0bc3
+            | 0x0bdb..=0x0bdd
+            | 0x0f9e..=0x0fb8
+            | 0x0fba
+            | 0x0fc1
+            | 0x0fc3
+            | 0x0fc8..=0x0fc9
+            | 0x0fcc..=0x0fce
+            | 0x0fd0..=0x0fd3
+            | 0x0fd7..=0x0fda
+            | 0x0fdf
+            | 0x0fe4
+            | 0x0fe7
+            | 0x0fee
+            | 0x0ff0..=0x0ff3
+            | 0x0ff5..=0x0ffb
+            | 0x1004..=0x1007
+            | 0x100d..=0x1015
+            | 0x1018
+            | 0x1388..=0x138b
+            | 0x1770
+            | 0x1772
+            | 0x177a..=0x177f
+            | 0x1784..=0x1785
+            | 0x2afb
+            | 0x2b00..=0x2b0b
+            | 0x2b0d
+            | 0x2ee0..=0x2ee1
+            | 0x2ee4..=0x2ee7
+            | 0x2eea..=0x2ef1
+            | 0x2f14
+            | 0x32c8
+            | 0x36b0..=0x36b3
+            | 0x3714..=0x3715
+            | 0xf125
+            | 0xf127..=0xf145
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StyleTextProp9 {
     pub paragraph: TextParagraphException9,
@@ -1797,7 +2120,7 @@ impl PptRecordSequence {
             } else if header.record_type == USER_EDIT_ATOM {
                 UserEditAtom::parse(body)
                     .map(PptRecordData::UserEdit)
-                    .unwrap_or_else(|| PptRecordData::Atom(body.to_vec()))
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == DOCUMENT_ATOM && body.len() == 40 {
                 PptRecordData::Document(parse_fixed(body).expect("fixed DocumentAtom"))
             } else if header.record_type == SLIDE_ATOM && body.len() == 24 {
@@ -1858,7 +2181,7 @@ impl PptRecordSequence {
                 TextCharacterException::parse(body, &mut body_cursor)
                     .filter(|_| body_cursor == body.len())
                     .map(PptRecordData::TextCfException)
-                    .unwrap_or_else(|| PptRecordData::Atom(body.to_vec()))
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == TEXT_PF_EXCEPTION_ATOM {
                 let mut body_cursor = 0usize;
                 let parsed = read_u16_checked(body, &mut body_cursor).and_then(|reserved| {
@@ -1872,13 +2195,13 @@ impl PptRecordSequence {
                 parsed
                     .filter(|_| body_cursor == body.len())
                     .map(PptRecordData::TextPfException)
-                    .unwrap_or_else(|| PptRecordData::Atom(body.to_vec()))
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == TEXT_SI_EXCEPTION_ATOM {
                 let mut body_cursor = 0usize;
                 TextSpecialInfoException::parse(body, &mut body_cursor)
                     .filter(|_| body_cursor == body.len())
                     .map(PptRecordData::TextSiException)
-                    .unwrap_or_else(|| PptRecordData::Atom(body.to_vec()))
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if matches!(header.record_type, TEXT_RULER_ATOM | DEFAULT_RULER_ATOM) {
                 TextRulerAtom::parse(body)
                     .map(PptRecordData::TextRuler)
@@ -1894,29 +2217,29 @@ impl PptRecordSequence {
             } else if header.record_type == TEXT_MASTER_STYLE9_ATOM {
                 TextMasterStyle9Atom::parse(body, header.instance)
                     .map(PptRecordData::TextMasterStyle9)
-                    .unwrap_or_else(|| PptRecordData::Atom(body.to_vec()))
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == STYLE_TEXT_PROP10_ATOM {
                 StyleTextProp10Atom::parse(body)
                     .map(PptRecordData::StyleTextProp10)
-                    .unwrap_or_else(|| PptRecordData::Atom(body.to_vec()))
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == TEXT_MASTER_STYLE10_ATOM {
                 TextMasterStyle10Atom::parse(body, header.instance)
                     .map(PptRecordData::TextMasterStyle10)
-                    .unwrap_or_else(|| PptRecordData::Atom(body.to_vec()))
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == TEXT_DEFAULTS10_ATOM {
                 let mut body_cursor = 0usize;
                 TextCharacterException10::parse(body, &mut body_cursor)
                     .filter(|_| body_cursor == body.len())
                     .map(PptRecordData::TextDefaults10)
-                    .unwrap_or_else(|| PptRecordData::Atom(body.to_vec()))
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == STYLE_TEXT_PROP11_ATOM {
                 StyleTextProp11Atom::parse(body)
                     .map(PptRecordData::StyleTextProp11)
-                    .unwrap_or_else(|| PptRecordData::Atom(body.to_vec()))
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == RECOLOR_INFO_ATOM {
                 RecolorInfoAtom::parse(body)
                     .map(PptRecordData::RecolorInfo)
-                    .unwrap_or_else(|| PptRecordData::Atom(body.to_vec()))
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == MAC_PRINT_SETTINGS_ATOM {
                 PptRecordData::MacPrintSettings(MacPlistAtom::from_bytes(body))
             } else if header.record_type == MAC_PAGE_FORMAT_ATOM {
@@ -1924,11 +2247,11 @@ impl PptRecordSequence {
             } else if header.record_type == PPT11_FONT_DESCRIPTOR_ATOM {
                 Ppt11FontDescriptorAtom::parse(body)
                     .map(PptRecordData::Ppt11FontDescriptors)
-                    .unwrap_or_else(|| PptRecordData::Atom(body.to_vec()))
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == PPT11_FONT_DESCRIPTOR_COLLECTION_ATOM {
                 Ppt11FontDescriptorCollectionAtom::parse(body)
                     .map(PptRecordData::Ppt11FontDescriptorCollection)
-                    .unwrap_or_else(|| PptRecordData::Atom(body.to_vec()))
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == PPT10_RESERVED_ATOM && body.len() == 4 {
                 PptRecordData::Ppt10Reserved(parse_fixed(body).expect("fixed PPT10 reserved atom"))
             } else if header.record_type == MAC_LEGACY_PRINT_INFO_ATOM && body.len() == 120 {
@@ -1943,6 +2266,97 @@ impl PptRecordSequence {
                 PptRecordData::HandoutCompatibility(HandoutCompatibilityAtom {
                     bytes: body.try_into().expect("8-byte handout compatibility atom"),
                 })
+            } else if header.record_type == NAMED_SHOW_SLIDES_ATOM && body.len().is_multiple_of(4) {
+                PptRecordData::NamedShowSlides(
+                    body.chunks_exact(4)
+                        .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("4-byte slide id")))
+                        .collect(),
+                )
+            } else if header.record_type == BOOKMARK_SEED_ATOM && body.len() == 4 {
+                PptRecordData::BookmarkSeed(parse_fixed(body).expect("fixed BookmarkSeedAtom"))
+            } else if header.record_type == SHAPE_ATOM && body.len() == 1 {
+                PptRecordData::ShapeFlags(parse_fixed(body).expect("fixed ShapeFlagsAtom"))
+            } else if header.record_type == SHAPE_FLAGS10_ATOM && body.len() == 1 {
+                PptRecordData::ShapeFlags10(parse_fixed(body).expect("fixed ShapeFlags10Atom"))
+            } else if header.record_type == ROUND_TRIP_NEW_PLACEHOLDER_ID_12_ATOM && body.len() == 1
+            {
+                PptRecordData::RoundTripNewPlaceholderId12(
+                    parse_fixed(body).expect("fixed RoundTripNewPlaceholderId12Atom"),
+                )
+            } else if header.record_type == FONT_EMBED_DATA_BLOB {
+                PptRecordData::FontEmbedDataBlob(body.to_vec())
+            } else if header.record_type == BOOKMARK_ENTITY_ATOM && body.len() == 68 {
+                PptRecordData::BookmarkEntity(parse_fixed(body).expect("fixed BookmarkEntityAtom"))
+            } else if header.record_type == RTF_DATE_TIME_META_CHARACTER_ATOM && body.len() == 132 {
+                PptRecordData::RtfDateTimeMeta(parse_fixed(body).expect("fixed RTFDateTimeMCAtom"))
+            } else if header.record_type == CHART_BUILD_ATOM && body.len() == 8 {
+                PptRecordData::ChartBuild(parse_fixed(body).expect("fixed ChartBuildAtom"))
+            } else if header.record_type == DIAGRAM_BUILD_ATOM && body.len() == 4 {
+                PptRecordData::DiagramBuild(parse_fixed(body).expect("fixed DiagramBuildAtom"))
+            } else if header.record_type == LINKED_SHAPE10_ATOM && body.len() == 8 {
+                PptRecordData::LinkedShape10(parse_fixed(body).expect("fixed LinkedShape10Atom"))
+            } else if header.record_type == LINKED_SLIDE10_ATOM && body.len() == 8 {
+                PptRecordData::LinkedSlide10(parse_fixed(body).expect("fixed LinkedSlide10Atom"))
+            } else if header.record_type == DIFF10_ATOM && body.len() == 12 {
+                PptRecordData::Diff10(parse_fixed(body).expect("fixed Diff10Atom"))
+            } else if header.record_type == SLIDE_LIST_TABLE_SIZE10_ATOM && body.len() == 4 {
+                PptRecordData::SlideListTableSize10(
+                    parse_fixed(body).expect("fixed SlideListTableSize10Atom"),
+                )
+            } else if header.record_type == SLIDE_LIST_ENTRY10_ATOM && body.len() == 12 {
+                PptRecordData::SlideListEntry10(
+                    parse_fixed(body).expect("fixed SlideListEntry10Atom"),
+                )
+            } else if header.record_type == FONT_EMBED_FLAGS10_ATOM && body.len() == 4 {
+                PptRecordData::FontEmbedFlags10(
+                    parse_fixed(body).expect("fixed FontEmbedFlags10Atom"),
+                )
+            } else if header.record_type == PHOTO_ALBUM_INFO10_ATOM && body.len() == 6 {
+                PptRecordData::PhotoAlbumInfo10(
+                    parse_fixed(body).expect("fixed PhotoAlbumInfo10Atom"),
+                )
+            } else if header.record_type == TIME_ITERATE_DATA_ATOM && body.len() == 20 {
+                PptRecordData::TimeIterateData(
+                    parse_fixed(body).expect("fixed TimeIterateDataAtom"),
+                )
+            } else if header.record_type == TEXT_DEFAULTS9_ATOM {
+                TextDefaults9Atom::parse(body)
+                    .map(PptRecordData::TextDefaults9)
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
+            } else if header.record_type == EXTERNAL_OLE_LINK_ATOM && body.len() == 12 {
+                PptRecordData::ExternalOleLink(parse_fixed(body).expect("fixed ExOleLinkAtom"))
+            } else if header.record_type == EXTERNAL_OLE_CONTROL_ATOM && body.len() == 4 {
+                PptRecordData::ExternalOleControl(parse_fixed(body).expect("fixed ExControlAtom"))
+            } else if header.record_type == EXTERNAL_CD_AUDIO_ATOM && body.len() == 8 {
+                PptRecordData::ExternalCdAudio(parse_fixed(body).expect("fixed ExCDAudioAtom"))
+            } else if header.record_type == BROADCAST_DOC_INFO9_ATOM && body.len() == 34 {
+                PptRecordData::BroadcastDocInfo9(
+                    parse_fixed(body).expect("fixed BroadcastDocInfo9Atom"),
+                )
+            } else if header.record_type == ENVELOPE_FLAGS9_ATOM && body.len() == 4 {
+                PptRecordData::EnvelopeFlags9(parse_fixed(body).expect("fixed EnvelopeFlags9Atom"))
+            } else if header.record_type == ENVELOPE_DATA9_ATOM {
+                PptRecordData::EnvelopeData9(body.to_vec())
+            } else if header.record_type == DOC_ROUTING_SLIP_ATOM {
+                DocRoutingSlipAtom::parse(body, limits)
+                    .map(PptRecordData::DocRoutingSlip)
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
+            } else if header.record_type == METAFILE_BLOB {
+                MetafileBlob::parse(body)
+                    .map(PptRecordData::Metafile)
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
+            } else if header.record_type == ROUND_TRIP_SLIDE_SYNC_INFO12_ATOM && body.len() == 32 {
+                PptRecordData::RoundTripSlideSyncInfo12(
+                    parse_fixed(body).expect("fixed SlideSyncInfoAtom12"),
+                )
+            } else if header.record_type == TIME_COLOR_BEHAVIOR_ATOM {
+                TimeColorBehaviorAtom::parse(body)
+                    .map(PptRecordData::TimeColorBehavior)
+                    .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
+            } else if header.record_type == TIME_ROTATION_BEHAVIOR_ATOM && body.len() == 20 {
+                PptRecordData::TimeRotationBehavior(
+                    parse_fixed(body).expect("fixed TimeRotationBehaviorAtom"),
+                )
             } else if header.record_type == TIME_NODE_ATOM && body.len() == 32 {
                 PptRecordData::TimeNode(parse_fixed(body).expect("fixed TimeNodeAtom"))
             } else if header.record_type == TIME_CONDITION_ATOM && body.len() == 16 {
@@ -2203,16 +2617,11 @@ impl PptRecordSequence {
             ) {
                 PersistDirectoryAtom::parse(body, limits)
                     .map(PptRecordData::PersistDirectory)
-                    .unwrap_or_else(|| PptRecordData::Atom(body.to_vec()))
+                    .unwrap_or_else(|| preserved_unparsed_record(header.record_type, body))
             } else if let Some(record) = parse_office_art_atom(header, body, limits) {
                 PptRecordData::OfficeArt(Box::new(record))
-            } else if matches!(header.record_type, 0x0000 | 0x0080 | 0x779f) {
-                PptRecordData::UnknownCompatibility(UnknownPptRecord {
-                    record_type: header.record_type,
-                    body: body.to_vec(),
-                })
             } else {
-                PptRecordData::Atom(body.to_vec())
+                preserved_unparsed_record(header.record_type, body)
             };
             records.push(PptRecord {
                 offset: record_offset,
@@ -2627,6 +3036,155 @@ impl PptRecord {
                 }
                 value.bytes.to_vec()
             }
+            PptRecordData::NamedShowSlides(values) => {
+                if self.header.record_type != NAMED_SHOW_SLIDES_ATOM {
+                    return Err(Error::invalid(0, "NamedShowSlidesAtom header changed"));
+                }
+                let mut body = Vec::with_capacity(values.len() * 4);
+                for value in values {
+                    body.extend_from_slice(&value.to_le_bytes());
+                }
+                body
+            }
+            PptRecordData::BookmarkSeed(value) => {
+                fixed_record_body!(BOOKMARK_SEED_ATOM, value, "BookmarkSeedAtom header changed")
+            }
+            PptRecordData::ShapeFlags(value) => {
+                fixed_record_body!(SHAPE_ATOM, value, "ShapeFlagsAtom header changed")
+            }
+            PptRecordData::ShapeFlags10(value) => {
+                fixed_record_body!(SHAPE_FLAGS10_ATOM, value, "ShapeFlags10Atom header changed")
+            }
+            PptRecordData::RoundTripNewPlaceholderId12(value) => fixed_record_body!(
+                ROUND_TRIP_NEW_PLACEHOLDER_ID_12_ATOM,
+                value,
+                "RoundTripNewPlaceholderId12Atom header changed"
+            ),
+            PptRecordData::FontEmbedDataBlob(value) => {
+                if self.header.record_type != FONT_EMBED_DATA_BLOB {
+                    return Err(Error::invalid(0, "FontEmbedDataBlob header changed"));
+                }
+                value.clone()
+            }
+            PptRecordData::BookmarkEntity(value) => fixed_record_body!(
+                BOOKMARK_ENTITY_ATOM,
+                value,
+                "BookmarkEntityAtom header changed"
+            ),
+            PptRecordData::RtfDateTimeMeta(value) => fixed_record_body!(
+                RTF_DATE_TIME_META_CHARACTER_ATOM,
+                value,
+                "RTFDateTimeMCAtom header changed"
+            ),
+            PptRecordData::ChartBuild(value) => {
+                fixed_record_body!(CHART_BUILD_ATOM, value, "ChartBuildAtom header changed")
+            }
+            PptRecordData::DiagramBuild(value) => {
+                fixed_record_body!(DIAGRAM_BUILD_ATOM, value, "DiagramBuildAtom header changed")
+            }
+            PptRecordData::LinkedShape10(value) => fixed_record_body!(
+                LINKED_SHAPE10_ATOM,
+                value,
+                "LinkedShape10Atom header changed"
+            ),
+            PptRecordData::LinkedSlide10(value) => fixed_record_body!(
+                LINKED_SLIDE10_ATOM,
+                value,
+                "LinkedSlide10Atom header changed"
+            ),
+            PptRecordData::Diff10(value) => {
+                fixed_record_body!(DIFF10_ATOM, value, "Diff10Atom header changed")
+            }
+            PptRecordData::SlideListTableSize10(value) => fixed_record_body!(
+                SLIDE_LIST_TABLE_SIZE10_ATOM,
+                value,
+                "SlideListTableSize10Atom header changed"
+            ),
+            PptRecordData::SlideListEntry10(value) => fixed_record_body!(
+                SLIDE_LIST_ENTRY10_ATOM,
+                value,
+                "SlideListEntry10Atom header changed"
+            ),
+            PptRecordData::FontEmbedFlags10(value) => fixed_record_body!(
+                FONT_EMBED_FLAGS10_ATOM,
+                value,
+                "FontEmbedFlags10Atom header changed"
+            ),
+            PptRecordData::PhotoAlbumInfo10(value) => fixed_record_body!(
+                PHOTO_ALBUM_INFO10_ATOM,
+                value,
+                "PhotoAlbumInfo10Atom header changed"
+            ),
+            PptRecordData::TimeIterateData(value) => fixed_record_body!(
+                TIME_ITERATE_DATA_ATOM,
+                value,
+                "TimeIterateDataAtom header changed"
+            ),
+            PptRecordData::TextDefaults9(value) => {
+                if self.header.record_type != TEXT_DEFAULTS9_ATOM {
+                    return Err(Error::invalid(0, "TextDefaults9Atom header changed"));
+                }
+                value.to_bytes()?
+            }
+            PptRecordData::ExternalOleLink(value) => fixed_record_body!(
+                EXTERNAL_OLE_LINK_ATOM,
+                value,
+                "ExOleLinkAtom header changed"
+            ),
+            PptRecordData::ExternalOleControl(value) => fixed_record_body!(
+                EXTERNAL_OLE_CONTROL_ATOM,
+                value,
+                "ExControlAtom header changed"
+            ),
+            PptRecordData::ExternalCdAudio(value) => fixed_record_body!(
+                EXTERNAL_CD_AUDIO_ATOM,
+                value,
+                "ExCDAudioAtom header changed"
+            ),
+            PptRecordData::BroadcastDocInfo9(value) => fixed_record_body!(
+                BROADCAST_DOC_INFO9_ATOM,
+                value,
+                "BroadcastDocInfo9Atom header changed"
+            ),
+            PptRecordData::EnvelopeFlags9(value) => fixed_record_body!(
+                ENVELOPE_FLAGS9_ATOM,
+                value,
+                "EnvelopeFlags9Atom header changed"
+            ),
+            PptRecordData::EnvelopeData9(value) => {
+                if self.header.record_type != ENVELOPE_DATA9_ATOM {
+                    return Err(Error::invalid(0, "EnvelopeData9Atom header changed"));
+                }
+                value.clone()
+            }
+            PptRecordData::DocRoutingSlip(value) => {
+                if self.header.record_type != DOC_ROUTING_SLIP_ATOM {
+                    return Err(Error::invalid(0, "DocRoutingSlipAtom header changed"));
+                }
+                value.to_bytes()?
+            }
+            PptRecordData::Metafile(value) => {
+                if self.header.record_type != METAFILE_BLOB {
+                    return Err(Error::invalid(0, "MetafileBlob header changed"));
+                }
+                value.to_bytes()?
+            }
+            PptRecordData::RoundTripSlideSyncInfo12(value) => fixed_record_body!(
+                ROUND_TRIP_SLIDE_SYNC_INFO12_ATOM,
+                value,
+                "SlideSyncInfoAtom12 header changed"
+            ),
+            PptRecordData::TimeColorBehavior(value) => {
+                if self.header.record_type != TIME_COLOR_BEHAVIOR_ATOM {
+                    return Err(Error::invalid(0, "TimeColorBehaviorAtom header changed"));
+                }
+                value.to_bytes()
+            }
+            PptRecordData::TimeRotationBehavior(value) => fixed_record_body!(
+                TIME_ROTATION_BEHAVIOR_ATOM,
+                value,
+                "TimeRotationBehaviorAtom header changed"
+            ),
             PptRecordData::TimeNode(value) => {
                 if self.header.record_type != TIME_NODE_ATOM {
                     return Err(Error::invalid(0, "TimeNodeAtom header changed"));
@@ -3106,7 +3664,15 @@ impl PptRecord {
                 }
                 value.body.clone()
             }
-            PptRecordData::Atom(value) | PptRecordData::Truncated(value) => value.clone(),
+            PptRecordData::MalformedSpecRecord(value) => {
+                if self.header.record_type != value.record_type
+                    || !is_ms_ppt_record_type(value.record_type)
+                {
+                    return Err(Error::invalid(0, "malformed MS-PPT record header changed"));
+                }
+                value.body.clone()
+            }
+            PptRecordData::Truncated(value) => value.clone(),
         };
         let declared = usize::try_from(self.header.declared_length)
             .map_err(|_| Error::Limit("PPT record length exceeds usize".into()))?;
@@ -3507,6 +4073,275 @@ impl TextCharacterException9 {
         bytes.extend_from_slice(&self.mask.to_le_bytes());
         write_optional_u32(bytes, self.pp10_extension);
         Ok(())
+    }
+}
+
+impl TextDefaults9Atom {
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        let mut cursor = 0usize;
+        let character = TextCharacterException9::parse(bytes, &mut cursor)?;
+        let paragraph = TextParagraphException9::parse(bytes, &mut cursor)?;
+        (cursor == bytes.len()).then_some(Self {
+            character,
+            paragraph,
+        })
+    }
+
+    fn to_bytes(self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.character.write(&mut bytes)?;
+        self.paragraph.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+impl DocRoutingSlipString {
+    fn parse(bytes: &[u8], cursor: &mut usize) -> Option<Self> {
+        let string_type = read_u16_checked(bytes, cursor)?;
+        let string_length = usize::from(read_u16_checked(bytes, cursor)?);
+        let physical_length = string_length.checked_add(1)?;
+        let end = cursor.checked_add(physical_length)?;
+        let value = bytes.get(*cursor..end)?.to_vec();
+        *cursor = end;
+        let parsed = Self {
+            string_type,
+            bytes: value,
+        };
+        parsed.is_valid().then_some(parsed)
+    }
+
+    fn is_valid(&self) -> bool {
+        match self.string_type {
+            1 | 2 => self.bytes.len() >= 2 && self.bytes[self.bytes.len() - 2] == 0,
+            3 | 4 => self.bytes.last() == Some(&0),
+            _ => false,
+        }
+    }
+
+    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        if !self.is_valid() {
+            return Err(Error::invalid(0, "invalid DocRoutingSlipString"));
+        }
+        let string_length = self
+            .bytes
+            .len()
+            .checked_sub(1)
+            .and_then(|value| u16::try_from(value).ok())
+            .ok_or_else(|| Error::Limit("DocRoutingSlipString length overflow".into()))?;
+        bytes.extend_from_slice(&self.string_type.to_le_bytes());
+        bytes.extend_from_slice(&string_length.to_le_bytes());
+        bytes.extend_from_slice(&self.bytes);
+        Ok(())
+    }
+}
+
+impl DocRoutingSlipAtom {
+    fn parse(bytes: &[u8], limits: Limits) -> Option<Self> {
+        let mut cursor = 0usize;
+        let length = usize::try_from(read_u32_checked(bytes, &mut cursor)?).ok()?;
+        let routing_end = length.checked_sub(HEADER_LEN)?;
+        if routing_end > bytes.len() || routing_end < 24 {
+            return None;
+        }
+        let unused1 = read_u32_checked(bytes, &mut cursor)?;
+        let recipient_count = usize::try_from(read_u32_checked(bytes, &mut cursor)?).ok()?;
+        if recipient_count > limits.max_entries {
+            return None;
+        }
+        let current_recipient = read_u32_checked(bytes, &mut cursor)?;
+        let flags = read_u32_checked(bytes, &mut cursor)?;
+        let unused2 = read_u32_checked(bytes, &mut cursor)?;
+        let routing = &bytes[..routing_end];
+        let originator = DocRoutingSlipString::parse(routing, &mut cursor)?;
+        if originator.string_type != 1 {
+            return None;
+        }
+        let mut recipients = Vec::with_capacity(recipient_count);
+        for _ in 0..recipient_count {
+            let recipient = DocRoutingSlipString::parse(routing, &mut cursor)?;
+            if recipient.string_type != 2 {
+                return None;
+            }
+            recipients.push(recipient);
+        }
+        let subject = DocRoutingSlipString::parse(routing, &mut cursor)?;
+        let message = DocRoutingSlipString::parse(routing, &mut cursor)?;
+        if subject.string_type != 3 || message.string_type != 4 || cursor != routing_end {
+            return None;
+        }
+        Some(Self {
+            unused1,
+            current_recipient,
+            flags,
+            unused2,
+            originator,
+            recipients,
+            subject,
+            message,
+            unused3: bytes[routing_end..].to_vec(),
+        })
+    }
+
+    fn to_bytes(&self) -> Result<Vec<u8>> {
+        if self.originator.string_type != 1
+            || self.recipients.iter().any(|value| value.string_type != 2)
+            || self.subject.string_type != 3
+            || self.message.string_type != 4
+        {
+            return Err(Error::invalid(0, "DocRoutingSlipString type changed"));
+        }
+        let recipient_count = u32::try_from(self.recipients.len())
+            .map_err(|_| Error::Limit("DocRoutingSlip recipient count overflow".into()))?;
+        if self.current_recipient > recipient_count.saturating_add(1) {
+            return Err(Error::invalid(
+                0,
+                "DocRoutingSlip current recipient overflow",
+            ));
+        }
+        let mut bytes = vec![0; 4];
+        bytes.extend_from_slice(&self.unused1.to_le_bytes());
+        bytes.extend_from_slice(&recipient_count.to_le_bytes());
+        bytes.extend_from_slice(&self.current_recipient.to_le_bytes());
+        bytes.extend_from_slice(&self.flags.to_le_bytes());
+        bytes.extend_from_slice(&self.unused2.to_le_bytes());
+        self.originator.write(&mut bytes)?;
+        for recipient in &self.recipients {
+            recipient.write(&mut bytes)?;
+        }
+        self.subject.write(&mut bytes)?;
+        self.message.write(&mut bytes)?;
+        let length = u32::try_from(
+            HEADER_LEN
+                .checked_add(bytes.len())
+                .ok_or_else(|| Error::Limit("DocRoutingSlip length overflow".into()))?,
+        )
+        .map_err(|_| Error::Limit("DocRoutingSlip length overflow".into()))?;
+        bytes[..4].copy_from_slice(&length.to_le_bytes());
+        bytes.extend_from_slice(&self.unused3);
+        Ok(bytes)
+    }
+}
+
+impl MetafileBlob {
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() <= 16 {
+            return None;
+        }
+        Some(Self {
+            mapping_mode: i16::from_le_bytes(bytes[0..2].try_into().ok()?),
+            x_extent: i16::from_le_bytes(bytes[2..4].try_into().ok()?),
+            y_extent: i16::from_le_bytes(bytes[4..6].try_into().ok()?),
+            data: bytes[6..].to_vec(),
+        })
+    }
+
+    fn to_bytes(&self) -> Result<Vec<u8>> {
+        if self.data.len() <= 10 {
+            return Err(Error::invalid(0, "MetafileBlob is shorter than MS-PPT"));
+        }
+        let mut bytes = Vec::with_capacity(6 + self.data.len());
+        bytes.extend_from_slice(&self.mapping_mode.to_le_bytes());
+        bytes.extend_from_slice(&self.x_extent.to_le_bytes());
+        bytes.extend_from_slice(&self.y_extent.to_le_bytes());
+        bytes.extend_from_slice(&self.data);
+        Ok(bytes)
+    }
+}
+
+impl TimeAnimateColorBy {
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 16 {
+            return None;
+        }
+        let values = [read_u32(bytes, 4), read_u32(bytes, 8), read_u32(bytes, 12)];
+        Some(match read_u32(bytes, 0) {
+            0 => Self::Rgb {
+                red: values[0] as i32,
+                green: values[1] as i32,
+                blue: values[2] as i32,
+            },
+            1 => Self::Hsl {
+                hue: values[0] as i32,
+                saturation: values[1] as i32,
+                luminance: values[2] as i32,
+            },
+            2 => Self::Scheme(IndexSchemeColor {
+                index: values[0],
+                reserved1: values[1],
+                reserved2: values[2],
+            }),
+            _ => return None,
+        })
+    }
+
+    fn write(self, bytes: &mut Vec<u8>) {
+        let (model, values): (u32, [u32; 3]) = match self {
+            Self::Rgb { red, green, blue } => (0, [red as u32, green as u32, blue as u32]),
+            Self::Hsl {
+                hue,
+                saturation,
+                luminance,
+            } => (1, [hue as u32, saturation as u32, luminance as u32]),
+            Self::Scheme(value) => (2, [value.index, value.reserved1, value.reserved2]),
+        };
+        bytes.extend_from_slice(&model.to_le_bytes());
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+impl TimeAnimateColor {
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 16 {
+            return None;
+        }
+        let values = [read_u32(bytes, 4), read_u32(bytes, 8), read_u32(bytes, 12)];
+        Some(match read_u32(bytes, 0) {
+            0 => Self::Rgb {
+                red: values[0],
+                green: values[1],
+                blue: values[2],
+            },
+            2 => Self::Scheme(IndexSchemeColor {
+                index: values[0],
+                reserved1: values[1],
+                reserved2: values[2],
+            }),
+            _ => return None,
+        })
+    }
+
+    fn write(self, bytes: &mut Vec<u8>) {
+        let (model, values): (u32, [u32; 3]) = match self {
+            Self::Rgb { red, green, blue } => (0, [red, green, blue]),
+            Self::Scheme(value) => (2, [value.index, value.reserved1, value.reserved2]),
+        };
+        bytes.extend_from_slice(&model.to_le_bytes());
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+impl TimeColorBehaviorAtom {
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        (bytes.len() == 52).then_some(())?;
+        Some(Self {
+            property_flags: read_u32(bytes, 0),
+            color_by: TimeAnimateColorBy::parse(&bytes[4..20])?,
+            color_from: TimeAnimateColor::parse(&bytes[20..36])?,
+            color_to: TimeAnimateColor::parse(&bytes[36..52])?,
+        })
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(52);
+        bytes.extend_from_slice(&self.property_flags.to_le_bytes());
+        self.color_by.write(&mut bytes);
+        self.color_from.write(&mut bytes);
+        self.color_to.write(&mut bytes);
+        bytes
     }
 }
 
@@ -4799,6 +5634,137 @@ mod tests {
     use super::*;
 
     #[test]
+    fn additional_spec_atoms_are_static_and_round_trip() {
+        let routing_slip = DocRoutingSlipAtom {
+            unused1: 0,
+            current_recipient: 1,
+            flags: 3,
+            unused2: 0,
+            originator: DocRoutingSlipString {
+                string_type: 1,
+                bytes: b"Ada\0\0".to_vec(),
+            },
+            recipients: vec![DocRoutingSlipString {
+                string_type: 2,
+                bytes: b"Bob\0\0".to_vec(),
+            }],
+            subject: DocRoutingSlipString {
+                string_type: 3,
+                bytes: b"Subject\0".to_vec(),
+            },
+            message: DocRoutingSlipString {
+                string_type: 4,
+                bytes: b"Message\0".to_vec(),
+            },
+            unused3: vec![0xaa, 0xbb],
+        }
+        .to_bytes()
+        .unwrap();
+        let mut cases = vec![
+            (
+                NAMED_SHOW_SLIDES_ATOM,
+                0,
+                [1u32, 9].into_iter().flat_map(u32::to_le_bytes).collect(),
+            ),
+            (BOOKMARK_SEED_ATOM, 2, 17u32.to_le_bytes().to_vec()),
+            (SHAPE_ATOM, 0, vec![1]),
+            (SHAPE_FLAGS10_ATOM, 0, vec![4]),
+            (ROUND_TRIP_NEW_PLACEHOLDER_ID_12_ATOM, 0, vec![18]),
+            (FONT_EMBED_DATA_BLOB, 1, vec![0, 1, 0, 0, 0xaa]),
+            (BOOKMARK_ENTITY_ATOM, 0, vec![0; 68]),
+            (RTF_DATE_TIME_META_CHARACTER_ATOM, 0, vec![0; 132]),
+            (CHART_BUILD_ATOM, 0, vec![0; 8]),
+            (DIAGRAM_BUILD_ATOM, 0, vec![0; 4]),
+            (LINKED_SHAPE10_ATOM, 0, vec![0; 8]),
+            (LINKED_SLIDE10_ATOM, 0, vec![0; 8]),
+            (DIFF10_ATOM, 0, vec![0; 12]),
+            (SLIDE_LIST_TABLE_SIZE10_ATOM, 0, vec![0; 4]),
+            (SLIDE_LIST_ENTRY10_ATOM, 0, vec![0; 12]),
+            (FONT_EMBED_FLAGS10_ATOM, 0, vec![3, 0, 0, 0]),
+            (PHOTO_ALBUM_INFO10_ATOM, 0, vec![1, 1, 2, 0, 3, 0]),
+            (TIME_ITERATE_DATA_ATOM, 0, vec![0; 20]),
+            (TEXT_DEFAULTS9_ATOM, 0, vec![0; 8]),
+            (EXTERNAL_OLE_LINK_ATOM, 0, vec![0; 12]),
+            (EXTERNAL_OLE_CONTROL_ATOM, 0, vec![0; 4]),
+            (EXTERNAL_CD_AUDIO_ATOM, 0, vec![1, 2, 3, 4, 5, 6, 7, 8]),
+            (BROADCAST_DOC_INFO9_ATOM, 0, vec![0; 34]),
+            (ENVELOPE_FLAGS9_ATOM, 0, vec![3, 0, 0, 0]),
+            (ENVELOPE_DATA9_ATOM, 0, vec![1, 2, 3, 4, 5]),
+            (DOC_ROUTING_SLIP_ATOM, 0, routing_slip),
+            (METAFILE_BLOB, 0, vec![0; 17]),
+            (ROUND_TRIP_SLIDE_SYNC_INFO12_ATOM, 0, vec![0; 32]),
+            (TIME_COLOR_BEHAVIOR_ATOM, 0, vec![0; 52]),
+            (TIME_ROTATION_BEHAVIOR_ATOM, 0, vec![0; 20]),
+        ];
+        cases[6].2[0..4].copy_from_slice(&23u32.to_le_bytes());
+        cases[7].2[0..4].copy_from_slice(&5u32.to_le_bytes());
+
+        let mut bytes = Vec::new();
+        for (record_type, instance, body) in &cases {
+            PptRecordHeader {
+                version: 0,
+                instance: *instance,
+                record_type: *record_type,
+                declared_length: body.len() as u32,
+            }
+            .write(&mut bytes)
+            .unwrap();
+            bytes.extend_from_slice(body);
+        }
+
+        let parsed = PowerPointDocument::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.records.records.len(), cases.len());
+        assert!(parsed.records.records.iter().all(|record| !matches!(
+            record.data,
+            PptRecordData::MalformedSpecRecord(_) | PptRecordData::UnknownCompatibility(_)
+        )));
+        assert!(matches!(
+            parsed.records.records[0].data,
+            PptRecordData::NamedShowSlides(ref values) if values == &[1, 9]
+        ));
+        assert!(matches!(
+            parsed.records.records[6].data,
+            PptRecordData::BookmarkEntity(BookmarkEntityAtom {
+                bookmark_id: 23,
+                ..
+            })
+        ));
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn malformed_spec_and_unknown_extension_records_are_distinct() {
+        let mut bytes = Vec::new();
+        for (record_type, body) in [(DOCUMENT_ATOM, &[1u8][..]), (0x7777, &[2, 3][..])] {
+            PptRecordHeader {
+                version: 0,
+                instance: 0,
+                record_type,
+                declared_length: body.len() as u32,
+            }
+            .write(&mut bytes)
+            .unwrap();
+            bytes.extend_from_slice(body);
+        }
+        let parsed = PowerPointDocument::from_bytes(&bytes).unwrap();
+        assert!(matches!(
+            parsed.records.records[0].data,
+            PptRecordData::MalformedSpecRecord(UnknownPptRecord {
+                record_type: DOCUMENT_ATOM,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parsed.records.records[1].data,
+            PptRecordData::UnknownCompatibility(UnknownPptRecord {
+                record_type: 0x7777,
+                ..
+            })
+        ));
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
     fn time_variant_discriminant_controls_static_value_layout() {
         let cases = [
             vec![0, 1],
@@ -5242,11 +6208,7 @@ mod tests {
 
     #[test]
     fn external_storage_zlib_wraps_native_compound_file() {
-        let source = ::cfb::CompoundFile::create(Cursor::new(Vec::new()))
-            .unwrap()
-            .into_inner()
-            .into_inner();
-        let compound_file = CompoundFile::from_bytes(&source).unwrap();
+        let compound_file = CompoundFile::new(crate::cfb::Version::V3).unwrap();
         let value = ExternalStorageAtom::recompress(compound_file.clone()).unwrap();
         let body = value.to_bytes().unwrap();
         let reparsed = ExternalStorageAtom::parse(1, &body, Limits::default());

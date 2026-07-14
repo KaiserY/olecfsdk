@@ -120,6 +120,17 @@ impl<R: Read + Seek> Reader<R> {
             .ok_or_else(|| Error::invalid(position, "reader moved beyond its bounds"))
     }
 
+    pub fn seek_to(&mut self, position: u64) -> Result<()> {
+        if position < self.start || position > self.end {
+            return Err(Error::invalid(
+                position,
+                "seek position is outside bounded input",
+            ));
+        }
+        self.inner.seek(SeekFrom::Start(position))?;
+        Ok(())
+    }
+
     pub fn start(&self) -> u64 {
         self.start
     }
@@ -458,6 +469,18 @@ mod tests {
         }
         assert_eq!(reader.read_u8().unwrap(), 4);
         assert!(reader.read_vec(5).is_err());
+    }
+
+    #[test]
+    fn bounded_seek_cannot_escape_reader_limits() {
+        let mut reader = Reader::with_bounds(Cursor::new(vec![1, 2, 3, 4, 5]), 1, 3).unwrap();
+        assert_eq!(reader.read_u8().unwrap(), 2);
+        reader.seek_to(3).unwrap();
+        assert_eq!(reader.read_u8().unwrap(), 4);
+        assert!(reader.seek_to(0).is_err());
+        assert!(reader.seek_to(5).is_err());
+        reader.seek_to(4).unwrap();
+        assert_eq!(reader.remaining().unwrap(), 0);
     }
 
     #[test]

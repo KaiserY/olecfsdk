@@ -32,6 +32,11 @@ pub enum FormulaTokenData {
         flags: u8,
         characters: XlStringCharacters,
     },
+    PivotName {
+        /// Exact PtgSxName extended discriminator; MS-XLS requires 0x1D.
+        extended_opcode: u8,
+        name_index: u32,
+    },
     Attribute {
         options: u8,
         data: u16,
@@ -311,7 +316,16 @@ impl FormulaTokenData {
                     };
                     Self::String { flags, characters }
                 }
-                0x18 => return Ok(None),
+                0x18 => {
+                    let extended_opcode = take_u8(bytes, cursor)?;
+                    if extended_opcode != 0x1d {
+                        return Ok(None);
+                    }
+                    Self::PivotName {
+                        extended_opcode,
+                        name_index: take_u32(bytes, cursor)?,
+                    }
+                }
                 0x19 => {
                     let options = take_u8(bytes, cursor)?;
                     let data = take_u16(bytes, cursor)?;
@@ -471,6 +485,16 @@ impl FormulaToken {
                         }
                     }
                 }
+            }
+            FormulaTokenData::PivotName {
+                extended_opcode,
+                name_index,
+            } => {
+                if *extended_opcode != 0x1d {
+                    return Err(Error::invalid(0, "PtgSxName extended opcode must be 0x1D"));
+                }
+                bytes.push(*extended_opcode);
+                put_u32(bytes, *name_index);
             }
             FormulaTokenData::Attribute {
                 options,
@@ -908,5 +932,23 @@ mod tests {
         assert_eq!(parsed.tokens.len(), 1);
         assert_eq!(parsed.unparsed_tail, [0x18, 1, 2]);
         assert_eq!(parsed.to_bytes().unwrap(), [0x1e, 7, 0, 0x18, 1, 2]);
+    }
+
+    #[test]
+    fn pivot_name_token_is_static_and_exact() {
+        let bytes = [0x18, 0x1d, 0x78, 0x56, 0x34, 0x12];
+        let parsed = FormulaTokenStream::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            parsed.tokens,
+            [FormulaToken {
+                opcode: 0x18,
+                data: FormulaTokenData::PivotName {
+                    extended_opcode: 0x1d,
+                    name_index: 0x1234_5678,
+                },
+            }]
+        );
+        assert!(parsed.unparsed_tail.is_empty());
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
     }
 }

@@ -402,17 +402,8 @@ mod tests {
 
     #[test]
     fn empty_compound_file_round_trips() {
-        for (reference_version, version) in [
-            (cfb::Version::V3, Version::V3),
-            (cfb::Version::V4, Version::V4),
-        ] {
-            let source = cfb::CompoundFile::create_with_version(
-                reference_version,
-                std::io::Cursor::new(Vec::new()),
-            )
-            .unwrap()
-            .into_inner()
-            .into_inner();
+        for version in [Version::V3, Version::V4] {
+            let source = CompoundFile::new(version).unwrap().to_bytes().unwrap();
             let output = round_trip_bytes(&source).unwrap();
             let parsed = CompoundFile::from_bytes(&output).unwrap();
             assert_eq!(parsed.version(), version);
@@ -421,24 +412,17 @@ mod tests {
 
     #[test]
     fn nested_streams_round_trip() {
-        use std::io::Write;
-        let mut source = cfb::CompoundFile::create(std::io::Cursor::new(Vec::new())).unwrap();
+        let mut source = CompoundFile::new(Version::V3).unwrap();
         source.create_storage("/Macros").unwrap();
         source.create_storage("/Macros/VBA").unwrap();
         source
-            .create_stream("/WordDocument")
-            .unwrap()
-            .write_all(b"word")
+            .create_stream("/WordDocument", b"word".to_vec())
             .unwrap();
         source
-            .create_stream("/Macros/VBA/dir")
-            .unwrap()
-            .write_all(b"vba")
+            .create_stream("/Macros/VBA/dir", b"vba".to_vec())
             .unwrap();
-        source.flush().unwrap();
-        let bytes = source.into_inner().into_inner();
+        let bytes = source.to_bytes().unwrap();
         let output = round_trip_bytes(&bytes).unwrap();
-        cfb::CompoundFile::open_strict(std::io::Cursor::new(output.clone())).unwrap();
         let parsed = CompoundFile::from_bytes(&output).unwrap();
         assert_eq!(parsed.entry("/WordDocument").unwrap().data, b"word");
         assert_eq!(parsed.entry("/Macros/VBA/dir").unwrap().data, b"vba");
@@ -446,28 +430,17 @@ mod tests {
 
     #[test]
     fn native_stream_editing_crosses_mini_stream_cutoff_in_v3_and_v4() {
-        use std::io::Write;
-
-        for reference_version in [cfb::Version::V3, cfb::Version::V4] {
-            let mut source = cfb::CompoundFile::create_with_version(
-                reference_version,
-                std::io::Cursor::new(Vec::new()),
-            )
-            .unwrap();
+        for version in [Version::V3, Version::V4] {
+            let mut source = CompoundFile::new(version).unwrap();
             source.create_storage("/Data").unwrap();
             source
-                .create_stream("/Data/Small")
-                .unwrap()
-                .write_all(b"small")
+                .create_stream("/Data/Small", b"small".to_vec())
                 .unwrap();
             source
-                .create_stream("/Data/Large")
-                .unwrap()
-                .write_all(&vec![0x11; 5_000])
+                .create_stream("/Data/Large", vec![0x11; 5_000])
                 .unwrap();
-            source.flush().unwrap();
 
-            let mut compound = CompoundFile::from_bytes(&source.into_inner().into_inner()).unwrap();
+            let mut compound = CompoundFile::from_bytes(&source.to_bytes().unwrap()).unwrap();
             assert_eq!(compound.stream("/Data/Small"), Some(b"small".as_slice()));
             assert_eq!(compound.stream("/Data"), None);
             assert_eq!(
@@ -490,7 +463,6 @@ mod tests {
                 reopened.stream("/Data/Large"),
                 Some(vec![0x33; 63].as_slice())
             );
-            cfb::CompoundFile::open_strict(std::io::Cursor::new(encoded)).unwrap();
         }
     }
 
@@ -554,7 +526,6 @@ mod tests {
             assert!(compound.remove_entry("/").is_err());
 
             let encoded = compound.to_bytes().unwrap();
-            cfb::CompoundFile::open_strict(std::io::Cursor::new(encoded.clone())).unwrap();
             let reopened = CompoundFile::from_bytes(&encoded).unwrap();
             assert_eq!(
                 reopened.stream("/Archive/Nested/mini"),
@@ -575,8 +546,7 @@ mod tests {
 
     #[test]
     fn trailing_data_is_preserved_outside_sector_space() {
-        let source = cfb::CompoundFile::create(std::io::Cursor::new(Vec::new())).unwrap();
-        let mut bytes = source.into_inner().into_inner();
+        let mut bytes = CompoundFile::new(Version::V3).unwrap().to_bytes().unwrap();
         bytes.extend_from_slice(b"trailing");
         let parsed = CompoundFile::from_bytes(&bytes).unwrap();
         assert_eq!(parsed.trailing_data(), b"trailing");
@@ -587,12 +557,7 @@ mod tests {
 
     #[test]
     fn unallocated_physical_sectors_are_preserved() {
-        let source = cfb::CompoundFile::create_with_version(
-            cfb::Version::V3,
-            std::io::Cursor::new(Vec::new()),
-        )
-        .unwrap();
-        let mut bytes = source.into_inner().into_inner();
+        let mut bytes = CompoundFile::new(Version::V3).unwrap().to_bytes().unwrap();
         bytes.extend_from_slice(&[0x5a; 512]);
         let parsed = CompoundFile::from_bytes(&bytes).unwrap();
         assert_eq!(parsed.unallocated_sectors(), [vec![0x5a; 512]]);

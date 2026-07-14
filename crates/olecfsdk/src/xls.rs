@@ -14,6 +14,7 @@ use std::{
 
 use crate::{
     Error, Result, SdkEnum, SdkObject,
+    cfb::CompoundFile,
     io::{Reader, SdkEnumValue, SdkRead, SdkSize, SdkWrite, Writer},
     limits::Limits,
     office_art::{OfficeArtPartialStream, OfficeArtRecordHeader, OfficeArtStream},
@@ -41,15 +42,22 @@ const CONTINUE: u16 = 0x003c;
 const PANE: u16 = 0x0041;
 const CODE_PAGE: u16 = 0x0042;
 const PLS: u16 = 0x004d;
+const FN_GROUP_NAME: u16 = 0x009a;
+const LPR: u16 = 0x0098;
 const DCON: u16 = 0x0050;
 const DCON_REF: u16 = 0x0051;
+const DCON_NAME: u16 = 0x0052;
+const DCON_BIN: u16 = 0x01b5;
 const DCONN: u16 = 0x0876;
 const TXT_QRY: u16 = 0x0805;
 const QSI_SX_TAG: u16 = 0x0802;
 const SX_VIEW_EX9: u16 = 0x0810;
 const DB_QUERY_EXT: u16 = 0x0803;
 const HLINK_TOOLTIP: u16 = 0x0800;
+const CONTINUE_FRT: u16 = 0x0812;
+const CONTINUE_FRT11: u16 = 0x0875;
 const CONTINUE_FRT12: u16 = 0x087f;
+const CRT_ML_FRT_CONTINUE: u16 = 0x089f;
 const SX_ADDL: u16 = 0x0864;
 const ENT_EX_U2: u16 = 0x01c2;
 const BK_HIM: u16 = 0x00e9;
@@ -59,6 +67,7 @@ const SORT: u16 = 0x0090;
 const LH_RECORD: u16 = 0x0094;
 const SORT_DATA: u16 = 0x0895;
 const AUTO_FILTER: u16 = 0x009e;
+const SYNC: u16 = 0x0097;
 const SX_FORMAT: u16 = 0x00fb;
 const W_OPT: u16 = 0x080b;
 const TABLE: u16 = 0x0236;
@@ -71,6 +80,7 @@ const CRN_COUNT: u16 = 0x0059;
 const CRN: u16 = 0x005a;
 const FILE_SHARING: u16 = 0x005b;
 const WRITE_ACCESS: u16 = 0x005c;
+const INTL: u16 = 0x0061;
 const COL_INFO: u16 = 0x007d;
 const GUTS: u16 = 0x0080;
 const BOUND_SHEET8: u16 = 0x0085;
@@ -80,11 +90,58 @@ const PALETTE: u16 = 0x0092;
 const SCL: u16 = 0x00a0;
 const PRINT_SETUP: u16 = 0x00a1;
 const SCEN_MAN: u16 = 0x00ae;
+const SCENARIO: u16 = 0x00af;
+const C_USR: u16 = 0x0191;
+const CB_USR: u16 = 0x0192;
+const USR_INFO: u16 = 0x0193;
+const USR_EXCL: u16 = 0x0194;
+const FILE_LOCK: u16 = 0x0195;
+const BC_USRS: u16 = 0x0197;
+const USR_CHK: u16 = 0x0198;
+const RRD_HEAD: u16 = 0x0138;
+const RRD_INS_DEL: u16 = 0x0137;
+const RRD_REN_SHEET: u16 = 0x013e;
+const RR_SORT: u16 = 0x013f;
+const RRD_MOVE: u16 = 0x0140;
+const RRD_CHG_CELL: u16 = 0x013b;
+const RR_FORMAT: u16 = 0x014a;
+const RR_AUTO_FMT: u16 = 0x014b;
+const RR_INSERT_SH: u16 = 0x014d;
+const RRD_MOVE_BEGIN: u16 = 0x014e;
+const RRD_MOVE_END: u16 = 0x014f;
+const RRD_INS_DEL_BEGIN: u16 = 0x0150;
+const RRD_INS_DEL_END: u16 = 0x0151;
+const RRD_CONFLICT: u16 = 0x0152;
+const RRD_DEF_NAME: u16 = 0x0153;
+const RRD_RST_ETXP: u16 = 0x0154;
+const RRD_TQSIF: u16 = 0x0808;
+const RRD_INFO: u16 = 0x0196;
+const RRD_USER_VIEW: u16 = 0x01ac;
+const MDT_INFO: u16 = 0x0884;
+const MDX_STR: u16 = 0x0885;
+const MDX_TUPLE: u16 = 0x0886;
+const MDX_SET: u16 = 0x0887;
+const MDX_PROP: u16 = 0x0888;
+const MDX_KPI: u16 = 0x0889;
+const SX_VIEW_EX: u16 = 0x080c;
+const SX_TH: u16 = 0x080d;
+const SX_PI_EX: u16 = 0x080e;
+const SXVD_TEX: u16 = 0x080f;
+const FEATURE12: u16 = 0x0878;
+const RECIP_NAME: u16 = 0x00b9;
 const SX_VIEW: u16 = 0x00b0;
 const MUL_RK: u16 = 0x00bd;
 const MUL_BLANK: u16 = 0x00be;
 const MMS: u16 = 0x00c1;
 const SX_STREAM_ID: u16 = 0x00d5;
+const SX_DB: u16 = 0x00c6;
+const SX_FDB: u16 = 0x00c7;
+const SX_DBB: u16 = 0x00c8;
+const SX_ISXOPER: u16 = 0x00d9;
+const SX_RNG: u16 = 0x00d8;
+const SX_TBL: u16 = 0x00d0;
+const SX_TBRGIITM: u16 = 0x00d1;
+const SX_TBPG: u16 = 0x00d2;
 const DB_CELL: u16 = 0x00d7;
 const SX_VS: u16 = 0x00e3;
 const XF: u16 = 0x00e0;
@@ -115,6 +172,11 @@ const FEAT_HDR: u16 = 0x0867;
 const FEAT: u16 = 0x0868;
 const BOOK_EXT: u16 = 0x0863;
 const TABLE_STYLES: u16 = 0x088e;
+const TABLE_STYLE: u16 = 0x088f;
+const TABLE_STYLE_ELEMENT: u16 = 0x0890;
+const NAME_PUBLISH: u16 = 0x0893;
+const FN_GRP12: u16 = 0x0898;
+const NAME_FN_GRP12: u16 = 0x0899;
 const STYLE_EXT: u16 = 0x0892;
 const DXF: u16 = 0x088d;
 const CF_EX: u16 = 0x087b;
@@ -146,13 +208,25 @@ const SX_LI: u16 = 0x00b5;
 const SX_PI: u16 = 0x00b6;
 const SX_DI: u16 = 0x00c5;
 const SX_STRING: u16 = 0x00cd;
+const SX_NUM: u16 = 0x00c9;
+const SX_BOOL: u16 = 0x00ca;
+const SX_ERR: u16 = 0x00cb;
+const SX_INT: u16 = 0x00cc;
+const SX_NIL: u16 = 0x00cf;
 const SX_RULE: u16 = 0x00f0;
 const SX_EX: u16 = 0x00f1;
 const SX_FILT: u16 = 0x00f2;
 const SX_DXF: u16 = 0x00f4;
+const SX_NAME: u16 = 0x00f6;
+const SX_PAIR: u16 = 0x00f8;
+const SX_FMLA: u16 = 0x00f9;
 const SX_ITM: u16 = 0x00f5;
 const RECALC_ID: u16 = 0x01c1;
 const SXVD_EX: u16 = 0x0100;
+const SX_FORMULA: u16 = 0x0103;
+const SX_DB_EX: u16 = 0x0122;
+const SX_DTR: u16 = 0x00ce;
+const SX_FDB_TYPE: u16 = 0x01bb;
 const SXVD: u16 = 0x00b1;
 const CODE_NAME: u16 = 0x01ba;
 const ARRAY: u16 = 0x0221;
@@ -168,6 +242,7 @@ const FEATURE11: u16 = 0x0872;
 const LIST12: u16 = 0x0877;
 const DROP_DOWN_OBJ_IDS: u16 = 0x0874;
 const DATA_VALIDATION_HEADER: u16 = 0x01b2;
+const LEL: u16 = 0x01b9;
 const RICH_TEXT_STREAM: u16 = 0x08a6;
 const GUID_TYPE_LIB: u16 = 0x0897;
 const NAME_COMMENT: u16 = 0x0894;
@@ -216,18 +291,23 @@ const CHART_OBJECT_LINK: u16 = 0x1027;
 const CHART_FRAME: u16 = 0x1032;
 const CHART_3D: u16 = 0x103a;
 const CHART_DROP_BAR: u16 = 0x103d;
+const CHART_PIC_F: u16 = 0x103c;
+const CHART_RADAR: u16 = 0x103e;
 const CHART_SURF: u16 = 0x103f;
+const CHART_RADAR_AREA: u16 = 0x1040;
 const CHART_LEGEND_EXCEPTION: u16 = 0x1043;
 const CHART_AXIS_PARENT: u16 = 0x1041;
 const CHART_SHEET_PROPERTIES: u16 = 0x1044;
 const CHART_SERIES_GROUP_INDEX: u16 = 0x1045;
 const CHART_AXIS_USED: u16 = 0x1046;
+const CHART_SBASE_REF: u16 = 0x1048;
 const CHART_NUMBER_FORMAT_INDEX: u16 = 0x104e;
 const CHART_SERIES_PARENT: u16 = 0x104a;
 const CHART_SERIES_AUX_TREND: u16 = 0x104b;
 const CHART_POSITION: u16 = 0x104f;
 const CHART_FONT_BASIS: u16 = 0x1060;
 const CHART_3D_BAR_SHAPE: u16 = 0x105f;
+const CHART_BOP_POP: u16 = 0x1061;
 const CHART_SERIES_FORMAT: u16 = 0x105d;
 const CHART_SERIES_AUX_ERROR_BAR: u16 = 0x105b;
 const CHART_CLRT_CLIENT: u16 = 0x105c;
@@ -237,10 +317,14 @@ const CHART_PLOT_GROWTH: u16 = 0x1064;
 const CHART_LINKED_DATA: u16 = 0x1051;
 const CHART_AL_RUNS: u16 = 0x1050;
 const CHART_SERIES_INDEX: u16 = 0x1065;
+const CHART_BOP_POP_CUSTOM: u16 = 0x1067;
+const CHART_FONT_BASIS2: u16 = 0x1068;
 const START_BLOCK: u16 = 0x0852;
 const END_BLOCK: u16 = 0x0853;
 const CHART_FRT_INFO: u16 = 0x0850;
 const CHART_CAT_LAB: u16 = 0x0856;
+const CHART_YMULT: u16 = 0x0857;
+const PIVOT_CHART_BITS: u16 = 0x0859;
 const CHART_START_OBJECT: u16 = 0x0854;
 const CHART_END_OBJECT: u16 = 0x0855;
 
@@ -249,6 +333,18 @@ pub struct BiffStream {
     pub records: Vec<BiffRecord>,
     pub trailing_padding: Vec<u8>,
 }
+
+/// The standalone `Revision Log` stream of a shared BIFF8 workbook.
+///
+/// Unlike a workbook globals stream, this stream has no BOF record, so it
+/// requires an explicit BIFF8 entry point instead of first-record detection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevisionLogStream {
+    pub records: Vec<BiffRecord>,
+    pub trailing_padding: Vec<u8>,
+}
+
+pub const REVISION_LOG_STREAM_PATH: &str = "/Revision Log";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BiffRecord {
@@ -274,7 +370,14 @@ pub enum BiffRecordData {
     Hyperlink(HyperlinkRecord),
     DataValidation(DataValidationRecord),
     Name(NameRecord),
+    NameFnGrp12(NameFnGrp12Record),
+    NamePublish(NamePublishRecord),
     Pls(PlsRecord),
+    FnGroupName(FnGroupNameRecord),
+    FnGrp12(FnGrp12Record),
+    Lpr(LprRecord),
+    RecipName(RecipNameRecord),
+    Lel(LelRecord),
     MsoDrawingGroup(MsoDrawingRecord),
     MsoDrawing(MsoDrawingRecord),
     Obj(ObjRecord),
@@ -289,13 +392,18 @@ pub enum BiffRecordData {
     HorizontalPageBreaks(HorizontalPageBreaksRecord),
     DCon(DConRecord),
     DConRef(DConRefRecord),
+    DConName(DConNameRecord),
+    DConBin(DConBinRecord),
     DConn(DConnRecord),
     TextQuery(TextQuery),
     QsiSxTag(QsiSxTagRecord),
     SxViewEx9(SxViewEx9Record),
     DbQueryExt(DbQueryExtRecord),
     HyperlinkTooltip(HyperlinkTooltipRecord),
+    ContinueFrt(ContinueFrtRecord),
+    ContinueFrt11(ContinueFrt11Record),
     ContinueFrt12(ContinueFrt12Record),
+    CrtMlFrtContinue(CrtMlFrtContinueRecord),
     SxAddl(SxAddlRecord),
     EntExU2(EntExU2Record),
     BkHim(BkHimRecord),
@@ -316,6 +424,33 @@ pub enum BiffRecordData {
     OleObjectSize(OleObjectSizeRecord),
     MsoDrawingSelection(MsoDrawingSelectionRecord),
     ScenMan(ScenManRecord),
+    Scenario(ScenarioRecord),
+    CUsr(CUsrRecord),
+    CbUsr(CbUsrRecord),
+    UsrInfo(UsrInfoRecord),
+    UsrExcl(UsrExclRecord),
+    FileLock(FileLockRecord),
+    BCUsrs(BCUsrsRecord),
+    UsrChk(UsrChkRecord),
+    RrdHead(RrdHeadRecord),
+    RrdInsDel(RrdInsDelRecord),
+    RrdRenSheet(RrdRenSheetRecord),
+    RrSort(RrSortRecord),
+    RrdMove(RrdMoveRecord),
+    RrdChgCell(Box<RrdChgCellRecord>),
+    RrdRstEtxp(RrdRstEtxpRecord),
+    RrdTqsif(RrdTqsifRecord),
+    RrdDefName(Box<RrdDefNameRecord>),
+    RrFormat(RrFormatRecord),
+    RrAutoFmt(RrAutoFmtRecord),
+    RrInsertSh(RrInsertShRecord),
+    RrdMoveBegin,
+    RrdMoveEnd,
+    RrdInsDelBegin,
+    RrdInsDelEnd,
+    RrdConflict(RrdConflictRecord),
+    RrdInfo(RrdInfoRecord),
+    RrdUserView(RrdUserViewRecord),
     SxView(SxViewRecord),
     CodePage {
         code_page: u16,
@@ -336,6 +471,26 @@ pub enum BiffRecordData {
     SxPi(SxPiRecord),
     SxDi(SxDiRecord),
     SxString(SxStringRecord),
+    SxNum(SxNumRecord),
+    SxBool(SxBoolRecord),
+    SxErr(SxErrRecord),
+    SxInt(SxIntRecord),
+    SxNil,
+    SxDb(SxDbRecord),
+    SxFdb(SxFdbRecord),
+    SxDbb(SxDbbRecord),
+    SxName(SxNameRecord),
+    SxFmla(SxFmlaRecord),
+    SxFormula(SxFormulaRecord),
+    SxDbEx(SxDbExRecord),
+    SxDtr(SxDtrRecord),
+    SxIsxoper(SxIsxoperRecord),
+    SxRng(SxRngRecord),
+    SxTbl(SxTblRecord),
+    SxTbpg(SxTbpgRecord),
+    SxTbrgiitm(SxTbrgiitmRecord),
+    SxPair(SxPairRecord),
+    SxFdbType(SxFdbTypeRecord),
     RrTabId(RrTabIdRecord),
     SxRule(SxRuleRecord),
     SxEx(SxExRecord),
@@ -347,6 +502,16 @@ pub enum BiffRecordData {
     RecalcId(RecalcIdRecord),
     SxvdEx(SxvdExRecord),
     Sxvd(SxvdRecord),
+    MdtInfo(MdtInfoRecord),
+    MdxStr(MdxStrRecord),
+    MdxTuple(MdxTupleRecord),
+    MdxSet(MdxSetRecord),
+    MdxProp(MdxPropRecord),
+    MdxKpi(MdxKpiRecord),
+    SxViewEx(SxViewExRecord),
+    SxTh(SxThRecord),
+    SxPiEx(SxPiExRecord),
+    SxvdTEx(SxvdTExRecord),
     CodeName(CodeNameRecord),
     Array(ArrayRecord),
     UserSViewBegin(UserSViewBeginRecord),
@@ -357,6 +522,7 @@ pub enum BiffRecordData {
     CellWatch(CellWatchRecord),
     FeatureHeader11(FeatureHeader11Record),
     Feature11(Feature11Record),
+    Feature12(Feature12Record),
     List12(List12Record),
     DropDownObjIds(DropDownObjIdsRecord),
     DataValidationHeader(DataValidationHeaderRecord),
@@ -385,6 +551,8 @@ pub enum BiffRecordData {
     XfExt(XfExtRecord),
     XfCrc(XfCrcRecord),
     TableStyles(TableStylesRecord),
+    TableStyle(TableStyleRecord),
+    TableStyleElement(TableStyleElementRecord),
     StyleExt(StyleExtRecord),
     Dxf(DxfRecord),
     ConditionalFormattingExtension(ConditionalFormattingExtensionRecord),
@@ -408,6 +576,8 @@ pub enum BiffRecordData {
     CompressPictures(CompressPicturesRecord),
     CrtMlFrt(CrtMlFrtRecord),
     ChartFrtInfo(ChartFrtInfoRecord),
+    PivotChartBits(PivotChartBitsRecord),
+    ChartYMult(ChartYMultRecord),
     ChartCatLab(ChartCatLabRecord),
     ChartStartObject(ChartStartObjectRecord),
     ChartEndObject(ChartEndObjectRecord),
@@ -443,18 +613,25 @@ pub enum BiffRecordData {
     ChartFrame(ChartFrameRecord),
     Chart3D(Chart3DRecord),
     ChartDropBar(ChartDropBarRecord),
+    ChartPicF(ChartPicFRecord),
+    ChartRadar(ChartRadarRecord),
+    ChartRadarArea(ChartRadarRecord),
     ChartSurf(ChartSurfRecord),
     ChartLegendException(ChartLegendExceptionRecord),
     ChartAxisParent(ChartAxisParentRecord),
     ChartSheetProperties(ChartSheetPropertiesRecord),
     ChartSeriesGroupIndex(ChartSeriesGroupIndexRecord),
     ChartAxisUsed(ChartAxisUsedRecord),
+    ChartSBaseRef(ChartSBaseRefRecord),
     ChartNumberFormatIndex(ChartNumberFormatIndexRecord),
     ChartSeriesParent(ChartSeriesParentRecord),
     ChartSeriesAuxTrend(ChartSeriesAuxTrendRecord),
     ChartPosition(ChartPositionRecord),
     ChartFontBasis(ChartFontBasisRecord),
     Chart3DBarShape(Chart3DBarShapeRecord),
+    ChartBopPop(ChartBopPopRecord),
+    ChartBopPopCustom(ChartBopPopCustomRecord),
+    ChartFontBasis2(ChartFontBasis2Record),
     ChartSeriesFormat(ChartSeriesFormatRecord),
     ChartSeriesAuxErrorBar(ChartSeriesAuxErrorBarRecord),
     ChartClrtClient(ChartClrtClientRecord),
@@ -487,6 +664,8 @@ pub enum BiffRecordData {
     WriteAccess(WriteAccessRecord),
     Window2(Window2Record),
     Selection(SelectionRecord),
+    Sync(SyncRecord),
+    Intl(IntlRecord),
     MergeCells(MergeCellsRecord),
     Mms(MmsRecord),
     PhoneticInfo(PhoneticInfoRecord),
@@ -809,6 +988,109 @@ pub struct DataValidationOptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct XlUnicodeString {
     pub text: BiffUnicodeString,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+pub struct FnGroupNameRecord {
+    pub name: XlUnicodeString,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FnGrp12Record {
+    pub header: FrtHeader,
+    pub name: XlUnicodeString,
+}
+
+impl FnGroupNameRecord {
+    fn validate(&self) -> Result<()> {
+        if self.name.text.character_count() > 32 {
+            return Err(Error::invalid(0, "FnGroupName exceeds 32 characters"));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for FnGrp12Record {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            header: FrtHeader::read_from(reader)?,
+            name: XlUnicodeString::read_from(reader)?,
+        };
+        if value.header.record_type != FN_GRP12 || value.name.text.character_count() > 32 {
+            return Err(Error::invalid(position, "FnGrp12 fields are invalid"));
+        }
+        Ok(value)
+    }
+}
+
+impl SdkWrite for FnGrp12Record {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if self.header.record_type != FN_GRP12 || self.name.text.character_count() > 32 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "FnGrp12 fields are invalid",
+            ));
+        }
+        self.header.write_to(writer)?;
+        self.name.write_to(writer)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+pub struct LelRecord {
+    pub formula_name: XlUnicodeString,
+}
+
+impl LelRecord {
+    fn validate(&self) -> Result<()> {
+        if self.formula_name.text.character_count() >= 252 {
+            return Err(Error::invalid(
+                0,
+                "Lel formula name must be shorter than 252",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+pub struct LprRecord {
+    /// Low three bits and all producer-preserved reserved bits.
+    pub flags: u16,
+    pub unused4: u16,
+    pub unused5: u16,
+    pub unused6: u16,
+    pub unused7: u16,
+    pub unused8: u16,
+    #[sdk(remaining)]
+    pub unused9: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+pub struct RecipNameRecord {
+    pub declared_friendly_name_length: u16,
+    pub declared_address_length: u32,
+    #[sdk(count = "declared_friendly_name_length")]
+    pub friendly_name: Vec<u8>,
+    #[sdk(count = "declared_address_length")]
+    pub address: Vec<u8>,
+}
+
+impl RecipNameRecord {
+    fn validate(&self) -> Result<()> {
+        if self.declared_friendly_name_length > 256
+            || self.friendly_name.len() != usize::from(self.declared_friendly_name_length)
+            || usize::try_from(self.declared_address_length).ok() != Some(self.address.len())
+            || self.friendly_name.last().is_some_and(|value| *value != 0)
+        {
+            return Err(Error::invalid(
+                0,
+                "RecipName counts or friendly-name terminator are invalid",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1178,6 +1460,101 @@ pub struct NameRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameFnGrp12Record {
+    pub header: FrtHeader,
+    pub declared_name_character_count: u16,
+    pub function_category_index: u16,
+    pub name: XlUnicodeString,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct NamePublishFlags: u16 {
+        const PUBLISHED = 0x0001;
+        const WORKBOOK_PARAMETER = 0x0002;
+        const UNUSED = 0xfffc;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamePublishRecord {
+    pub header: FrtHeader,
+    pub flags: NamePublishFlags,
+    pub name: XlUnicodeString,
+}
+
+impl NameFnGrp12Record {
+    fn validate(&self, position: u64) -> Result<()> {
+        let count = self.name.text.character_count();
+        if self.header.record_type != NAME_FN_GRP12
+            || !(1..=255).contains(&count)
+            || usize::from(self.declared_name_character_count) != count
+            || !(32..=255).contains(&self.function_category_index)
+        {
+            return Err(Error::invalid(position, "NameFnGrp12 fields are invalid"));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for NameFnGrp12Record {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            header: FrtHeader::read_from(reader)?,
+            declared_name_character_count: reader.read_u16()?,
+            function_category_index: reader.read_u16()?,
+            name: XlUnicodeString::read_from(reader)?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for NameFnGrp12Record {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.header.write_to(writer)?;
+        writer.write_u16(self.declared_name_character_count)?;
+        writer.write_u16(self.function_category_index)?;
+        self.name.write_to(writer)
+    }
+}
+
+impl NamePublishRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        if self.header.record_type != NAME_PUBLISH
+            || !(1..=255).contains(&self.name.text.character_count())
+        {
+            return Err(Error::invalid(position, "NamePublish fields are invalid"));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for NamePublishRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            header: FrtHeader::read_from(reader)?,
+            flags: NamePublishFlags::from_bits_retain(reader.read_u16()?),
+            name: XlUnicodeString::read_from(reader)?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for NamePublishRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.header.write_to(writer)?;
+        writer.write_u16(self.flags.bits())?;
+        self.name.write_to(writer)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NameValue {
     BuiltIn(u8),
     User(XlStringCharacters),
@@ -1323,8 +1700,33 @@ bitflags::bitflags! {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjPictureFormula {
     pub formula: ObjFormula,
-    /// Context-selected PictFmlaEmbedInfo/PictFmlaKey fields not yet expanded.
-    pub trailing: Vec<u8>,
+    /// Storage identifier or zero-based position in the Ctls stream.
+    pub control_stream_position: Option<u32>,
+    /// Size of the object data in the Ctls stream when `CONTROL_STREAM` is set.
+    pub control_stream_size: Option<u32>,
+    /// Runtime license and cell-binding formulas for an ActiveX control.
+    pub key: Option<PictFmlaKey>,
+    /// Bounded bytes from damaged or producer-specific FtPictFmla layouts.
+    pub compatibility_trailing: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PictFmlaEmbedInfo {
+    /// Reserved tag; the specification requires 0x03.
+    pub tag: u8,
+    /// Exact cbClass value used by BIFF producers as the class character count.
+    pub declared_class_count: u8,
+    /// Reserved byte retained exactly; the specification requires zero.
+    pub reserved: u8,
+    pub class_name: Option<BiffUnicodeString>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PictFmlaKey {
+    pub declared_key_byte_count: u32,
+    pub key: Vec<u8>,
+    pub linked_cell: ObjFormula,
+    pub list_fill_range: ObjFormula,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1530,6 +1932,8 @@ pub enum ObjFormulaData {
         cce_and_reserved: u16,
         unused: u32,
         tokens: FormulaTokenStream,
+        /// Present only for a PtgTbl formula contained by FtPictFmla.
+        embed_info: Option<PictFmlaEmbedInfo>,
         padding: Vec<u8>,
     },
     Opaque(Vec<u8>),
@@ -2112,6 +2516,575 @@ pub struct SxStringRecord {
     pub segment: Option<BiffUnicodeString>,
 }
 
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SxDbFlags: u16 {
+        const SAVE_DATA = 0x0001;
+        const INVALID = 0x0002;
+        const REFRESH_ON_LOAD = 0x0004;
+        const OPTIMIZE_CACHE = 0x0008;
+        const BACKGROUND_QUERY = 0x0010;
+        const ENABLE_REFRESH = 0x0020;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SxDbRecord {
+    pub cache_record_count: i32,
+    pub stream_id: u16,
+    /// Retains the specification-defined unused high bits.
+    pub flags: SxDbFlags,
+    pub unused: u16,
+    pub source_field_count: i16,
+    pub total_field_count: i16,
+    pub used_record_count: u16,
+    pub source_type: u16,
+    /// 0xFFFF means that last_refresh_user is absent.
+    pub declared_last_refresh_user_count: u16,
+    pub last_refresh_user: Option<BiffUnicodeString>,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SxFdbFlags: u16 {
+        const ALL_ATOMS = 0x0001;
+        const SOME_UNHASHED = 0x0002;
+        const USED = 0x0004;
+        const HAS_PARENT = 0x0008;
+        const RANGE_GROUP = 0x0010;
+        const NUMERIC_FIELD = 0x0020;
+        const UNUSED1 = 0x0040;
+        const TEXT_FIELD = 0x0080;
+        const MIN_MAX_VALID = 0x0100;
+        const SHORT_ITEM_INDEXES = 0x0200;
+        const NON_DATES = 0x0400;
+        const DATE_FIELD = 0x0800;
+        const UNUSED2 = 0x1000;
+        const SERVER_BASED = 0x2000;
+        const CANNOT_GET_UNIQUE_ITEMS = 0x4000;
+        const CALCULATED_FIELD = 0x8000;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+pub struct SxFdbRecord {
+    #[sdk(bitflags = "u16")]
+    pub flags: SxFdbFlags,
+    pub parent_field_index: u16,
+    pub base_field_index: u16,
+    pub unique_item_count: u16,
+    pub grouped_item_count: u16,
+    pub grouped_base_item_count: u16,
+    pub cache_item_count: u16,
+    pub field_name: XlUnicodeString,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SxDbbIndex {
+    Byte(u8),
+    Word(u16),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SxDbbRecord {
+    /// One index for each source SXFDB with fAllAtoms set, in field order.
+    pub indexes: Vec<SxDbbIndex>,
+}
+
+impl SxFdbRecord {
+    fn validate(&self) -> Result<()> {
+        if self.field_name.text.character_count() > 255 {
+            return Err(Error::invalid(0, "SXFDB field name exceeds 255 characters"));
+        }
+        Ok(())
+    }
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SxNameFlags: u16 {
+        const UNUSED1 = 0x0001;
+        const ERROR_NAME = 0x0002;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SxNameRecord {
+    /// Retains the specification-defined unused high bits.
+    #[sdk(bitflags = "u16")]
+    pub flags: SxNameFlags,
+    pub cache_field_index: i16,
+    pub function_index: i16,
+    pub pair_count: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PivotParsedFormula {
+    pub declared_token_size: u16,
+    pub sx_name_count: u16,
+    pub tokens: FormulaTokenStream,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SxFmlaRecord {
+    pub formula: PivotParsedFormula,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SxFormulaRecord {
+    pub reserved: u16,
+    pub cache_field_index: i16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SxDbExRecord {
+    /// Exact IEEE-754 bits of the DateAsNum value.
+    pub refresh_date_bits: u64,
+    pub formula_count: u32,
+}
+
+impl SxDbRecord {
+    fn validate(&self) -> Result<()> {
+        if self.cache_record_count < 0
+            || self.source_field_count < 0
+            || self.total_field_count < 0
+            || self.source_field_count > self.total_field_count
+        {
+            return Err(Error::invalid(
+                0,
+                "SXDB field and record counts must be nonnegative and ordered",
+            ));
+        }
+        match (
+            &self.last_refresh_user,
+            self.declared_last_refresh_user_count,
+        ) {
+            (None, 0xffff) => Ok(()),
+            (None, _) => Err(Error::invalid(
+                0,
+                "SXDB absent refresh user requires cchWho 0xFFFF",
+            )),
+            (Some(value), count @ 1..=255)
+                if value.character_count() == usize::from(count)
+                    && value.trailing_byte.is_none() =>
+            {
+                Ok(())
+            }
+            (Some(_), _) => Err(Error::invalid(0, "SXDB refresh user does not match cchWho")),
+        }
+    }
+}
+
+impl SdkRead for SxDbRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let cache_record_count = reader.read_i32()?;
+        let stream_id = reader.read_u16()?;
+        let flags = SxDbFlags::from_bits_retain(reader.read_u16()?);
+        let unused = reader.read_u16()?;
+        let source_field_count = reader.read_i16()?;
+        let total_field_count = reader.read_i16()?;
+        let used_record_count = reader.read_u16()?;
+        let source_type = reader.read_u16()?;
+        let declared_last_refresh_user_count = reader.read_u16()?;
+        let last_refresh_user = match declared_last_refresh_user_count {
+            0xffff => None,
+            count @ 1..=255 => Some(BiffUnicodeString::read(reader, usize::from(count))?),
+            _ => {
+                return Err(Error::invalid(
+                    reader.position()?,
+                    "SXDB cchWho must be 0xFFFF or between 1 and 255",
+                ));
+            }
+        };
+        let value = Self {
+            cache_record_count,
+            stream_id,
+            flags,
+            unused,
+            source_field_count,
+            total_field_count,
+            used_record_count,
+            source_type,
+            declared_last_refresh_user_count,
+            last_refresh_user,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for SxDbRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate()?;
+        writer.write_i32(self.cache_record_count)?;
+        writer.write_u16(self.stream_id)?;
+        writer.write_u16(self.flags.bits())?;
+        writer.write_u16(self.unused)?;
+        writer.write_i16(self.source_field_count)?;
+        writer.write_i16(self.total_field_count)?;
+        writer.write_u16(self.used_record_count)?;
+        writer.write_u16(self.source_type)?;
+        writer.write_u16(self.declared_last_refresh_user_count)?;
+        if let Some(value) = &self.last_refresh_user {
+            value.write(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl SdkSize for SxDbRecord {
+    fn sdk_size(&self) -> u64 {
+        20 + self
+            .last_refresh_user
+            .as_ref()
+            .map_or(0, biff_unicode_string_payload_size)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SxDbbIndexWidth {
+    Byte,
+    Word,
+}
+
+#[derive(Clone, Debug)]
+struct SxDbbContext {
+    source_field_count: usize,
+    observed_field_count: usize,
+    index_widths: Vec<SxDbbIndexWidth>,
+}
+
+impl SxDbbContext {
+    fn from_db(value: &SxDbRecord) -> Result<Self> {
+        value.validate()?;
+        Ok(Self {
+            source_field_count: usize::try_from(value.source_field_count)
+                .map_err(|_| Error::Limit("SXDB source field count exceeds usize".into()))?,
+            observed_field_count: 0,
+            index_widths: Vec::new(),
+        })
+    }
+
+    fn observe_field(&mut self, value: &SxFdbRecord) {
+        if self.observed_field_count < self.source_field_count
+            && value.flags.contains(SxFdbFlags::ALL_ATOMS)
+        {
+            self.index_widths
+                .push(if value.flags.contains(SxFdbFlags::SHORT_ITEM_INDEXES) {
+                    SxDbbIndexWidth::Word
+                } else {
+                    SxDbbIndexWidth::Byte
+                });
+        }
+        self.observed_field_count = self.observed_field_count.saturating_add(1);
+    }
+
+    fn validate_record(&self, value: &SxDbbRecord) -> Result<()> {
+        if self.observed_field_count < self.source_field_count {
+            return Err(Error::invalid(
+                0,
+                "SXDBB appears before all source SXFDB records",
+            ));
+        }
+        if value.indexes.len() != self.index_widths.len()
+            || value
+                .indexes
+                .iter()
+                .zip(&self.index_widths)
+                .any(|(index, width)| {
+                    !matches!(
+                        (index, width),
+                        (SxDbbIndex::Byte(_), SxDbbIndexWidth::Byte)
+                            | (SxDbbIndex::Word(_), SxDbbIndexWidth::Word)
+                    )
+                })
+        {
+            return Err(Error::invalid(
+                0,
+                "SXDBB index widths do not match preceding SXFDB records",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SxDbbRecord {
+    fn from_bytes(bytes: &[u8], context: &SxDbbContext, offset: usize) -> Result<Self> {
+        if context.observed_field_count < context.source_field_count {
+            return Err(Error::invalid(
+                offset as u64,
+                "SXDBB appears before all source SXFDB records",
+            ));
+        }
+        let mut cursor = 0usize;
+        let mut indexes = Vec::with_capacity(context.index_widths.len());
+        for width in &context.index_widths {
+            indexes.push(match width {
+                SxDbbIndexWidth::Byte => {
+                    SxDbbIndex::Byte(take_u8(bytes, &mut cursor, "truncated SXDBB byte index")?)
+                }
+                SxDbbIndexWidth::Word => {
+                    SxDbbIndex::Word(take_u16(bytes, &mut cursor, "truncated SXDBB word index")?)
+                }
+            });
+        }
+        if cursor != bytes.len() {
+            return Err(Error::invalid(
+                offset as u64 + cursor as u64,
+                "unexpected trailing bytes in SXDBB",
+            ));
+        }
+        Ok(Self { indexes })
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.indexes.len().saturating_mul(2));
+        for index in &self.indexes {
+            match index {
+                SxDbbIndex::Byte(value) => bytes.push(*value),
+                SxDbbIndex::Word(value) => bytes.extend_from_slice(&value.to_le_bytes()),
+            }
+        }
+        bytes
+    }
+}
+
+impl SdkRead for PivotParsedFormula {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let declared_token_size = reader.read_u16()?;
+        let sx_name_count = reader.read_u16()?;
+        let token_bytes = reader.read_vec(usize::from(declared_token_size))?;
+        Ok(Self {
+            declared_token_size,
+            sx_name_count,
+            tokens: FormulaTokenStream::from_bytes(&token_bytes)?,
+        })
+    }
+}
+
+impl SdkWrite for PivotParsedFormula {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        let token_bytes = self.tokens.to_bytes()?;
+        if token_bytes.len() != usize::from(self.declared_token_size) {
+            return Err(Error::invalid(
+                writer.position()?,
+                "PivotParsedFormula cce does not match rgce",
+            ));
+        }
+        writer.write_u16(self.declared_token_size)?;
+        writer.write_u16(self.sx_name_count)?;
+        writer.write_all(&token_bytes)?;
+        Ok(())
+    }
+}
+
+impl SdkSize for PivotParsedFormula {
+    fn sdk_size(&self) -> u64 {
+        4 + u64::from(self.declared_token_size)
+    }
+}
+
+impl SdkRead for SxFmlaRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        Ok(Self {
+            formula: PivotParsedFormula::read_from(reader)?,
+        })
+    }
+}
+
+impl SdkWrite for SxFmlaRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.formula.write_to(writer)
+    }
+}
+
+impl SdkSize for SxFmlaRecord {
+    fn sdk_size(&self) -> u64 {
+        self.formula.sdk_size()
+    }
+}
+
+fn biff_unicode_string_payload_size(value: &BiffUnicodeString) -> u64 {
+    let character_bytes = match &value.characters {
+        XlStringCharacters::Compressed(values) => values.len() as u64,
+        XlStringCharacters::Unicode(values) => (values.len() as u64).saturating_mul(2),
+    };
+    1u64.saturating_add(character_bytes)
+        .saturating_add(u64::from(value.trailing_byte.is_some()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SxNumRecord {
+    /// Exact IEEE-754 bits of the Xnum value.
+    pub value_bits: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SxBoolRecord {
+    /// Exact Boolean word; the specification restricts this to zero or one.
+    pub value: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SxErrRecord {
+    /// Exact BIFF error code word.
+    pub error_code: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SxIntRecord {
+    pub value: i16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SxDtrRecord {
+    pub year: u16,
+    pub month: u16,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SxIsxoperRecord {
+    pub item_indices: Vec<u16>,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SxRngFlags: u16 {
+        const AUTO_START = 0x0001;
+        const AUTO_END = 0x0002;
+        const GROUP_TYPE = 0x001c;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SxRngRecord {
+    #[sdk(bitflags = "u16")]
+    pub flags: SxRngFlags,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SxTblRecord {
+    pub source_range_count: u16,
+    pub page_group_count: u16,
+    /// Low 15 bits are cPages; bit 15 is fAutoPage.
+    pub page_count_flags: u16,
+}
+
+impl SxTblRecord {
+    pub fn page_count(self) -> u16 {
+        self.page_count_flags & 0x7fff
+    }
+
+    pub fn auto_page(self) -> bool {
+        self.page_count_flags & 0x8000 != 0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SxTbpgRecord {
+    pub item_indices: Vec<i16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SxTbrgiitmRecord {
+    pub item_count: u16,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SxPairFlags: u16 {
+        const FORMULA = 0x0001;
+        const PHYSICAL = 0x0008;
+        const RELATIVE = 0x0010;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SxPairRecord {
+    pub cache_field_index: u16,
+    pub cache_item_index: i16,
+    pub reserved: u16,
+    #[sdk(bitflags = "u16")]
+    pub flags: SxPairFlags,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SxFdbTypeRecord {
+    pub odbc_type: u16,
+}
+
+impl SdkRead for SxIsxoperRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let remaining = reader.remaining()?;
+        if remaining % 2 != 0 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "SxIsxoper item array has an odd byte length",
+            ));
+        }
+        let count = usize::try_from(remaining / 2)
+            .map_err(|_| Error::Limit("SxIsxoper item count exceeds usize".into()))?;
+        let mut item_indices = Vec::with_capacity(count);
+        for _ in 0..count {
+            item_indices.push(reader.read_u16()?);
+        }
+        Ok(Self { item_indices })
+    }
+}
+
+impl SdkWrite for SxIsxoperRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        for value in &self.item_indices {
+            writer.write_u16(*value)?;
+        }
+        Ok(())
+    }
+}
+
+impl SdkSize for SxIsxoperRecord {
+    fn sdk_size(&self) -> u64 {
+        self.item_indices.len() as u64 * 2
+    }
+}
+
+impl SdkRead for SxTbpgRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let remaining = reader.remaining()?;
+        if remaining % 2 != 0 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "SxTbpg item array has an odd byte length",
+            ));
+        }
+        let count = usize::try_from(remaining / 2)
+            .map_err(|_| Error::Limit("SxTbpg item count exceeds usize".into()))?;
+        let mut item_indices = Vec::with_capacity(count);
+        for _ in 0..count {
+            item_indices.push(reader.read_i16()?);
+        }
+        Ok(Self { item_indices })
+    }
+}
+
+impl SdkWrite for SxTbpgRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        for value in &self.item_indices {
+            writer.write_i16(*value)?;
+        }
+        Ok(())
+    }
+}
+
+impl SdkSize for SxTbpgRecord {
+    fn sdk_size(&self) -> u64 {
+        self.item_indices.len() as u64 * 2
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RrTabIdRecord {
     pub sheet_ids: Vec<u16>,
@@ -2336,6 +3309,47 @@ pub struct DConRefRecord {
     pub declared_file_character_count: u16,
     pub file: BiffUnicodeString,
     pub self_reference_unused: Option<DConSelfReferenceUnused>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DConFileReference {
+    /// Zero means the name is scoped to this workbook; otherwise at least two.
+    pub declared_character_count: u16,
+    pub file: Option<BiffUnicodeString>,
+    pub self_reference_unused: Option<DConSelfReferenceUnused>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DConNameRecord {
+    pub name: XlUnicodeString,
+    pub file_reference: DConFileReference,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u8")]
+pub enum DConBuiltInName {
+    ConsolidateArea = 0x00,
+    AutoOpen = 0x01,
+    AutoClose = 0x02,
+    Extract = 0x03,
+    Database = 0x04,
+    Criteria = 0x05,
+    PrintArea = 0x06,
+    PrintTitles = 0x07,
+    Recorder = 0x08,
+    DataForm = 0x09,
+    AutoActivate = 0x0a,
+    AutoDeactivate = 0x0b,
+    SheetTitle = 0x0c,
+    FilterDatabase = 0x0d,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DConBinRecord {
+    pub built_in_name: DConBuiltInName,
+    pub reserved1: u16,
+    pub reserved2: u8,
+    pub file_reference: DConFileReference,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
@@ -2716,12 +3730,33 @@ pub struct HyperlinkTooltipRecord {
     pub tooltip: Vec<u16>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContinueFrtRecord {
+    pub header: FrtHeaderOld,
+    /// Continuation bytes whose schema belongs to the preceding future record.
+    pub continuation: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContinueFrt11Record {
+    pub header: FrtHeader,
+    /// Continuation bytes whose schema belongs to the preceding future record.
+    pub continuation: Vec<u8>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct ContinueFrt12Record {
     pub header: FrtRefHeaderU,
     /// Continuation bytes whose schema belongs to the preceding future record.
     #[sdk(remaining)]
     pub continuation: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrtMlFrtContinueRecord {
+    pub header: FrtHeader,
+    /// Continuation of the owning CrtMlFrt XML token chain.
+    pub xml_token_chain: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
@@ -3315,6 +4350,802 @@ pub struct ScenManRecord {
     pub result_references: Vec<CellRange>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScenarioCellReference {
+    pub row: u16,
+    pub column: u16,
+    pub deleted: bool,
+    /// Undefined high bit retained for exact round trips.
+    pub unused: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScenarioRecord {
+    pub declared_cell_count: u16,
+    pub locked: bool,
+    pub hidden: bool,
+    pub declared_name_count: u8,
+    pub declared_comment_count: u8,
+    pub declared_user_name_count: u8,
+    pub name: BiffUnicodeString,
+    pub user_name: Option<XlUnicodeString>,
+    pub comment: Option<XlUnicodeString>,
+    pub cells: Vec<ScenarioCellReference>,
+    pub values: Vec<XlUnicodeString>,
+    /// One undefined word per changed cell.
+    pub unused: Vec<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CUsrRecord {
+    pub user_count: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CbUsrRecord {
+    /// One byte count for each of the 256 possible user slots.
+    pub user_record_sizes: [u16; 256],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShortDtr {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+    /// Zero means unspecified; one through seven mean Monday through Sunday.
+    pub weekday: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsrInfoRecord {
+    pub user_id: i32,
+    pub last_revision_guid: [u8; 16],
+    pub opened_at: ShortDtr,
+    pub user_name: XlUnicodeString,
+    pub unused: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsrExclRecord {
+    pub exclusive: bool,
+    pub changed_at: ShortDtr,
+    pub used_user_name_characters: u16,
+    /// Fixed-width 147-character XLUnicodeStringNoCch field.
+    pub user_name: BiffUnicodeString,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u32")]
+pub enum FileLockPurpose {
+    Unlocked = 0x0000_0000,
+    WriteOrReleaseUserInformation = 0x0001_0001,
+    MergeRevisions = 0x0001_0002,
+    MakeExclusive = 0x0001_0004,
+    DeleteOrRename = 0x0001_0008,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileLockRecord {
+    pub purpose: FileLockPurpose,
+    pub user_name: XlUnicodeString,
+    /// Producer-preserved fixed-width tail.
+    pub unused: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct BCUsrsRecord {
+    pub user_count: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u16")]
+pub enum UsrChkVersion {
+    Biff2 = 0x0200,
+    Biff3 = 0x0300,
+    Biff4 = 0x0400,
+    Biff5 = 0x0500,
+    Biff8 = 0x0600,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct UsrChkRecord {
+    pub version: UsrChkVersion,
+    pub reserved: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u16")]
+pub enum RevisionType {
+    InsertRow = 0x0000,
+    InsertColumn = 0x0001,
+    DeleteRow = 0x0002,
+    DeleteColumn = 0x0003,
+    Move = 0x0004,
+    InsertSheet = 0x0005,
+    Sort = 0x0007,
+    ChangeCell = 0x0008,
+    RenameSheet = 0x0009,
+    DefinedName = 0x000a,
+    Format = 0x000b,
+    AutoFormat = 0x000c,
+    Note = 0x000d,
+    Header = 0x0020,
+    DeleteDefinedName = 0x0022,
+    Conflict = 0x0025,
+    AddView = 0x002b,
+    DeleteView = 0x002c,
+    TrashQueryTableField = 0x002e,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct RrdFlags: u16 {
+        const ACCEPTED = 1 << 0;
+        const UNDO_ACTION = 1 << 1;
+        const UNUSED = 1 << 2;
+        const DELETE_AT_SORT_EDGE = 1 << 3;
+        const RESERVED = 0xfff0;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rrd {
+    pub memory_size: u32,
+    pub revision_id: i32,
+    pub revision_type: RevisionType,
+    pub flags: RrdFlags,
+    pub sheet_id: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RrdHeadRecord {
+    pub revision: Rrd,
+    pub revision_set_guid: [u8; 16],
+    pub file_code_page: u16,
+    pub used_user_name_characters: u16,
+    /// Fixed-width 114-byte XLUnicodeStringNoCch field.
+    pub user_name: BiffUnicodeString,
+    pub saved_at: ShortDtr,
+    pub next_sheet_id: i16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RrdRenSheetRecord {
+    pub revision: Rrd,
+    pub used_old_name_characters: u16,
+    /// Fixed-width 255-byte XLUnicodeStringNoCch field.
+    pub old_name: BiffUnicodeString,
+    pub used_new_name_characters: u16,
+    /// Fixed-width 255-byte XLUnicodeStringNoCch field.
+    pub new_name: BiffUnicodeString,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ref8U {
+    pub first_row: u16,
+    pub last_row: u16,
+    pub first_column: u16,
+    pub last_column: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ref8U2007 {
+    pub first_row: u32,
+    pub last_row: u32,
+    pub first_column: u32,
+    pub last_column: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RrdQueryRange {
+    Legacy(Ref8U),
+    Excel2007(Ref8U2007),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RrdTqsifRecord {
+    pub record_type: u16,
+    pub future_flags: u16,
+    pub range: RrdQueryRange,
+    pub revision: Rrd,
+    pub field_id: u32,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct RrdDefNameOptions: u16 {
+        const PROCEDURE_INFO = 1 << 0;
+        const FUNCTION = 1 << 1;
+        const HIDDEN = 1 << 8;
+        const CUSTOM_MENU = 1 << 9;
+        const DESCRIPTION = 1 << 10;
+        const HELP_TOPIC = 1 << 11;
+        const STATUS_TEXT = 1 << 12;
+        const RESERVED = 0xe0fc;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RrdDefNameFlags {
+    pub declared_formula_size: u16,
+    pub options: RrdDefNameOptions,
+    pub function_group: u8,
+    pub shortcut_key: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u8")]
+pub enum RrdBuiltInName {
+    ConsolidateArea = 0x01,
+    AutoOpen = 0x02,
+    AutoClose = 0x03,
+    Extract = 0x04,
+    Database = 0x05,
+    Recorder = 0x09,
+    DataForm = 0x0a,
+    AutoActivate = 0x0b,
+    AutoDeactivate = 0x0c,
+    SheetTitle = 0x0d,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RrdDefinedName {
+    Custom(XlUnicodeString),
+    BuiltIn {
+        name: RrdBuiltInName,
+        unused: [u8; 3],
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RrdDefNameText {
+    pub custom_menu: XlUnicodeString,
+    pub description: XlUnicodeString,
+    pub help_topic: XlUnicodeString,
+    pub status_text: XlUnicodeString,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RrdDefNameRecord {
+    pub revision: Rrd,
+    pub local_sheet_id: u16,
+    pub view_name: bool,
+    pub reserved: u8,
+    pub new_flags: RrdDefNameFlags,
+    pub old_flags: RrdDefNameFlags,
+    pub name: RrdDefinedName,
+    pub new_formula: FormulaTokenStream,
+    pub new_text: RrdDefNameText,
+    pub old_formula: FormulaTokenStream,
+    pub old_text: RrdDefNameText,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SqRefU {
+    pub declared_range_count: u16,
+    pub ranges: Vec<Ref8U>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u16")]
+pub enum AutoFmt8 {
+    Simple = 0x0000,
+    Classic1 = 0x0001,
+    Classic2 = 0x0002,
+    Classic3 = 0x0003,
+    Accounting1 = 0x0004,
+    Accounting2 = 0x0005,
+    Accounting3 = 0x0006,
+    Accounting4 = 0x0007,
+    Colorful1 = 0x0008,
+    Colorful2 = 0x0009,
+    Colorful3 = 0x000a,
+    List1 = 0x000b,
+    List2 = 0x000c,
+    List3 = 0x000d,
+    ThreeDEffects1 = 0x000e,
+    ThreeDEffects2 = 0x000f,
+    NoneGeneral = 0x0010,
+    Japan2 = 0x0011,
+    Japan3 = 0x0012,
+    Japan4 = 0x0013,
+    NoneJapan = 0x0014,
+    Report1 = 0x1000,
+    Report2 = 0x1001,
+    Report3 = 0x1002,
+    Report4 = 0x1003,
+    Report5 = 0x1004,
+    Report6 = 0x1005,
+    Report7 = 0x1006,
+    Report8 = 0x1007,
+    Report9 = 0x1008,
+    Report10 = 0x1009,
+    Table1 = 0x100a,
+    Table2 = 0x100b,
+    Table3 = 0x100c,
+    Table4 = 0x100d,
+    Table5 = 0x100e,
+    Table6 = 0x100f,
+    Table7 = 0x1010,
+    Table8 = 0x1011,
+    Table9 = 0x1012,
+    Table10 = 0x1013,
+    PivotTableClassic = 0x1014,
+    PivotTableNone = 0x1015,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct RrAutoFmtFlags: u16 {
+        const APPLY_NUMBER_FORMATS = 1 << 0;
+        const APPLY_FONT_FORMATS = 1 << 1;
+        const APPLY_ALIGNMENT_FORMATS = 1 << 2;
+        const APPLY_BORDER_FORMATS = 1 << 3;
+        const APPLY_PATTERN_FORMATS = 1 << 4;
+        const APPLY_WIDTH_HEIGHT_FORMATS = 1 << 5;
+        const RESERVED = 0xffc0;
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct RrFormatFlags: u16 {
+        const RESET_TO_STYLE = 1 << 0;
+        const FORMAT_NULL = 1 << 1;
+        const CLEAR_FORMAT = 1 << 2;
+        const RESERVED = 0xfff8;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RrAutoFmtRecord {
+    pub revision: Rrd,
+    pub range: Ref8U,
+    pub style: AutoFmt8,
+    pub flags: RrAutoFmtFlags,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RrFormatRecord {
+    pub revision: Rrd,
+    pub flags: RrFormatFlags,
+    pub ranges: SqRefU,
+    pub format: Option<DxfN>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RkValue {
+    Integer(i32),
+    FloatingPointHigh30(u32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RkNumber {
+    pub divided_by_100: bool,
+    pub value: RkValue,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Xnum {
+    pub bits: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u8")]
+pub enum CellErrorCode {
+    Null = 0x00,
+    DivisionByZero = 0x07,
+    Value = 0x0f,
+    Reference = 0x17,
+    Name = 0x1d,
+    Number = 0x24,
+    NotAvailable = 0x2a,
+    GettingData = 0x2b,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bes {
+    Boolean(bool),
+    Error(CellErrorCode),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct XlUnicodeRichExtendedString {
+    pub declared_character_count: u16,
+    pub flags: SstStringFlags,
+    pub declared_format_run_count: Option<u16>,
+    pub declared_extension_length: Option<u32>,
+    pub character_chunks: Vec<SstCharacterChunk>,
+    pub format_runs: Vec<FormatRun>,
+    pub extension: Option<ExtRst>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RrdChgCellSegmentLayout {
+    pub logical_byte_count: u16,
+    pub continuation_encoding: Option<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellParsedFormula {
+    pub declared_token_size: u16,
+    pub formula: FormulaTokenStream,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RrdCellValue {
+    Blank,
+    Rk(RkNumber),
+    Number(Xnum),
+    String(XlUnicodeRichExtendedString),
+    BooleanError(Bes),
+    Formula(CellParsedFormula),
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct RrdChgCellFlags: u16 {
+        const PREFIX = 1 << 6;
+        const UNUSED = 1 << 7;
+        const OLD_FORMAT = 1 << 8;
+        const OLD_FORMAT_NULL = 1 << 9;
+        const RESET_TO_STYLE = 1 << 10;
+        const CLEAR_FORMAT = 1 << 11;
+        const NEW_FORMAT = 1 << 12;
+        const NEW_FORMAT_NULL = 1 << 13;
+        const RESERVED = 0xc000;
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct RrdChgCellSecondaryFlags: u8 {
+        const SHOW_PHONETIC = 1 << 0;
+        const SHOW_OLD_PHONETIC = 1 << 1;
+        const END_OF_LIST_FORMULA_UPDATE = 1 << 2;
+        const RESERVED = 0xf8;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u8")]
+pub enum RevisionDisplayNumberFormat {
+    Automatic = 0x00,
+    NumberTwoDecimals = 0x04,
+    CurrencyParentheses = 0x0b,
+    PercentageInteger = 0x0d,
+    PercentageTwoDecimals = 0x0e,
+    Scientific = 0x0f,
+    Engineering = 0x10,
+    FractionOneDigit = 0x11,
+    FractionTwoDigits = 0x12,
+    DateMonthDayYear = 0x13,
+    DateDayMonth = 0x15,
+    TimeTwelveHour = 0x17,
+    DateTimeTwentyFourHour = 0x1b,
+    Accounting = 0x22,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RrdChgCellRecord {
+    pub revision: Rrd,
+    pub flags: RrdChgCellFlags,
+    pub display_number_format: RevisionDisplayNumberFormat,
+    pub secondary_flags: RrdChgCellSecondaryFlags,
+    pub location: RgceLocation,
+    pub declared_old_value_size: u32,
+    pub font_reset_count: u16,
+    pub old_format: Option<DxfN>,
+    pub new_format: Option<DxfN>,
+    pub old_value: RrdCellValue,
+    pub new_value: RrdCellValue,
+    pub physical_segments: Option<Vec<RrdChgCellSegmentLayout>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ts {
+    pub unused1: bool,
+    pub italic: bool,
+    pub unused2: u8,
+    pub strikeout: bool,
+    pub unused3: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StxpFontWeight {
+    Ignored,
+    Unspecified,
+    Normal,
+    Bold,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StxpScriptStyle {
+    Ignored,
+    Normal,
+    Superscript,
+    Subscript,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u8")]
+pub enum StxpUnderline {
+    None = 0x00,
+    Single = 0x01,
+    Double = 0x02,
+    SingleAccounting = 0x21,
+    DoubleAccounting = 0x22,
+    Ignored = 0xff,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stxp {
+    pub height_twips: i32,
+    pub text_style: Ts,
+    pub weight: StxpFontWeight,
+    pub script_style: StxpScriptStyle,
+    pub underline: StxpUnderline,
+    pub font_family: u8,
+    pub character_set: u8,
+    pub unused: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Icv {
+    pub value: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RrdRstEtxpRecord {
+    pub font_index: u16,
+    pub used_font_name_characters: u8,
+    pub full_string: u8,
+    pub font_name: [u16; 31],
+    pub font: Stxp,
+    pub foreground_color: Icv,
+    pub reserved1: u16,
+    pub reserved2: u32,
+}
+
+#[derive(Clone, Debug)]
+struct RrdRstEtxpContext {
+    expected_count: u16,
+    seen_indexes: BTreeSet<u16>,
+}
+
+impl RrdRstEtxpContext {
+    fn new(expected_count: u16) -> Option<Self> {
+        (expected_count != 0).then(|| Self {
+            expected_count,
+            seen_indexes: BTreeSet::new(),
+        })
+    }
+
+    fn observe(&mut self, record: &RrdRstEtxpRecord, position: u64) -> Result<bool> {
+        if record.font_index >= self.expected_count || !self.seen_indexes.insert(record.font_index)
+        {
+            return Err(Error::invalid(
+                position,
+                "RRDRstEtxp iFnt is out of range or duplicated",
+            ));
+        }
+        Ok(self.seen_indexes.len() == usize::from(self.expected_count))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RgceColumn {
+    pub column: u16,
+    pub row_relative: bool,
+    pub column_relative: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RgceLocation {
+    pub row: u16,
+    pub column: RgceColumn,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RgceLocation8 {
+    pub location: RgceLocation,
+    pub reserved: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RgceArea {
+    pub first_row: u16,
+    pub last_row: u16,
+    pub first_column: RgceColumn,
+    pub last_column: RgceColumn,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RrLocation {
+    pub row: u16,
+    pub column: u16,
+    pub quoted_label: bool,
+    pub relative: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u8")]
+pub enum NaturalFormulaType {
+    Neither02 = 0x02,
+    Neither03 = 0x03,
+    Neither06 = 0x06,
+    Neither07 = 0x07,
+    Radical = 0x0a,
+    StackedRadical = 0x0b,
+    Stacked0d = 0x0d,
+    Stacked0f = 0x0f,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DuceStacked {
+    Location(RrLocation),
+    Flags { location_count: u32, relative: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DuceRadical {
+    Undefined([u8; 9]),
+    Area { reference: Ref8U, token: u8 },
+    AreaError { unused: [u8; 8], token: u8 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Duce {
+    pub stacked: DuceStacked,
+    pub radical: DuceRadical,
+    pub formula_type: NaturalFormulaType,
+    pub stacked_locations: Vec<RrLocation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u8")]
+pub enum RevisionBuiltInName {
+    ConsolidateArea = 0x01,
+    AutoOpen = 0x02,
+    AutoClose = 0x03,
+    Extract = 0x04,
+    Database = 0x05,
+    Criteria = 0x06,
+    PrintArea = 0x07,
+    PrintTitles = 0x08,
+    Recorder = 0x09,
+    DataForm = 0x0a,
+    AutoActivate = 0x0b,
+    AutoDeactivate = 0x0c,
+    SheetTitle = 0x0d,
+    FilterDatabase = 0x0e,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DucrDefinedName {
+    Custom(XlUnicodeString),
+    BuiltIn {
+        name: RevisionBuiltInName,
+        unused: [u8; 3],
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DucrConditional {
+    DefinedName {
+        sheet_id: u16,
+        name: DucrDefinedName,
+    },
+    Location {
+        sheet_id: u16,
+        location: RrLocation,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DucrRadical {
+    NaturalLanguage(Duce),
+    Location(RgceLocation8),
+    Area(RgceArea),
+    Unused([u8; 8]),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ducr {
+    pub reserved1: u32,
+    pub token_index: u16,
+    pub original_token: u8,
+    pub uses_second_sheet: bool,
+    pub radical: DucrRadical,
+    pub conditional: DucrConditional,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RrdInsDelRecord {
+    pub revision: Rrd,
+    pub end_of_list: bool,
+    pub range: Ref8U,
+    pub declared_undo_count: u32,
+    pub undo: Vec<Ducr>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RrdMoveRecord {
+    pub revision: Rrd,
+    pub source_range: Ref8U,
+    pub destination_range: Ref8U,
+    pub source_sheet_id: u16,
+    pub declared_undo_count: u32,
+    pub undo: Vec<Ducr>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SortItem {
+    pub new_index: u32,
+    pub old_index: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RrSortRecord {
+    pub revision: Rrd,
+    pub range: Ref8U,
+    pub sort_columns: bool,
+    pub declared_sort_map_size: u32,
+    pub sort_map: Vec<SortItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RrInsertShRecord {
+    pub revision: Rrd,
+    pub sheet_position: u16,
+    pub reserved: u16,
+    pub used_name_characters: u16,
+    /// Fixed-width 256-byte XLUnicodeStringNoCch field.
+    pub name: BiffUnicodeString,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RrdConflictRecord {
+    pub revision: Rrd,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct RrdInfoSharingFlags: u16 {
+        const SHARED = 1 << 0;
+        const DISK_HAS_REVISIONS = 1 << 1;
+        const AUTO_DELETE_REVISIONS = 1 << 2;
+        const TRACK_REVISIONS = 1 << 3;
+        const EXCLUSIVE = 1 << 4;
+        const RESERVED = 0xffe0;
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct RrdInfoHistoryFlags: u16 {
+        const NO_REVISION_HISTORY = 1 << 0;
+        const PROTECT_REVISION_HISTORY = 1 << 1;
+        const RESERVED = 0xfffc;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RrdInfoRecord {
+    pub biff_version: u16,
+    pub reserved1: u16,
+    pub sharing_flags: RrdInfoSharingFlags,
+    pub last_revision_guid: [u8; 16],
+    pub root_revision_guid: [u8; 16],
+    pub revision_id: i32,
+    pub version: u32,
+    pub history_flags: RrdInfoHistoryFlags,
+    pub revision_history_days: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RrdUserViewRecord {
+    pub revision: Rrd,
+    pub view_guid: [u8; 16],
+}
+
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct SxViewFlags: u16 {
@@ -3600,6 +5431,41 @@ bitflags::bitflags! {
         const LOAD_TOTAL_STRING = 1 << 10;
         const AUTO_CREATE_CALCULATED_COLUMN = 1 << 11;
     }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Feat11XMapEntryFlags: u32 {
+        const RESERVED1 = 1 << 0;
+        const LOAD_XMAP = 1 << 1;
+        const CAN_BE_SINGLE = 1 << 2;
+        const RESERVED2 = 1 << 3;
+        const RESERVED3 = 0xffff_fff0;
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Feat11WssDisplayFlags: u32 {
+        const PERCENT = 1 << 0;
+        const DECIMAL_SET = 1 << 1;
+        const DATE_ONLY = 1 << 2;
+        const READING_ORDER_MASK = 0x0000_0018;
+        const RICH_TEXT = 1 << 5;
+        const UNKNOWN_RICH_TEXT_FORMATTING = 1 << 6;
+        const ALERT_UNKNOWN_RICH_TEXT_FORMATTING = 1 << 7;
+        const UNUSED = 0xffff_ff00;
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Feat11WssValidationFlags: u32 {
+        const READ_ONLY = 1 << 0;
+        const REQUIRED = 1 << 1;
+        const MINIMUM_SET = 1 << 2;
+        const MAXIMUM_SET = 1 << 3;
+        const DEFAULT_SET = 1 << 4;
+        const DEFAULT_DATE_TODAY = 1 << 5;
+        const LOAD_FORMULA = 1 << 6;
+        const ALLOW_FILL_IN = 1 << 7;
+        const DEFAULT_TYPE_MASK = 0x0000_ff00;
+        const UNUSED = 0xffff_0000;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3608,10 +5474,106 @@ pub struct DxfN12List {
     pub extension: Option<XfExtNoFrt>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Feature11AutoFilter {
     pub declared_size: u32,
     pub unused: u16,
+    pub filter: Option<Box<AutoFilterRecord>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListParsedFormula {
+    pub declared_token_size: u16,
+    pub formula: FormulaTokenStream,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListParsedArrayFormula {
+    pub declared_token_size: u16,
+    pub formula: FormulaTokenStream,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Feat11Fmla {
+    pub declared_size: u16,
+    pub formula: ListParsedFormula,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Feat11TotalFmla {
+    Formula(ListParsedFormula),
+    ArrayFormula(ListParsedArrayFormula),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Feat11XMap {
+    pub declared_entry_count: u16,
+    pub entries: Vec<Feat11XMapEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Feat11XMapEntry {
+    pub flags: Feat11XMapEntryFlags,
+    pub details: Feat11XMapEntry2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+pub struct Feat11XMapEntry2 {
+    pub map_id: u32,
+    pub xpath: XlUnicodeString,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Feat11WssListInfo {
+    pub locale_id: u32,
+    pub decimal_places: u32,
+    pub display_flags: Feat11WssDisplayFlags,
+    pub validation_flags: Feat11WssValidationFlags,
+    pub default_value: Option<Feat11WssDefaultValue>,
+    pub validation_formula: Option<XlUnicodeString>,
+    pub reserved: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Feat11WssDefaultValue {
+    Text(XlUnicodeString),
+    NumberBits(u64),
+    Boolean(u32),
+    DateBits(u64),
+    CurrencyBits(u64),
+    Choice(XlUnicodeString),
+    MultiChoice(XlUnicodeString),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CachedDiskHeader {
+    pub declared_format_size: u32,
+    pub format: DxfN12List,
+    pub style_name: Option<XlUnicodeString>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct Feat11CellStruct {
+    pub row_id: u32,
+    pub field_id: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Feat11RgSharepointIdDel {
+    pub declared_id_count: u16,
+    pub row_ids: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Feat11RgSharepointIdChange {
+    pub declared_id_count: u16,
+    pub row_ids: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Feat11RgInvalidCells {
+    pub declared_cell_count: u16,
+    pub cells: Vec<Feat11CellStruct>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3630,6 +5592,13 @@ pub struct Feature11FieldDataItem {
     pub aggregate_format: Option<DxfN12List>,
     pub insert_row_format: Option<DxfN12List>,
     pub auto_filter: Option<Feature11AutoFilter>,
+    pub xml_map: Option<Feat11XMap>,
+    pub formula: Option<Feat11Fmla>,
+    pub total_formula: Option<Feat11TotalFmla>,
+    pub total_text: Option<XlUnicodeString>,
+    pub wss_info: Option<Feat11WssListInfo>,
+    pub query_field_id: Option<u32>,
+    pub cached_header: Option<CachedDiskHeader>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3653,6 +5622,9 @@ pub struct TableFeatureType {
     pub csp_name: Option<XlUnicodeString>,
     pub entry_id: Option<XlUnicodeString>,
     pub fields: Vec<Feature11FieldDataItem>,
+    pub deleted_row_ids: Option<Feat11RgSharepointIdDel>,
+    pub changed_row_ids: Option<Feat11RgSharepointIdChange>,
+    pub invalid_cells: Option<Feat11RgInvalidCells>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3666,6 +5638,11 @@ pub struct Feature11Record {
     pub reserved3: u16,
     pub references: Vec<CellRange>,
     pub feature: TableFeatureType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Feature12Record {
+    pub feature: Feature11Record,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3857,6 +5834,120 @@ pub struct SxvdRecord {
     pub name: Option<BiffUnicodeString>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SxViewExRecord {
+    pub header: FrtHeaderOld,
+    pub hierarchy_count: i32,
+    pub page_axis_extension_count: i32,
+    pub field_extension_count: i32,
+    pub declared_future_size: u32,
+    pub future: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrtContinuedSegmentLayout {
+    pub logical_byte_count: u16,
+    pub continuation_header: Option<FrtHeaderOld>,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SxThFlags: u32 {
+        const MEASURE = 1 << 0;
+        const UNUSED1 = 1 << 1;
+        const OUTLINE_MODE = 1 << 2;
+        const ENABLE_MULTIPLE_PAGE_ITEMS = 1 << 3;
+        const SUBTOTAL_AT_TOP = 1 << 4;
+        const NAMED_SET = 1 << 5;
+        const HIDE_FROM_FIELD_LIST = 1 << 6;
+        const ATTRIBUTE_HIERARCHY = 1 << 7;
+        const TIME_HIERARCHY = 1 << 8;
+        const FILTER_INCLUSIVE = 1 << 9;
+        const UNUSED2 = 1 << 10;
+        const KEY_ATTRIBUTE_HIERARCHY = 1 << 11;
+        const KPI = 1 << 12;
+        const UNUSED3 = 0xffff_e000;
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SxThDragFlags: u16 {
+        const ROW = 1 << 0;
+        const COLUMN = 1 << 1;
+        const PAGE = 1 << 2;
+        const DATA = 1 << 3;
+        const HIDE = 1 << 4;
+        const UNUSED = 0xffe0;
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SxvdTExFlags: u16 {
+        const TENSOR_SORT = 1 << 0;
+        const DRILLED_LEVEL = 1 << 1;
+        const ITEMS_DRILLED_BY_DEFAULT = 1 << 2;
+        const MEMBER_PROPERTY_IN_REPORT = 1 << 3;
+        const MEMBER_PROPERTY_IN_TOOLTIP = 1 << 4;
+        const MEMBER_PROPERTY_IN_CAPTION = 1 << 5;
+        const RESERVED = 0xffc0;
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SxviExFlags: u16 {
+        const DRILLED_MEMBER = 1 << 0;
+        const RESERVED1 = 1 << 1;
+        const HAS_CHILDREN = 1 << 2;
+        const COLLAPSED_MEMBER = 1 << 3;
+        const HAS_CHILDREN_ESTIMATE = 1 << 4;
+        const OLAP_FILTER_SELECTED = 1 << 5;
+        const RESERVED2 = 0xffc0;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HiddenMemberSet {
+    pub declared_member_count: u32,
+    pub member_names: Vec<XlUnicodeString>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SxThRecord {
+    pub header: FrtHeaderOld,
+    pub flags: SxThFlags,
+    pub axis: SxAxis,
+    pub reserved: u16,
+    pub pivot_field_index: i32,
+    pub axis_field_count: i32,
+    pub drag_flags: SxThDragFlags,
+    pub unique_name: XlUnicodeString,
+    pub display_name: XlUnicodeString,
+    pub default_member: XlUnicodeString,
+    pub all_member: XlUnicodeString,
+    pub dimension_name: XlUnicodeString,
+    pub declared_associated_field_count: u32,
+    pub associated_fields: Vec<i32>,
+    pub declared_hidden_member_set_count: u32,
+    pub hidden_member_sets: Vec<HiddenMemberSet>,
+    pub physical_segments: Option<Vec<FrtContinuedSegmentLayout>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SxPiExRecord {
+    pub header: FrtHeaderOld,
+    pub hierarchy_index: u32,
+    pub unique_name: XlUnicodeString,
+    pub display_name: XlUnicodeString,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SxvdTExRecord {
+    pub header: FrtHeaderOld,
+    pub flags: SxvdTExFlags,
+    pub hierarchy_index: i16,
+    pub level_index: i32,
+    pub declared_item_count: i32,
+    pub item_flags: Vec<SxviExFlags>,
+    pub physical_segments: Option<Vec<FrtContinuedSegmentLayout>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct FrtHeader {
     pub record_type: u16,
@@ -3870,6 +5961,132 @@ pub struct FrtHeaderOld {
     pub record_type: u16,
     #[sdk(bitflags = "u16")]
     pub flags: FrtFlags,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct MdtInfoFlags: u32 {
+        const GHOST_ROW = 1 << 0;
+        const GHOST_COLUMN = 1 << 1;
+        const EDIT = 1 << 2;
+        const DELETE = 1 << 3;
+        const COPY = 1 << 4;
+        const PASTE_ALL = 1 << 5;
+        const PASTE_FORMULAS = 1 << 6;
+        const PASTE_VALUES = 1 << 7;
+        const PASTE_FORMATS = 1 << 8;
+        const PASTE_COMMENTS = 1 << 9;
+        const PASTE_DATA_VALIDATION = 1 << 10;
+        const PASTE_BORDERS = 1 << 11;
+        const PASTE_COLUMN_WIDTHS = 1 << 12;
+        const PASTE_NUMBER_FORMATS = 1 << 13;
+        const MERGE = 1 << 14;
+        const SPLIT_FIRST = 1 << 15;
+        const SPLIT_ALL = 1 << 16;
+        const ROW_COLUMN_SHIFT = 1 << 17;
+        const CLEAR_ALL = 1 << 18;
+        const CLEAR_FORMATS = 1 << 19;
+        const CLEAR_CONTENTS = 1 << 20;
+        const CLEAR_COMMENTS = 1 << 21;
+        const ASSIGN = 1 << 22;
+        const UNUSED1 = 0x0f80_0000;
+        const COERCE = 1 << 28;
+        const ADJUST = 1 << 29;
+        const CELL_METADATA = 1 << 30;
+        const UNUSED2 = 1 << 31;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MdtInfoRecord {
+    pub header: FrtHeader,
+    pub flags: MdtInfoFlags,
+    pub name: LpWideString,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MdxStringIndex {
+    pub index: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u8")]
+pub enum MdxFunction {
+    CubeMember = 0x01,
+    CubeValue = 0x02,
+    CubeSet = 0x03,
+    CubeSetCount = 0x04,
+    CubeRankedMember = 0x05,
+    CubeMemberProperty = 0x06,
+    CubeKpiProperty = 0x07,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u8")]
+pub enum MdxKpiProperty {
+    Value = 0x01,
+    Goal = 0x02,
+    Status = 0x03,
+    Trend = 0x04,
+    Weight = 0x05,
+    CurrentTimeMember = 0x06,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u8")]
+pub enum MdxSetSortOrder {
+    None = 0x00,
+    Ascending = 0x01,
+    Descending = 0x02,
+    CaptionAscending = 0x03,
+    CaptionDescending = 0x04,
+    NaturalAscending = 0x05,
+    NaturalDescending = 0x06,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MdxStrRecord {
+    pub header: FrtHeader,
+    pub value: LpWideString,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MdxTupleRecord {
+    pub header: FrtHeader,
+    pub connection_name: MdxStringIndex,
+    pub source_function: MdxFunction,
+    pub declared_string_count: i32,
+    pub strings: Vec<MdxStringIndex>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MdxSetRecord {
+    pub header: FrtHeader,
+    pub connection_name: MdxStringIndex,
+    pub source_function: MdxFunction,
+    pub sort_order: MdxSetSortOrder,
+    pub set_definition: MdxStringIndex,
+    pub declared_string_count: i32,
+    pub strings: Vec<MdxStringIndex>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MdxPropRecord {
+    pub header: FrtHeader,
+    pub connection_name: MdxStringIndex,
+    pub source_function: MdxFunction,
+    pub member_name: MdxStringIndex,
+    pub property_name: MdxStringIndex,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MdxKpiRecord {
+    pub header: FrtHeader,
+    pub connection_name: MdxStringIndex,
+    pub source_function: MdxFunction,
+    pub property: MdxKpiProperty,
+    pub kpi_name: MdxStringIndex,
+    pub kpi_member: MdxStringIndex,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
@@ -3886,6 +6103,72 @@ pub struct ChartFrtInfoRecord {
     pub record_type_range_count: u16,
     #[sdk(count = "record_type_range_count")]
     pub record_type_ranges: Vec<CFrtId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PivotChartBitsRecord {
+    pub header: FrtHeaderOld,
+    /// Zero to three producer-preserved optional reserved words.
+    pub reserved: Vec<u16>,
+}
+
+impl SdkRead for PivotChartBitsRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let header = FrtHeaderOld::read_from(reader)?;
+        let remaining = reader.remaining()?;
+        if remaining % 2 != 0 || remaining > 6 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "PivotChartBits optional reserved tail must contain zero to three words",
+            ));
+        }
+        let mut reserved = Vec::with_capacity((remaining / 2) as usize);
+        while reader.remaining()? != 0 {
+            reserved.push(reader.read_u16()?);
+        }
+        Ok(Self { header, reserved })
+    }
+}
+
+impl SdkWrite for PivotChartBitsRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if self.reserved.len() > 3 {
+            return Err(Error::invalid(
+                0,
+                "PivotChartBits has more than three optional reserved words",
+            ));
+        }
+        self.header.write_to(writer)?;
+        for value in &self.reserved {
+            writer.write_u16(*value)?;
+        }
+        Ok(())
+    }
+}
+
+impl SdkSize for PivotChartBitsRecord {
+    fn sdk_size(&self) -> u64 {
+        4 + self.reserved.len() as u64 * 2
+    }
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ChartYMultFlags: u16 {
+        const REQUIRED_RESERVED = 0x0001;
+        const AUTO_SHOW_MULTIPLIER = 0x0002;
+        const BEING_EDITED = 0x0004;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct ChartYMultRecord {
+    pub header: FrtHeaderOld,
+    pub multiplier_kind: i16,
+    /// Exact IEEE-754 bits of numLabelMultiplier.
+    pub multiplier_bits: u64,
+    #[sdk(bitflags = "u16")]
+    pub flags: ChartYMultFlags,
 }
 
 bitflags::bitflags! {
@@ -4286,6 +6569,154 @@ pub struct TableStylesRecord {
     pub default_table_style: Vec<u16>,
     #[sdk(count = "default_pivot_style_character_count")]
     pub default_pivot_style: Vec<u16>,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct TableStyleFlags: u16 {
+        const PIVOT = 0x0002;
+        const TABLE = 0x0004;
+        const RESERVED = 0xfff9;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableStyleRecord {
+    pub header: FrtHeader,
+    pub flags: TableStyleFlags,
+    pub element_count: u32,
+    pub declared_name_character_count: u16,
+    pub name: Vec<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u32")]
+pub enum TableStyleElementType {
+    WholeTable = 0x00,
+    HeaderRow = 0x01,
+    TotalRow = 0x02,
+    FirstColumn = 0x03,
+    LastColumn = 0x04,
+    FirstRowStripe = 0x05,
+    SecondRowStripe = 0x06,
+    FirstColumnStripe = 0x07,
+    SecondColumnStripe = 0x08,
+    FirstHeaderCell = 0x09,
+    LastHeaderCell = 0x0a,
+    FirstTotalCell = 0x0b,
+    LastTotalCell = 0x0c,
+    FirstSubtotalColumn = 0x0d,
+    SecondSubtotalColumn = 0x0e,
+    ThirdSubtotalColumn = 0x0f,
+    FirstSubtotalRow = 0x10,
+    SecondSubtotalRow = 0x11,
+    ThirdSubtotalRow = 0x12,
+    BlankRow = 0x13,
+    FirstColumnSubheading = 0x14,
+    SecondColumnSubheading = 0x15,
+    ThirdColumnSubheading = 0x16,
+    FirstRowSubheading = 0x17,
+    SecondRowSubheading = 0x18,
+    ThirdRowSubheading = 0x19,
+    PageFieldLabels = 0x1a,
+    PageFieldValues = 0x1b,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableStyleElementRecord {
+    pub header: FrtHeader,
+    pub element_type: TableStyleElementType,
+    pub stripe_size: u32,
+    pub dxf_index: u32,
+}
+
+impl TableStyleRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        if self.header.record_type != TABLE_STYLE
+            || self.flags.intersects(TableStyleFlags::RESERVED)
+            || self.element_count > 28
+            || !(1..=255).contains(&self.name.len())
+            || usize::from(self.declared_name_character_count) != self.name.len()
+        {
+            return Err(Error::invalid(position, "TableStyle fields are invalid"));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for TableStyleRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let header = FrtHeader::read_from(reader)?;
+        let flags = TableStyleFlags::from_bits_retain(reader.read_u16()?);
+        let element_count = reader.read_u32()?;
+        let declared_name_character_count = reader.read_u16()?;
+        let count = usize::from(declared_name_character_count);
+        reader.ensure_allocation(count, 2)?;
+        let mut name = Vec::with_capacity(count);
+        for _ in 0..count {
+            name.push(reader.read_u16()?);
+        }
+        let value = Self {
+            header,
+            flags,
+            element_count,
+            declared_name_character_count,
+            name,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for TableStyleRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.header.write_to(writer)?;
+        writer.write_u16(self.flags.bits())?;
+        writer.write_u32(self.element_count)?;
+        writer.write_u16(self.declared_name_character_count)?;
+        for character in &self.name {
+            writer.write_u16(*character)?;
+        }
+        Ok(())
+    }
+}
+
+impl TableStyleElementRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        if self.header.record_type != TABLE_STYLE_ELEMENT || !(1..=9).contains(&self.stripe_size) {
+            return Err(Error::invalid(
+                position,
+                "TableStyleElement fields are invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for TableStyleElementRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            header: FrtHeader::read_from(reader)?,
+            element_type: TableStyleElementType::read_from(reader)?,
+            stripe_size: reader.read_u32()?,
+            dxf_index: reader.read_u32()?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for TableStyleElementRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.header.write_to(writer)?;
+        self.element_type.write_to(writer)?;
+        writer.write_u32(self.stripe_size)?;
+        writer.write_u32(self.dxf_index)
+    }
 }
 
 bitflags::bitflags! {
@@ -5082,6 +7513,83 @@ pub struct ChartDropBarRecord {
     pub gap_width_percent: i16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct ChartPicFRecord {
+    pub picture_type: u16,
+    pub unused: u16,
+    /// Exact IEEE-754 bits of the Xnum scale value.
+    pub scale_bits: u64,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ChartRadarFlags: u16 {
+        const DISPLAY_CATEGORY_LABELS = 0x0001;
+        const HAS_SHADOW = 0x0002;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct ChartRadarRecord {
+    /// Retains the specification-defined reserved bits for exact round trips.
+    #[sdk(bitflags = "u16")]
+    pub flags: ChartRadarFlags,
+    pub unused: u16,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ChartBopPopFlags: u16 {
+        const HAS_SHADOW = 0x0001;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct ChartBopPopRecord {
+    pub pie_kind: u8,
+    pub automatic_split: u8,
+    pub split_kind: u16,
+    pub split_position: i16,
+    pub split_percent: i16,
+    pub secondary_size_percent: i16,
+    pub gap_percent: i16,
+    /// Exact IEEE-754 bits of numSplitValue.
+    pub split_value_bits: u64,
+    #[sdk(bitflags = "u16")]
+    pub flags: ChartBopPopFlags,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+pub struct ChartBopPopCustomRecord {
+    pub data_point_count_plus_one: u16,
+    #[sdk(remaining)]
+    pub membership_bits: Vec<u8>,
+}
+
+impl ChartBopPopCustomRecord {
+    fn validate(&self) -> Result<()> {
+        let expected = 1usize
+            .checked_add(usize::from(self.data_point_count_plus_one) / 8)
+            .ok_or_else(|| Error::Limit("BopPopCustom membership size overflow".into()))?;
+        if self.membership_bits.len() != expected {
+            return Err(Error::invalid(
+                0,
+                "BopPopCustom membership size does not match cxi",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct ChartFontBasis2Record {
+    pub width_basis: u16,
+    pub height_basis: u16,
+    pub default_font_height: u16,
+    pub scale: u16,
+    pub font_index: u16,
+}
+
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Chart3DFlags: u16 {
@@ -5236,6 +7744,11 @@ pub struct ChartSeriesGroupIndexRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct ChartAxisUsedRecord {
     pub axis_count: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct ChartSBaseRefRecord {
+    pub range: CellRange,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
@@ -5409,6 +7922,284 @@ pub struct LpWideString {
     pub character_count: u16,
     #[sdk(count = "character_count")]
     pub characters: Vec<u16>,
+}
+
+fn validate_frt_record_header(header: FrtHeader, expected: u16, context: &str) -> Result<()> {
+    if header.record_type != expected {
+        return Err(Error::invalid(
+            0,
+            format!("{context} FRT record type mismatch"),
+        ));
+    }
+    Ok(())
+}
+
+impl MdxStringIndex {
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let index = reader.read_i32()?;
+        if index < 0 {
+            return Err(Error::invalid(position, "MDX string index is negative"));
+        }
+        Ok(Self { index })
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        if self.index < 0 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "MDX string index is negative",
+            ));
+        }
+        writer.write_i32(self.index)
+    }
+}
+
+fn read_mdx_string_indexes<R: Read + Seek>(
+    reader: &mut Reader<R>,
+    declared_count: i32,
+) -> Result<Vec<MdxStringIndex>> {
+    let position = reader.position()?;
+    let count = usize::try_from(declared_count)
+        .map_err(|_| Error::invalid(position, "MDX string count is negative"))?;
+    reader.ensure_allocation(count, 4)?;
+    (0..count).map(|_| MdxStringIndex::read(reader)).collect()
+}
+
+fn validate_mdx_string_count(declared_count: i32, strings: &[MdxStringIndex]) -> Result<()> {
+    if usize::try_from(declared_count).ok() != Some(strings.len()) {
+        return Err(Error::invalid(0, "MDX string count mismatch"));
+    }
+    Ok(())
+}
+
+impl SdkRead for MdtInfoRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let header = FrtHeader::read_from(reader)?;
+        validate_frt_record_header(header, MDT_INFO, "MDTInfo")?;
+        let flags = MdtInfoFlags::from_bits_retain(reader.read_u32()?);
+        let paste_flags = MdtInfoFlags::PASTE_ALL
+            | MdtInfoFlags::PASTE_FORMULAS
+            | MdtInfoFlags::PASTE_VALUES
+            | MdtInfoFlags::PASTE_FORMATS
+            | MdtInfoFlags::PASTE_COMMENTS
+            | MdtInfoFlags::PASTE_DATA_VALIDATION
+            | MdtInfoFlags::PASTE_BORDERS
+            | MdtInfoFlags::PASTE_COLUMN_WIDTHS
+            | MdtInfoFlags::PASTE_NUMBER_FORMATS;
+        if flags.intersects(paste_flags) && !flags.contains(MdtInfoFlags::COPY) {
+            return Err(Error::invalid(0, "MDTInfo flags violate metadata rules"));
+        }
+        Ok(Self {
+            header,
+            flags,
+            name: LpWideString::read_from(reader)?,
+        })
+    }
+}
+
+impl SdkWrite for MdtInfoRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        validate_frt_record_header(self.header, MDT_INFO, "MDTInfo")?;
+        let paste_flags = MdtInfoFlags::PASTE_ALL
+            | MdtInfoFlags::PASTE_FORMULAS
+            | MdtInfoFlags::PASTE_VALUES
+            | MdtInfoFlags::PASTE_FORMATS
+            | MdtInfoFlags::PASTE_COMMENTS
+            | MdtInfoFlags::PASTE_DATA_VALIDATION
+            | MdtInfoFlags::PASTE_BORDERS
+            | MdtInfoFlags::PASTE_COLUMN_WIDTHS
+            | MdtInfoFlags::PASTE_NUMBER_FORMATS;
+        if self.flags.intersects(paste_flags) && !self.flags.contains(MdtInfoFlags::COPY) {
+            return Err(Error::invalid(0, "MDTInfo flags violate metadata rules"));
+        }
+        self.header.write_to(writer)?;
+        writer.write_u32(self.flags.bits())?;
+        self.name.write_to(writer)
+    }
+}
+
+impl SdkRead for MdxStrRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let header = FrtHeader::read_from(reader)?;
+        validate_frt_record_header(header, MDX_STR, "MDXStr")?;
+        Ok(Self {
+            header,
+            value: LpWideString::read_from(reader)?,
+        })
+    }
+}
+
+impl SdkWrite for MdxStrRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        validate_frt_record_header(self.header, MDX_STR, "MDXStr")?;
+        self.header.write_to(writer)?;
+        self.value.write_to(writer)
+    }
+}
+
+impl SdkRead for MdxTupleRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let header = FrtHeader::read_from(reader)?;
+        validate_frt_record_header(header, MDX_TUPLE, "MDXTuple")?;
+        let connection_name = MdxStringIndex::read(reader)?;
+        let source_function = MdxFunction::read_from(reader)?;
+        if !matches!(
+            source_function,
+            MdxFunction::CubeMember | MdxFunction::CubeValue | MdxFunction::CubeRankedMember
+        ) {
+            return Err(Error::invalid(0, "MDXTuple source function is invalid"));
+        }
+        let declared_string_count = reader.read_i32()?;
+        let strings = read_mdx_string_indexes(reader, declared_string_count)?;
+        Ok(Self {
+            header,
+            connection_name,
+            source_function,
+            declared_string_count,
+            strings,
+        })
+    }
+}
+
+impl SdkWrite for MdxTupleRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        validate_frt_record_header(self.header, MDX_TUPLE, "MDXTuple")?;
+        if !matches!(
+            self.source_function,
+            MdxFunction::CubeMember | MdxFunction::CubeValue | MdxFunction::CubeRankedMember
+        ) {
+            return Err(Error::invalid(0, "MDXTuple source function is invalid"));
+        }
+        validate_mdx_string_count(self.declared_string_count, &self.strings)?;
+        self.header.write_to(writer)?;
+        self.connection_name.write(writer)?;
+        self.source_function.write_to(writer)?;
+        writer.write_i32(self.declared_string_count)?;
+        for value in &self.strings {
+            value.write(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for MdxSetRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let header = FrtHeader::read_from(reader)?;
+        validate_frt_record_header(header, MDX_SET, "MDXSet")?;
+        let connection_name = MdxStringIndex::read(reader)?;
+        let source_function = MdxFunction::read_from(reader)?;
+        if !matches!(
+            source_function,
+            MdxFunction::CubeSet | MdxFunction::CubeSetCount
+        ) {
+            return Err(Error::invalid(0, "MDXSet source function is invalid"));
+        }
+        let sort_order = MdxSetSortOrder::read_from(reader)?;
+        let set_definition = MdxStringIndex::read(reader)?;
+        let declared_string_count = reader.read_i32()?;
+        let strings = read_mdx_string_indexes(reader, declared_string_count)?;
+        Ok(Self {
+            header,
+            connection_name,
+            source_function,
+            sort_order,
+            set_definition,
+            declared_string_count,
+            strings,
+        })
+    }
+}
+
+impl SdkWrite for MdxSetRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        validate_frt_record_header(self.header, MDX_SET, "MDXSet")?;
+        if !matches!(
+            self.source_function,
+            MdxFunction::CubeSet | MdxFunction::CubeSetCount
+        ) {
+            return Err(Error::invalid(0, "MDXSet source function is invalid"));
+        }
+        validate_mdx_string_count(self.declared_string_count, &self.strings)?;
+        self.header.write_to(writer)?;
+        self.connection_name.write(writer)?;
+        self.source_function.write_to(writer)?;
+        self.sort_order.write_to(writer)?;
+        self.set_definition.write(writer)?;
+        writer.write_i32(self.declared_string_count)?;
+        for value in &self.strings {
+            value.write(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for MdxPropRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let header = FrtHeader::read_from(reader)?;
+        validate_frt_record_header(header, MDX_PROP, "MDXProp")?;
+        let connection_name = MdxStringIndex::read(reader)?;
+        let source_function = MdxFunction::read_from(reader)?;
+        if source_function != MdxFunction::CubeMemberProperty {
+            return Err(Error::invalid(0, "MDXProp source function is invalid"));
+        }
+        Ok(Self {
+            header,
+            connection_name,
+            source_function,
+            member_name: MdxStringIndex::read(reader)?,
+            property_name: MdxStringIndex::read(reader)?,
+        })
+    }
+}
+
+impl SdkWrite for MdxPropRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        validate_frt_record_header(self.header, MDX_PROP, "MDXProp")?;
+        if self.source_function != MdxFunction::CubeMemberProperty {
+            return Err(Error::invalid(0, "MDXProp source function is invalid"));
+        }
+        self.header.write_to(writer)?;
+        self.connection_name.write(writer)?;
+        self.source_function.write_to(writer)?;
+        self.member_name.write(writer)?;
+        self.property_name.write(writer)
+    }
+}
+
+impl SdkRead for MdxKpiRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let header = FrtHeader::read_from(reader)?;
+        validate_frt_record_header(header, MDX_KPI, "MDXKPI")?;
+        let connection_name = MdxStringIndex::read(reader)?;
+        let source_function = MdxFunction::read_from(reader)?;
+        if source_function != MdxFunction::CubeKpiProperty {
+            return Err(Error::invalid(0, "MDXKPI source function is invalid"));
+        }
+        Ok(Self {
+            header,
+            connection_name,
+            source_function,
+            property: MdxKpiProperty::read_from(reader)?,
+            kpi_name: MdxStringIndex::read(reader)?,
+            kpi_member: MdxStringIndex::read(reader)?,
+        })
+    }
+}
+
+impl SdkWrite for MdxKpiRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        validate_frt_record_header(self.header, MDX_KPI, "MDXKPI")?;
+        if self.source_function != MdxFunction::CubeKpiProperty {
+            return Err(Error::invalid(0, "MDXKPI source function is invalid"));
+        }
+        self.header.write_to(writer)?;
+        self.connection_name.write(writer)?;
+        self.source_function.write_to(writer)?;
+        self.property.write_to(writer)?;
+        self.kpi_name.write(writer)?;
+        self.kpi_member.write(writer)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
@@ -5607,6 +8398,18 @@ pub struct SelectionReference {
     pub last_row: u16,
     pub first_column: u8,
     pub last_column: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct SyncRecord {
+    pub row: u16,
+    pub column: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct IntlRecord {
+    /// Reserved by MS-XLS and retained for exact round trips.
+    pub reserved: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
@@ -11222,6 +14025,142 @@ fn dcon_file_is_self_reference(file: &BiffUnicodeString) -> bool {
     }
 }
 
+impl DConFileReference {
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let declared_character_count = reader.read_u16()?;
+        let file = match declared_character_count {
+            0 => None,
+            2..=u16::MAX => Some(BiffUnicodeString::read(
+                reader,
+                usize::from(declared_character_count),
+            )?),
+            1 => {
+                return Err(Error::invalid(
+                    reader.position()?,
+                    "DCon cchFile must be zero or at least two",
+                ));
+            }
+        };
+        let self_reference_unused = match &file {
+            Some(file) if dcon_file_is_self_reference(file) => {
+                if reader.remaining()? == 0 {
+                    Some(DConSelfReferenceUnused::Missing)
+                } else if file.flags & 1 == 0 {
+                    Some(DConSelfReferenceUnused::Compressed(reader.read_u8()?))
+                } else {
+                    Some(DConSelfReferenceUnused::Unicode(reader.read_u16()?))
+                }
+            }
+            _ => None,
+        };
+        let value = Self {
+            declared_character_count,
+            file,
+            self_reference_unused,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    fn validate(&self) -> Result<()> {
+        match (&self.file, self.declared_character_count) {
+            (None, 0) if self.self_reference_unused.is_none() => return Ok(()),
+            (Some(file), count @ 2..=u16::MAX) if file.character_count() == usize::from(count) => {}
+            _ => {
+                return Err(Error::invalid(0, "DCon file does not match cchFile"));
+            }
+        }
+        let file = self.file.as_ref().expect("validated present file");
+        let expected_self_reference = dcon_file_is_self_reference(file);
+        let padding_matches_encoding = matches!(
+            (file.flags & 1, self.self_reference_unused),
+            (0, Some(DConSelfReferenceUnused::Compressed(_)))
+                | (1, Some(DConSelfReferenceUnused::Unicode(_)))
+                | (_, Some(DConSelfReferenceUnused::Missing))
+        );
+        if expected_self_reference != self.self_reference_unused.is_some()
+            || (expected_self_reference && !padding_matches_encoding)
+        {
+            return Err(Error::invalid(
+                0,
+                "DCon self-reference padding does not match file encoding",
+            ));
+        }
+        Ok(())
+    }
+
+    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate()?;
+        writer.write_u16(self.declared_character_count)?;
+        if let Some(file) = &self.file {
+            file.write(writer)?;
+        }
+        match self.self_reference_unused {
+            Some(DConSelfReferenceUnused::Compressed(value)) => writer.write_u8(value)?,
+            Some(DConSelfReferenceUnused::Unicode(value)) => writer.write_u16(value)?,
+            Some(DConSelfReferenceUnused::Missing) | None => {}
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for DConNameRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let name = XlUnicodeString::read_from(reader)?;
+        if !(1..=255).contains(&name.text.character_count()) {
+            return Err(Error::invalid(
+                reader.position()?,
+                "DConName name must contain 1 to 255 characters",
+            ));
+        }
+        Ok(Self {
+            name,
+            file_reference: DConFileReference::read(reader)?,
+        })
+    }
+}
+
+impl SdkWrite for DConNameRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if !(1..=255).contains(&self.name.text.character_count()) {
+            return Err(Error::invalid(
+                writer.position()?,
+                "DConName name must contain 1 to 255 characters",
+            ));
+        }
+        self.name.write_to(writer)?;
+        self.file_reference.write(writer)
+    }
+}
+
+impl SdkRead for DConBinRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let raw = reader.read_u8()?;
+        let built_in_name = DConBuiltInName::from_raw(raw).ok_or_else(|| {
+            Error::invalid(
+                position,
+                format!("invalid DConBin built-in name 0x{raw:02x}"),
+            )
+        })?;
+        Ok(Self {
+            built_in_name,
+            reserved1: reader.read_u16()?,
+            reserved2: reader.read_u8()?,
+            file_reference: DConFileReference::read(reader)?,
+        })
+    }
+}
+
+impl SdkWrite for DConBinRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        writer.write_u8(self.built_in_name.raw())?;
+        writer.write_u16(self.reserved1)?;
+        writer.write_u8(self.reserved2)?;
+        self.file_reference.write(writer)
+    }
+}
+
 impl SdkRead for DConRefRecord {
     fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
         let reference = RefU::read_from(reader)?;
@@ -11424,6 +14363,2992 @@ impl SdkWrite for ScenManRecord {
         for reference in &self.result_references {
             reference.write_to(writer)?;
         }
+        Ok(())
+    }
+}
+
+impl ScenarioCellReference {
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let row = reader.read_u16()?;
+        let column_position = reader.position()?;
+        let bits = reader.read_u16()?;
+        let column = bits & 0x3fff;
+        if column > 0x00ff {
+            return Err(Error::invalid(
+                column_position,
+                "Scenario changed-cell column exceeds the BIFF8 column range",
+            ));
+        }
+        Ok(Self {
+            row,
+            column,
+            deleted: bits & 0x4000 != 0,
+            unused: bits & 0x8000 != 0,
+        })
+    }
+
+    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if self.column > 0x00ff {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Scenario changed-cell column exceeds the BIFF8 column range",
+            ));
+        }
+        writer.write_u16(self.row)?;
+        writer.write_u16(
+            self.column | (u16::from(self.deleted) << 14) | (u16::from(self.unused) << 15),
+        )
+    }
+}
+
+impl ScenarioRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        if !(1..=32).contains(&self.declared_cell_count) {
+            return Err(Error::invalid(
+                position,
+                "Scenario changed-cell count must be between 1 and 32",
+            ));
+        }
+        let cell_count = usize::from(self.declared_cell_count);
+        if self.cells.len() != cell_count
+            || self.values.len() != cell_count
+            || self.unused.len() != cell_count
+        {
+            return Err(Error::invalid(
+                position,
+                "Scenario changed-cell count does not match its static arrays",
+            ));
+        }
+        if self.name.character_count() != usize::from(self.declared_name_count)
+            || self.name.trailing_byte.is_some()
+        {
+            return Err(Error::invalid(
+                position,
+                "Scenario name does not match cchName",
+            ));
+        }
+        match (&self.user_name, self.declared_user_name_count) {
+            (None, 0) => {}
+            (Some(value), count)
+                if count != 0
+                    && count <= 52
+                    && value.text.character_count() == usize::from(count)
+                    && value.text.trailing_byte.is_none() => {}
+            _ => {
+                return Err(Error::invalid(
+                    position,
+                    "Scenario user name does not match cchNameUser",
+                ));
+            }
+        }
+        match (&self.comment, self.declared_comment_count) {
+            (None, 0) => {}
+            (Some(value), count)
+                if count != 0
+                    && value.text.character_count() == usize::from(count)
+                    && value.text.trailing_byte.is_none() => {}
+            _ => {
+                return Err(Error::invalid(
+                    position,
+                    "Scenario comment does not match cchComment",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for ScenarioRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let declared_cell_count = reader.read_u16()?;
+        let locked = match reader.read_u8()? {
+            0 => false,
+            1 => true,
+            _ => {
+                return Err(Error::invalid(
+                    position + 2,
+                    "Scenario fLocked is not Boolean",
+                ));
+            }
+        };
+        let hidden = match reader.read_u8()? {
+            0 => false,
+            1 => true,
+            _ => {
+                return Err(Error::invalid(
+                    position + 3,
+                    "Scenario fHidden is not Boolean",
+                ));
+            }
+        };
+        let declared_name_count = reader.read_u8()?;
+        let declared_comment_count = reader.read_u8()?;
+        let declared_user_name_count = reader.read_u8()?;
+        let name = BiffUnicodeString::read(reader, usize::from(declared_name_count))?;
+        let user_name = (declared_user_name_count != 0)
+            .then(|| XlUnicodeString::read_from(reader))
+            .transpose()?;
+        let comment = (declared_comment_count != 0)
+            .then(|| XlUnicodeString::read_from(reader))
+            .transpose()?;
+
+        let count = usize::from(declared_cell_count);
+        reader.ensure_allocation(count, 4)?;
+        let mut cells = Vec::with_capacity(count);
+        for _ in 0..count {
+            cells.push(ScenarioCellReference::read(reader)?);
+        }
+        reader.ensure_allocation(count, 3)?;
+        let mut values = Vec::with_capacity(count);
+        for _ in 0..count {
+            values.push(XlUnicodeString::read_from(reader)?);
+        }
+        reader.ensure_allocation(count, 2)?;
+        let mut unused = Vec::with_capacity(count);
+        for _ in 0..count {
+            unused.push(reader.read_u16()?);
+        }
+
+        let value = Self {
+            declared_cell_count,
+            locked,
+            hidden,
+            declared_name_count,
+            declared_comment_count,
+            declared_user_name_count,
+            name,
+            user_name,
+            comment,
+            cells,
+            values,
+            unused,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for ScenarioRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u16(self.declared_cell_count)?;
+        writer.write_u8(u8::from(self.locked))?;
+        writer.write_u8(u8::from(self.hidden))?;
+        writer.write_u8(self.declared_name_count)?;
+        writer.write_u8(self.declared_comment_count)?;
+        writer.write_u8(self.declared_user_name_count)?;
+        self.name.write(writer)?;
+        if let Some(user_name) = &self.user_name {
+            user_name.write_to(writer)?;
+        }
+        if let Some(comment) = &self.comment {
+            comment.write_to(writer)?;
+        }
+        for cell in &self.cells {
+            cell.write(writer)?;
+        }
+        for value in &self.values {
+            value.write_to(writer)?;
+        }
+        for value in &self.unused {
+            writer.write_u16(*value)?;
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for CUsrRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let user_count = reader.read_u16()?;
+        if user_count > 255 {
+            return Err(Error::invalid(position, "CUsr user count exceeds 255"));
+        }
+        Ok(Self { user_count })
+    }
+}
+
+impl SdkWrite for CUsrRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if self.user_count > 255 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "CUsr user count exceeds 255",
+            ));
+        }
+        writer.write_u16(self.user_count)
+    }
+}
+
+impl SdkRead for CbUsrRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let mut user_record_sizes = [0; 256];
+        for value in &mut user_record_sizes {
+            *value = reader.read_u16()?;
+        }
+        Ok(Self { user_record_sizes })
+    }
+}
+
+impl SdkWrite for CbUsrRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        for value in self.user_record_sizes {
+            writer.write_u16(value)?;
+        }
+        Ok(())
+    }
+}
+
+impl ShortDtr {
+    fn validate(self, position: u64) -> Result<()> {
+        if !(1900..=9999).contains(&self.year)
+            || !(1..=12).contains(&self.month)
+            || self.day == 0
+            || self.day > days_in_month(self.year, self.month)
+            || self.hour > 23
+            || self.minute > 59
+            || self.second > 59
+            || self.weekday > 7
+        {
+            return Err(Error::invalid(position, "ShortDTR date or time is invalid"));
+        }
+        Ok(())
+    }
+
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            year: reader.read_u16()?,
+            month: reader.read_u8()?,
+            day: reader.read_u8()?,
+            hour: reader.read_u8()?,
+            minute: reader.read_u8()?,
+            second: reader.read_u8()?,
+            weekday: reader.read_u8()?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u16(self.year)?;
+        writer.write_u8(self.month)?;
+        writer.write_u8(self.day)?;
+        writer.write_u8(self.hour)?;
+        writer.write_u8(self.minute)?;
+        writer.write_u8(self.second)?;
+        writer.write_u8(self.weekday)
+    }
+}
+
+fn days_in_month(year: u16, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year.is_multiple_of(400) || (year.is_multiple_of(4) && !year.is_multiple_of(100)) => {
+            29
+        }
+        2 => 28,
+        _ => 0,
+    }
+}
+
+impl UsrInfoRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        self.opened_at.validate(position + 20)?;
+        if !(1..=54).contains(&self.user_name.text.character_count())
+            || self.user_name.text.trailing_byte.is_some()
+        {
+            return Err(Error::invalid(
+                position,
+                "UsrInfo user name must contain 1 to 54 characters",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for UsrInfoRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            user_id: reader.read_i32()?,
+            last_revision_guid: reader.read_array()?,
+            opened_at: ShortDtr::read(reader)?,
+            user_name: XlUnicodeString::read_from(reader)?,
+            unused: reader.read_u8()?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for UsrInfoRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        let position = writer.position()?;
+        self.validate(position)?;
+        writer.write_i32(self.user_id)?;
+        writer.write_all(&self.last_revision_guid)?;
+        self.opened_at.write(writer)?;
+        self.user_name.write_to(writer)?;
+        writer.write_u8(self.unused)
+    }
+}
+
+impl UsrExclRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        self.changed_at.validate(position + 4)?;
+        if self.used_user_name_characters > 54
+            || self.user_name.character_count() != 147
+            || self.user_name.trailing_byte.is_some()
+        {
+            return Err(Error::invalid(
+                position,
+                "UsrExcl user-name fields do not match their fixed widths",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for UsrExclRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let exclusive = match reader.read_u32()? {
+            0 => false,
+            1 => true,
+            _ => {
+                return Err(Error::invalid(
+                    position,
+                    "UsrExcl fExclusive is not Boolean",
+                ));
+            }
+        };
+        let value = Self {
+            exclusive,
+            changed_at: ShortDtr::read(reader)?,
+            used_user_name_characters: reader.read_u16()?,
+            user_name: BiffUnicodeString::read(reader, 147)?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for UsrExclRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u32(u32::from(self.exclusive))?;
+        self.changed_at.write(writer)?;
+        writer.write_u16(self.used_user_name_characters)?;
+        self.user_name.write(writer)
+    }
+}
+
+impl FileLockRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        if self.user_name.text.character_count() > 52 || self.user_name.text.trailing_byte.is_some()
+        {
+            return Err(Error::invalid(
+                position,
+                "FileLock user name exceeds 52 characters",
+            ));
+        }
+        let string_size = usize::try_from(self.user_name.sdk_size())
+            .map_err(|_| Error::Limit("FileLock user-name size exceeds usize".into()))?;
+        let expected = 158usize.checked_sub(string_size).ok_or_else(|| {
+            Error::invalid(position, "FileLock user name exceeds its fixed-width area")
+        })?;
+        if self.unused.len() != expected {
+            return Err(Error::invalid(
+                position,
+                "FileLock unused tail does not fill its fixed-width area",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for FileLockRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let purpose = FileLockPurpose::read_from(reader)?;
+        let user_name = XlUnicodeString::read_from(reader)?;
+        let string_size = usize::try_from(user_name.sdk_size())
+            .map_err(|_| Error::Limit("FileLock user-name size exceeds usize".into()))?;
+        let unused_size = 158usize.checked_sub(string_size).ok_or_else(|| {
+            Error::invalid(position, "FileLock user name exceeds its fixed-width area")
+        })?;
+        if reader.remaining()? != unused_size as u64 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "FileLock record does not have its required fixed width",
+            ));
+        }
+        let value = Self {
+            purpose,
+            user_name,
+            unused: reader.read_vec(unused_size)?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for FileLockRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.purpose.write_to(writer)?;
+        self.user_name.write_to(writer)?;
+        writer.write_all(&self.unused)?;
+        Ok(())
+    }
+}
+
+impl Rrd {
+    fn validate(self, position: u64) -> Result<()> {
+        if self.memory_size < 26
+            || self.revision_id < 0
+            || self.flags.intersects(RrdFlags::RESERVED)
+        {
+            return Err(Error::invalid(
+                position,
+                "RRD size, revision identifier, or reserved flags are invalid",
+            ));
+        }
+        if self.flags.contains(RrdFlags::DELETE_AT_SORT_EDGE)
+            && !matches!(
+                self.revision_type,
+                RevisionType::InsertRow
+                    | RevisionType::InsertColumn
+                    | RevisionType::DeleteRow
+                    | RevisionType::DeleteColumn
+            )
+        {
+            return Err(Error::invalid(
+                position,
+                "RRD delete-at-sort-edge flag is invalid for this revision type",
+            ));
+        }
+        Ok(())
+    }
+
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            memory_size: reader.read_u32()?,
+            revision_id: reader.read_i32()?,
+            revision_type: RevisionType::read_from(reader)?,
+            flags: RrdFlags::from_bits_retain(reader.read_u16()?),
+            sheet_id: reader.read_u16()?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u32(self.memory_size)?;
+        writer.write_i32(self.revision_id)?;
+        self.revision_type.write_to(writer)?;
+        writer.write_u16(self.flags.bits())?;
+        writer.write_u16(self.sheet_id)
+    }
+}
+
+fn read_fixed_biff_unicode<R: Read + Seek>(
+    reader: &mut Reader<R>,
+    byte_size: usize,
+) -> Result<BiffUnicodeString> {
+    let bytes = reader.read_vec(byte_size)?;
+    let mut string_reader = Reader::new(Cursor::new(bytes))?;
+    BiffUnicodeString::read_remaining(&mut string_reader)
+}
+
+fn validate_fixed_biff_unicode(
+    value: &BiffUnicodeString,
+    byte_size: usize,
+    position: u64,
+    field: &str,
+) -> Result<()> {
+    if biff_unicode_string_payload_size(value) != byte_size as u64 {
+        return Err(Error::invalid(
+            position,
+            format!("{field} does not have its required fixed byte width"),
+        ));
+    }
+    match &value.characters {
+        XlStringCharacters::Compressed(_) if value.flags & 1 != 0 => Err(Error::invalid(
+            position,
+            format!("{field} compressed characters have the Unicode flag"),
+        )),
+        XlStringCharacters::Unicode(_) if value.flags & 1 == 0 => Err(Error::invalid(
+            position,
+            format!("{field} Unicode characters lack the Unicode flag"),
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn write_fixed_biff_unicode<W: Write + Seek>(
+    value: &BiffUnicodeString,
+    byte_size: usize,
+    field: &str,
+    writer: &mut Writer<W>,
+) -> Result<()> {
+    validate_fixed_biff_unicode(value, byte_size, writer.position()?, field)?;
+    value.write(writer)
+}
+
+fn validate_used_fixed_name(
+    value: &BiffUnicodeString,
+    byte_size: usize,
+    used: u16,
+    compressed_max: u16,
+    unicode_max: u16,
+    position: u64,
+    field: &str,
+) -> Result<()> {
+    validate_fixed_biff_unicode(value, byte_size, position, field)?;
+    let limit = if value.flags & 1 == 0 {
+        compressed_max
+    } else {
+        unicode_max
+    };
+    if used > limit || usize::from(used) > value.character_count() {
+        return Err(Error::invalid(
+            position,
+            format!("{field} used-character count is invalid"),
+        ));
+    }
+    Ok(())
+}
+
+impl RrdHeadRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        self.revision.validate(position)?;
+        if self.revision.memory_size != u32::MAX
+            || self.revision.revision_id != 0
+            || self.revision.revision_type != RevisionType::Header
+            || self.used_user_name_characters > 54
+            || usize::from(self.used_user_name_characters) > self.user_name.character_count()
+            || self.next_sheet_id < -1
+        {
+            return Err(Error::invalid(position, "RRDHead fields are invalid"));
+        }
+        validate_fixed_biff_unicode(&self.user_name, 114, position, "RRDHead stUser")?;
+        self.saved_at.validate(position)?;
+        Ok(())
+    }
+}
+
+impl SdkRead for RrdHeadRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            revision: Rrd::read(reader)?,
+            revision_set_guid: reader.read_array()?,
+            file_code_page: reader.read_u16()?,
+            used_user_name_characters: reader.read_u16()?,
+            user_name: read_fixed_biff_unicode(reader, 114)?,
+            saved_at: ShortDtr::read(reader)?,
+            next_sheet_id: reader.read_i16()?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for RrdHeadRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.revision.write(writer)?;
+        writer.write_all(&self.revision_set_guid)?;
+        writer.write_u16(self.file_code_page)?;
+        writer.write_u16(self.used_user_name_characters)?;
+        write_fixed_biff_unicode(&self.user_name, 114, "RRDHead stUser", writer)?;
+        self.saved_at.write(writer)?;
+        writer.write_u16(self.next_sheet_id as u16)
+    }
+}
+
+impl RrdRenSheetRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        self.revision.validate(position)?;
+        if self.revision.revision_type != RevisionType::RenameSheet
+            || self.revision.revision_id <= 0
+            || self.revision.sheet_id == u16::MAX
+        {
+            return Err(Error::invalid(position, "RRDRenSheet RRD is invalid"));
+        }
+        validate_used_fixed_name(
+            &self.old_name,
+            255,
+            self.used_old_name_characters,
+            227,
+            127,
+            position,
+            "RRDRenSheet stOldName",
+        )?;
+        validate_used_fixed_name(
+            &self.new_name,
+            255,
+            self.used_new_name_characters,
+            227,
+            127,
+            position,
+            "RRDRenSheet stNewName",
+        )
+    }
+}
+
+impl SdkRead for RrdRenSheetRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            revision: Rrd::read(reader)?,
+            used_old_name_characters: reader.read_u16()?,
+            old_name: read_fixed_biff_unicode(reader, 255)?,
+            used_new_name_characters: reader.read_u16()?,
+            new_name: read_fixed_biff_unicode(reader, 255)?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for RrdRenSheetRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.revision.write(writer)?;
+        writer.write_u16(self.used_old_name_characters)?;
+        write_fixed_biff_unicode(&self.old_name, 255, "RRDRenSheet stOldName", writer)?;
+        writer.write_u16(self.used_new_name_characters)?;
+        write_fixed_biff_unicode(&self.new_name, 255, "RRDRenSheet stNewName", writer)
+    }
+}
+
+impl Ref8U {
+    fn validate(self, position: u64) -> Result<()> {
+        if self.first_row > self.last_row
+            || self.first_column > self.last_column
+            || self.last_column > 0x00ff
+        {
+            return Err(Error::invalid(position, "Ref8U range is invalid"));
+        }
+        Ok(())
+    }
+
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            first_row: reader.read_u16()?,
+            last_row: reader.read_u16()?,
+            first_column: reader.read_u16()?,
+            last_column: reader.read_u16()?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u16(self.first_row)?;
+        writer.write_u16(self.last_row)?;
+        writer.write_u16(self.first_column)?;
+        writer.write_u16(self.last_column)
+    }
+}
+
+impl Ref8U2007 {
+    fn validate(self, position: u64) -> Result<()> {
+        if self.first_row > self.last_row
+            || self.last_row > 0xffff
+            || self.first_column > self.last_column
+            || self.last_column > 0x00ff
+        {
+            return Err(Error::invalid(position, "Ref8U2007 range is invalid"));
+        }
+        Ok(())
+    }
+
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            first_row: reader.read_u32()?,
+            last_row: reader.read_u32()?,
+            first_column: reader.read_u32()?,
+            last_column: reader.read_u32()?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u32(self.first_row)?;
+        writer.write_u32(self.last_row)?;
+        writer.write_u32(self.first_column)?;
+        writer.write_u32(self.last_column)
+    }
+}
+
+impl RrdTqsifRecord {
+    fn validate(self, position: u64) -> Result<()> {
+        self.revision.validate(position + 12)?;
+        match self.range {
+            RrdQueryRange::Legacy(value) => value.validate(position + 4)?,
+            RrdQueryRange::Excel2007(value) => value.validate(position + 4)?,
+        }
+        if self.record_type != RRD_TQSIF
+            || self.future_flags != 1
+            || self.revision.revision_id != 0
+            || self.revision.revision_type != RevisionType::TrashQueryTableField
+            || !(1..0xffff).contains(&self.field_id)
+        {
+            return Err(Error::invalid(position, "RRDTQSIF fields are invalid"));
+        }
+        Ok(())
+    }
+
+    fn matches_revision_version(self, version: Option<u16>) -> bool {
+        match version {
+            Some(12) => matches!(self.range, RrdQueryRange::Excel2007(_)),
+            _ => matches!(self.range, RrdQueryRange::Legacy(_)),
+        }
+    }
+}
+
+impl SdkRead for RrdTqsifRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let record_type = reader.read_u16()?;
+        let future_flags = reader.read_u16()?;
+        let range = match reader.remaining()? {
+            26 => RrdQueryRange::Legacy(Ref8U::read(reader)?),
+            34 => RrdQueryRange::Excel2007(Ref8U2007::read(reader)?),
+            remaining => {
+                return Err(Error::invalid(
+                    reader.position()?,
+                    format!("RRDTQSIF has invalid remaining size {remaining}"),
+                ));
+            }
+        };
+        let value = Self {
+            record_type,
+            future_flags,
+            range,
+            revision: Rrd::read(reader)?,
+            field_id: reader.read_u32()?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for RrdTqsifRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u16(self.record_type)?;
+        writer.write_u16(self.future_flags)?;
+        match self.range {
+            RrdQueryRange::Legacy(value) => value.write(writer)?,
+            RrdQueryRange::Excel2007(value) => value.write(writer)?,
+        }
+        self.revision.write(writer)?;
+        writer.write_u32(self.field_id)
+    }
+}
+
+impl RrdDefNameFlags {
+    fn validate(self, position: u64) -> Result<()> {
+        let shortcut_valid = self.shortcut_key == 0
+            || (!self.options.contains(RrdDefNameOptions::FUNCTION)
+                && self.shortcut_key.is_ascii_alphabetic());
+        if self.options.intersects(RrdDefNameOptions::RESERVED)
+            || self.function_group > 14
+            || !shortcut_valid
+        {
+            return Err(Error::invalid(
+                position,
+                "RRDDefNameFlags fields are invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let declared_formula_size = reader.read_u16()?;
+        let first = reader.read_u16()?;
+        let third = reader.read_u16()?;
+        if third & 0xffe0 != 0 {
+            return Err(Error::invalid(
+                position + 4,
+                "RRDDefNameFlags reserved bits are nonzero",
+            ));
+        }
+        let value = Self {
+            declared_formula_size,
+            options: RrdDefNameOptions::from_bits_retain((first & 3) | ((third & 0x1f) << 8)),
+            function_group: ((first >> 2) & 0x3f) as u8,
+            shortcut_key: (first >> 8) as u8,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u16(self.declared_formula_size)?;
+        writer.write_u16(
+            (self.options.bits() & 3)
+                | (u16::from(self.function_group) << 2)
+                | (u16::from(self.shortcut_key) << 8),
+        )?;
+        writer.write_u16((self.options.bits() >> 8) & 0x1f)
+    }
+}
+
+fn validate_rrd_name_formula(
+    formula: &FormulaTokenStream,
+    declared_size: u16,
+    position: u64,
+) -> Result<()> {
+    let bytes = formula.to_bytes()?;
+    if usize::from(declared_size) != bytes.len()
+        || !formula.unparsed_tail.is_empty()
+        || formula.missing_extra_count() != 0
+        || formula.tokens.iter().any(|token| {
+            matches!(
+                token.data,
+                FormulaTokenData::Exp { .. }
+                    | FormulaTokenData::Table { .. }
+                    | FormulaTokenData::PivotName { .. }
+                    | FormulaTokenData::Reference { .. }
+                    | FormulaTokenData::RelativeReference { .. }
+                    | FormulaTokenData::ReferenceError { .. }
+                    | FormulaTokenData::Area { .. }
+                    | FormulaTokenData::RelativeArea { .. }
+                    | FormulaTokenData::AreaError { .. }
+            )
+        })
+    {
+        return Err(Error::invalid(
+            position,
+            "RRDDefName NameParsedFormula is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn read_rrd_name_formula<R: Read + Seek>(
+    reader: &mut Reader<R>,
+    declared_size: u16,
+) -> Result<FormulaTokenStream> {
+    let position = reader.position()?;
+    let mut formula =
+        FormulaTokenStream::from_bytes(&reader.read_vec(usize::from(declared_size))?)?;
+    let extra_start = reader.position()?;
+    let remaining = usize::try_from(reader.remaining()?)
+        .map_err(|_| Error::Limit("RRDDefName trailing fields exceed usize".into()))?;
+    let extra_and_following = reader.read_vec(remaining)?;
+    let following = formula.parse_extra_data(&extra_and_following)?;
+    let consumed = extra_and_following.len() - following.len();
+    reader.seek_to(
+        extra_start
+            .checked_add(consumed as u64)
+            .ok_or_else(|| Error::Limit("RRDDefName formula position overflow".into()))?,
+    )?;
+    validate_rrd_name_formula(&formula, declared_size, position)?;
+    Ok(formula)
+}
+
+fn write_rrd_name_formula<W: Write + Seek>(
+    formula: &FormulaTokenStream,
+    declared_size: u16,
+    writer: &mut Writer<W>,
+) -> Result<()> {
+    validate_rrd_name_formula(formula, declared_size, writer.position()?)?;
+    writer.write_all(&formula.to_bytes()?)?;
+    writer.write_all(&formula.extra_data_to_bytes()?)?;
+    Ok(())
+}
+
+impl RrdDefNameText {
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        Ok(Self {
+            custom_menu: XlUnicodeString::read_from(reader)?,
+            description: XlUnicodeString::read_from(reader)?,
+            help_topic: XlUnicodeString::read_from(reader)?,
+            status_text: XlUnicodeString::read_from(reader)?,
+        })
+    }
+
+    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.custom_menu.write_to(writer)?;
+        self.description.write_to(writer)?;
+        self.help_topic.write_to(writer)?;
+        self.status_text.write_to(writer)
+    }
+
+    fn any_nonempty(&self) -> bool {
+        [
+            &self.custom_menu,
+            &self.description,
+            &self.help_topic,
+            &self.status_text,
+        ]
+        .into_iter()
+        .any(|value| value.text.character_count() != 0)
+    }
+
+    fn matches_options(&self, options: RrdDefNameOptions) -> bool {
+        [
+            (RrdDefNameOptions::CUSTOM_MENU, &self.custom_menu),
+            (RrdDefNameOptions::DESCRIPTION, &self.description),
+            (RrdDefNameOptions::HELP_TOPIC, &self.help_topic),
+            (RrdDefNameOptions::STATUS_TEXT, &self.status_text),
+        ]
+        .into_iter()
+        .all(|(flag, value)| options.contains(flag) == (value.text.character_count() != 0))
+    }
+}
+
+impl RrdDefinedName {
+    fn validate(&self, position: u64) -> Result<()> {
+        let Self::Custom(value) = self else {
+            return Ok(());
+        };
+        let count = value.text.character_count();
+        let valid_start = match &value.text.characters {
+            XlStringCharacters::Compressed(values) => values
+                .first()
+                .is_some_and(|value| *value == b'_' || value.is_ascii_alphabetic()),
+            XlStringCharacters::Unicode(values) => values.first().is_some_and(|value| {
+                *value == b'_' as u16
+                    || char::from_u32(u32::from(*value)).is_some_and(char::is_alphabetic)
+            }),
+        };
+        if count == 0 || count > 255 || !valid_start {
+            return Err(Error::invalid(
+                position,
+                "RRDDefName custom name is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl RrdDefNameRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        self.revision.validate(position)?;
+        self.new_flags.validate(position + 18)?;
+        self.old_flags.validate(position + 24)?;
+        self.name.validate(position + 30)?;
+        validate_rrd_name_formula(
+            &self.new_formula,
+            self.new_flags.declared_formula_size,
+            position,
+        )?;
+        validate_rrd_name_formula(
+            &self.old_formula,
+            self.old_flags.declared_formula_size,
+            position,
+        )?;
+        let any_text = self.new_text.any_nonempty() || self.old_text.any_nonempty();
+        if !matches!(
+            self.revision.revision_type,
+            RevisionType::DefinedName | RevisionType::DeleteDefinedName
+        ) || self.reserved != 0
+            || !self.new_text.matches_options(self.new_flags.options)
+            || !self.old_text.matches_options(self.old_flags.options)
+            || ((self
+                .new_flags
+                .options
+                .contains(RrdDefNameOptions::PROCEDURE_INFO)
+                || self
+                    .old_flags
+                    .options
+                    .contains(RrdDefNameOptions::PROCEDURE_INFO))
+                && !any_text)
+        {
+            return Err(Error::invalid(position, "RRDDefName fields are invalid"));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for RrdDefNameRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let revision = Rrd::read(reader)?;
+        let local_sheet_id = reader.read_u16()?;
+        let view_name = match reader.read_u8()? {
+            0 => false,
+            1 => true,
+            _ => {
+                return Err(Error::invalid(
+                    position + 16,
+                    "RRDDefName fViewName is not Boolean",
+                ));
+            }
+        };
+        let reserved = reader.read_u8()?;
+        let new_flags = RrdDefNameFlags::read(reader)?;
+        let old_flags = RrdDefNameFlags::read(reader)?;
+        let builtin_position = reader.position()?;
+        let builtin_index = reader.read_u8()?;
+        let name = if builtin_index == 0 {
+            RrdDefinedName::Custom(XlUnicodeString::read_from(reader)?)
+        } else {
+            RrdDefinedName::BuiltIn {
+                name: RrdBuiltInName::from_raw(builtin_index).ok_or_else(|| {
+                    Error::invalid(builtin_position, "RRDDefName built-in name is invalid")
+                })?,
+                unused: reader.read_array()?,
+            }
+        };
+        let new_formula = read_rrd_name_formula(reader, new_flags.declared_formula_size)?;
+        let new_text = RrdDefNameText::read(reader)?;
+        let old_formula = read_rrd_name_formula(reader, old_flags.declared_formula_size)?;
+        let old_text = RrdDefNameText::read(reader)?;
+        let value = Self {
+            revision,
+            local_sheet_id,
+            view_name,
+            reserved,
+            new_flags,
+            old_flags,
+            name,
+            new_formula,
+            new_text,
+            old_formula,
+            old_text,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for RrdDefNameRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.revision.write(writer)?;
+        writer.write_u16(self.local_sheet_id)?;
+        writer.write_u8(u8::from(self.view_name))?;
+        writer.write_u8(self.reserved)?;
+        self.new_flags.write(writer)?;
+        self.old_flags.write(writer)?;
+        match &self.name {
+            RrdDefinedName::Custom(value) => {
+                writer.write_u8(0)?;
+                value.write_to(writer)?;
+            }
+            RrdDefinedName::BuiltIn { name, unused } => {
+                name.write_to(writer)?;
+                writer.write_all(unused)?;
+            }
+        }
+        write_rrd_name_formula(
+            &self.new_formula,
+            self.new_flags.declared_formula_size,
+            writer,
+        )?;
+        self.new_text.write(writer)?;
+        write_rrd_name_formula(
+            &self.old_formula,
+            self.old_flags.declared_formula_size,
+            writer,
+        )?;
+        self.old_text.write(writer)
+    }
+}
+
+impl SqRefU {
+    fn validate(&self, position: u64) -> Result<()> {
+        if self.declared_range_count > 0x2000
+            || usize::from(self.declared_range_count) != self.ranges.len()
+        {
+            return Err(Error::invalid(position, "SqRefU range count is invalid"));
+        }
+        for range in &self.ranges {
+            range.validate(position)?;
+        }
+        Ok(())
+    }
+
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let declared_range_count = reader.read_u16()?;
+        if declared_range_count > 0x2000 {
+            return Err(Error::invalid(
+                position,
+                "SqRefU range count exceeds 0x2000",
+            ));
+        }
+        let count = usize::from(declared_range_count);
+        reader.ensure_allocation(count, 8)?;
+        let mut ranges = Vec::with_capacity(count);
+        for _ in 0..count {
+            ranges.push(Ref8U::read(reader)?);
+        }
+        let value = Self {
+            declared_range_count,
+            ranges,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+
+    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u16(self.declared_range_count)?;
+        for range in &self.ranges {
+            range.write(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl RrAutoFmtRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        self.revision.validate(position)?;
+        self.range.validate(position + 14)?;
+        if self.revision.revision_id != 0
+            || self.revision.revision_type != RevisionType::AutoFormat
+            || self.revision.sheet_id == u16::MAX
+            || self.flags.intersects(RrAutoFmtFlags::RESERVED)
+        {
+            return Err(Error::invalid(position, "RRAutoFmt fields are invalid"));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for RrAutoFmtRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            revision: Rrd::read(reader)?,
+            range: Ref8U::read(reader)?,
+            style: AutoFmt8::read_from(reader)?,
+            flags: RrAutoFmtFlags::from_bits_retain(reader.read_u16()?),
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for RrAutoFmtRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.revision.write(writer)?;
+        self.range.write(writer)?;
+        self.style.write_to(writer)?;
+        writer.write_u16(self.flags.bits())
+    }
+}
+
+impl RrFormatRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        self.revision.validate(position)?;
+        self.ranges.validate(position + 16)?;
+        if self.revision.revision_id != 0
+            || self.revision.revision_type != RevisionType::Format
+            || self.revision.sheet_id == u16::MAX
+            || self.flags.intersects(RrFormatFlags::RESERVED)
+            || self.flags.contains(RrFormatFlags::FORMAT_NULL) != self.format.is_none()
+        {
+            return Err(Error::invalid(position, "RRFormat fields are invalid"));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for RrFormatRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let revision = Rrd::read(reader)?;
+        let flags = RrFormatFlags::from_bits_retain(reader.read_u16()?);
+        let ranges = SqRefU::read(reader)?;
+        let format = if flags.contains(RrFormatFlags::FORMAT_NULL) {
+            None
+        } else {
+            Some(DxfN::read_from(reader)?)
+        };
+        let value = Self {
+            revision,
+            flags,
+            ranges,
+            format,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for RrFormatRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.revision.write(writer)?;
+        writer.write_u16(self.flags.bits())?;
+        self.ranges.write(writer)?;
+        if let Some(format) = &self.format {
+            format.write_to(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl RkNumber {
+    fn from_bits(bits: u32) -> Self {
+        let value = if bits & 2 != 0 {
+            RkValue::Integer((bits as i32) >> 2)
+        } else {
+            RkValue::FloatingPointHigh30(bits >> 2)
+        };
+        Self {
+            divided_by_100: bits & 1 != 0,
+            value,
+        }
+    }
+
+    fn bits(self, position: u64) -> Result<u32> {
+        let value = match self.value {
+            RkValue::Integer(value) if (-0x2000_0000..=0x1fff_ffff).contains(&value) => {
+                ((value as u32) << 2) | 2
+            }
+            RkValue::Integer(_) => {
+                return Err(Error::invalid(
+                    position,
+                    "RkNumber integer exceeds signed 30 bits",
+                ));
+            }
+            RkValue::FloatingPointHigh30(value) if value <= 0x3fff_ffff => value << 2,
+            RkValue::FloatingPointHigh30(_) => {
+                return Err(Error::invalid(
+                    position,
+                    "RkNumber floating value exceeds 30 bits",
+                ));
+            }
+        };
+        Ok(value | u32::from(self.divided_by_100))
+    }
+
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        Ok(Self::from_bits(reader.read_u32()?))
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        let bits = self.bits(writer.position()?)?;
+        writer.write_u32(bits)
+    }
+}
+
+impl Xnum {
+    fn validate(self, position: u64) -> Result<()> {
+        let exponent = (self.bits >> 52) & 0x7ff;
+        let fraction = self.bits & 0x000f_ffff_ffff_ffff;
+        if exponent == 0x7ff
+            || (exponent == 0 && fraction != 0)
+            || self.bits == 0x8000_0000_0000_0000
+        {
+            return Err(Error::invalid(
+                position,
+                "Xnum is infinite, NaN, denormalized, or negative zero",
+            ));
+        }
+        Ok(())
+    }
+
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            bits: reader.read_u64()?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u64(self.bits)
+    }
+}
+
+impl Bes {
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let raw = reader.read_u8()?;
+        match reader.read_u8()? {
+            0 if raw <= 1 => Ok(Self::Boolean(raw != 0)),
+            0 => Err(Error::invalid(position, "Bes Boolean value is not 0 or 1")),
+            1 => CellErrorCode::from_raw(raw)
+                .map(Self::Error)
+                .ok_or_else(|| Error::invalid(position, "Bes error code is invalid")),
+            _ => Err(Error::invalid(position + 1, "Bes fError is not Boolean")),
+        }
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        match self {
+            Self::Boolean(value) => {
+                writer.write_u8(u8::from(value))?;
+                writer.write_u8(0)
+            }
+            Self::Error(value) => {
+                value.write_to(writer)?;
+                writer.write_u8(1)
+            }
+        }
+    }
+}
+
+impl XlUnicodeRichExtendedString {
+    fn extension_bytes(&self) -> Result<Vec<u8>> {
+        self.extension
+            .as_ref()
+            .map(ExtRst::to_bytes)
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    fn validate(&self, position: u64) -> Result<()> {
+        if self.flags.bits() & !0x0d != 0 {
+            return Err(Error::invalid(
+                position,
+                "rich string reserved flags are nonzero",
+            ));
+        }
+        let mut count = 0usize;
+        for (index, chunk) in self.character_chunks.iter().enumerate() {
+            let chunk_count = match &chunk.characters {
+                XlStringCharacters::Compressed(values) if chunk.flags == 0 => values.len(),
+                XlStringCharacters::Unicode(values) if chunk.flags == 1 => values.len(),
+                _ => {
+                    return Err(Error::invalid(
+                        position,
+                        "rich string character chunk encoding mismatch",
+                    ));
+                }
+            };
+            if chunk_count == 0
+                || (index == 0
+                    && chunk.flags != self.flags.bits() & SstStringFlags::HIGH_BYTE.bits())
+            {
+                return Err(Error::invalid(
+                    position,
+                    "rich string character chunks are invalid",
+                ));
+            }
+            count = count
+                .checked_add(chunk_count)
+                .ok_or_else(|| Error::Limit("rich string character count overflow".into()))?;
+        }
+        if count != usize::from(self.declared_character_count) {
+            return Err(Error::invalid(
+                position,
+                "rich string character count mismatch",
+            ));
+        }
+        let rich = self.flags.contains(SstStringFlags::RICH_TEXT);
+        if rich != self.declared_format_run_count.is_some()
+            || rich == self.format_runs.is_empty()
+            || self.declared_format_run_count.map(usize::from).unwrap_or(0)
+                != self.format_runs.len()
+        {
+            return Err(Error::invalid(
+                position,
+                "rich string format-run fields disagree",
+            ));
+        }
+        let mut previous = None;
+        for run in &self.format_runs {
+            if run.character_index > self.declared_character_count
+                || previous.is_some_and(|value| run.character_index <= value)
+            {
+                return Err(Error::invalid(
+                    position,
+                    "rich string format runs are invalid",
+                ));
+            }
+            previous = Some(run.character_index);
+        }
+        let extended = self.flags.contains(SstStringFlags::EXTENDED);
+        if extended != self.declared_extension_length.is_some()
+            || extended != self.extension.is_some()
+        {
+            return Err(Error::invalid(
+                position,
+                "rich string extension fields disagree",
+            ));
+        }
+        let extension = self.extension_bytes()?;
+        if self
+            .declared_extension_length
+            .map(|value| usize::try_from(value).ok())
+            != Some(Some(extension.len()))
+            && !(self.declared_extension_length.is_none() && extension.is_empty())
+        {
+            return Err(Error::invalid(
+                position,
+                "rich string extension length mismatch",
+            ));
+        }
+        if let Some(extension) = &self.extension {
+            match extension {
+                ExtRst {
+                    reserved: 1,
+                    body: ExtRstBody::Phonetic { .. },
+                }
+                | ExtRst {
+                    reserved: u16::MAX,
+                    body: ExtRstBody::OldStyle { .. },
+                } => {}
+                _ => return Err(Error::invalid(position, "rich string ExtRst is invalid")),
+            }
+        }
+        Ok(())
+    }
+
+    fn double_byte_size(&self, position: u64) -> Result<u32> {
+        self.validate(position)?;
+        let extension_size = self.extension_bytes()?.len();
+        let size = 3usize
+            .checked_add(usize::from(self.declared_format_run_count.is_some()) * 2)
+            .and_then(|value| {
+                value.checked_add(usize::from(self.declared_extension_length.is_some()) * 4)
+            })
+            .and_then(|value| {
+                value.checked_add(usize::from(self.declared_character_count).saturating_mul(2))
+            })
+            .and_then(|value| value.checked_add(self.format_runs.len().saturating_mul(4)))
+            .and_then(|value| value.checked_add(extension_size))
+            .ok_or_else(|| Error::Limit("rich string double-byte size overflow".into()))?;
+        u32::try_from(size).map_err(|_| Error::Limit("rich string size exceeds u32".into()))
+    }
+}
+
+impl SdkRead for XlUnicodeRichExtendedString {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let declared_character_count = reader.read_u16()?;
+        let flags = SstStringFlags::from_bits_retain(reader.read_u8()?);
+        if flags.bits() & !0x0d != 0 {
+            return Err(Error::invalid(
+                position + 2,
+                "rich string reserved flags are nonzero",
+            ));
+        }
+        let declared_format_run_count = flags
+            .contains(SstStringFlags::RICH_TEXT)
+            .then(|| reader.read_u16())
+            .transpose()?;
+        let declared_extension_length = flags
+            .contains(SstStringFlags::EXTENDED)
+            .then(|| reader.read_u32())
+            .transpose()?;
+        let character_count = usize::from(declared_character_count);
+        let characters = if flags.contains(SstStringFlags::HIGH_BYTE) {
+            reader.ensure_allocation(character_count, 2)?;
+            let bytes = reader.read_vec(character_count.saturating_mul(2))?;
+            XlStringCharacters::Unicode(
+                bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect(),
+            )
+        } else {
+            XlStringCharacters::Compressed(reader.read_vec(character_count)?)
+        };
+        let character_chunks = (character_count != 0)
+            .then_some(SstCharacterChunk {
+                flags: flags.bits() & SstStringFlags::HIGH_BYTE.bits(),
+                characters,
+            })
+            .into_iter()
+            .collect();
+        let run_count = declared_format_run_count.map(usize::from).unwrap_or(0);
+        reader.ensure_allocation(run_count, 4)?;
+        let mut format_runs = Vec::with_capacity(run_count);
+        for _ in 0..run_count {
+            format_runs.push(FormatRun::read_from(reader)?);
+        }
+        let extension = if let Some(length) = declared_extension_length {
+            let length = usize::try_from(length)
+                .map_err(|_| Error::Limit("rich string extension exceeds usize".into()))?;
+            match SstExtensionData::from_bytes(reader.read_vec(length)?) {
+                SstExtensionData::ExtRst(value) => Some(value),
+                _ => return Err(Error::invalid(position, "rich string ExtRst is malformed")),
+            }
+        } else {
+            None
+        };
+        let value = Self {
+            declared_character_count,
+            flags,
+            declared_format_run_count,
+            declared_extension_length,
+            character_chunks,
+            format_runs,
+            extension,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for XlUnicodeRichExtendedString {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u16(self.declared_character_count)?;
+        writer.write_u8(self.flags.bits())?;
+        if let Some(count) = self.declared_format_run_count {
+            writer.write_u16(count)?;
+        }
+        if let Some(length) = self.declared_extension_length {
+            writer.write_u32(length)?;
+        }
+        for chunk in &self.character_chunks {
+            match &chunk.characters {
+                XlStringCharacters::Compressed(values) => writer.write_all(values)?,
+                XlStringCharacters::Unicode(values) => {
+                    for value in values {
+                        writer.write_u16(*value)?;
+                    }
+                }
+            }
+        }
+        for run in &self.format_runs {
+            run.write_to(writer)?;
+        }
+        writer.write_all(&self.extension_bytes()?)?;
+        Ok(())
+    }
+}
+
+impl CellParsedFormula {
+    fn validate(&self, position: u64) -> Result<()> {
+        let bytes = self.formula.to_bytes()?;
+        if self.declared_token_size == 0
+            || usize::from(self.declared_token_size) != bytes.len()
+            || !self.formula.unparsed_tail.is_empty()
+            || self.formula.missing_extra_count() != 0
+            || self.formula.tokens.iter().any(|token| {
+                matches!(
+                    token.data,
+                    FormulaTokenData::RelativeReference { .. }
+                        | FormulaTokenData::RelativeArea { .. }
+                        | FormulaTokenData::PivotName { .. }
+                )
+            })
+        {
+            return Err(Error::invalid(position, "CellParsedFormula is invalid"));
+        }
+        Ok(())
+    }
+
+    fn encoded_size(&self, position: u64) -> Result<u32> {
+        self.validate(position)?;
+        let size = 2usize
+            .checked_add(usize::from(self.declared_token_size))
+            .and_then(|value| {
+                self.formula
+                    .extra_data_to_bytes()
+                    .ok()
+                    .and_then(|extra| value.checked_add(extra.len()))
+            })
+            .ok_or_else(|| Error::Limit("CellParsedFormula size overflow".into()))?;
+        u32::try_from(size).map_err(|_| Error::Limit("CellParsedFormula size exceeds u32".into()))
+    }
+
+    fn read_sized<R: Read + Seek>(reader: &mut Reader<R>, size: u64) -> Result<Self> {
+        let position = reader.position()?;
+        let mut child = reader.sub_reader(size)?;
+        let declared_token_size = child.read_u16()?;
+        if declared_token_size == 0 {
+            return Err(Error::invalid(position, "CellParsedFormula cce is zero"));
+        }
+        let mut formula =
+            FormulaTokenStream::from_bytes(&child.read_vec(usize::from(declared_token_size))?)?;
+        let remaining = usize::try_from(child.remaining()?)
+            .map_err(|_| Error::Limit("CellParsedFormula RgbExtra exceeds usize".into()))?;
+        let tail = formula.parse_extra_data(&child.read_vec(remaining)?)?;
+        if !tail.is_empty() {
+            return Err(Error::invalid(
+                position,
+                "CellParsedFormula has trailing bytes",
+            ));
+        }
+        let value = Self {
+            declared_token_size,
+            formula,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkRead for CellParsedFormula {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let remaining = reader.remaining()?;
+        Self::read_sized(reader, remaining)
+    }
+}
+
+impl SdkWrite for CellParsedFormula {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u16(self.declared_token_size)?;
+        writer.write_all(&self.formula.to_bytes()?)?;
+        writer.write_all(&self.formula.extra_data_to_bytes()?)?;
+        Ok(())
+    }
+}
+
+impl RrdCellValue {
+    fn kind(&self) -> u16 {
+        match self {
+            Self::Blank => 0,
+            Self::Rk(_) => 1,
+            Self::Number(_) => 2,
+            Self::String(_) => 3,
+            Self::BooleanError(_) => 4,
+            Self::Formula(_) => 5,
+        }
+    }
+
+    fn declared_old_size(&self, position: u64) -> Result<u32> {
+        match self {
+            Self::Blank => Ok(0),
+            Self::Rk(_) => Ok(4),
+            Self::Number(value) => {
+                value.validate(position)?;
+                Ok(8)
+            }
+            Self::String(value) => value.double_byte_size(position),
+            Self::BooleanError(_) => Ok(2),
+            Self::Formula(value) => {
+                let size = value.encoded_size(position)?;
+                if size < 0x18 {
+                    return Err(Error::invalid(
+                        position,
+                        "old CellParsedFormula is shorter than 0x18 bytes",
+                    ));
+                }
+                Ok(size)
+            }
+        }
+    }
+
+    fn read<R: Read + Seek>(
+        reader: &mut Reader<R>,
+        kind: u16,
+        old_size: Option<u32>,
+    ) -> Result<Self> {
+        Ok(match kind {
+            0 => Self::Blank,
+            1 => Self::Rk(RkNumber::read(reader)?),
+            2 => Self::Number(Xnum::read(reader)?),
+            3 => Self::String(XlUnicodeRichExtendedString::read_from(reader)?),
+            4 => Self::BooleanError(Bes::read(reader)?),
+            5 => Self::Formula(match old_size {
+                Some(size) => CellParsedFormula::read_sized(reader, u64::from(size))?,
+                None => CellParsedFormula::read_from(reader)?,
+            }),
+            _ => {
+                return Err(Error::invalid(
+                    reader.position()?,
+                    "revision cell value type is invalid",
+                ));
+            }
+        })
+    }
+
+    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        match self {
+            Self::Blank => Ok(()),
+            Self::Rk(value) => value.write(writer),
+            Self::Number(value) => value.write(writer),
+            Self::String(value) => value.write_to(writer),
+            Self::BooleanError(value) => value.write(writer),
+            Self::Formula(value) => value.write_to(writer),
+        }
+    }
+}
+
+struct RrdChgCellPrefix {
+    revision: Rrd,
+    flags: RrdChgCellFlags,
+    display_number_format: RevisionDisplayNumberFormat,
+    secondary_flags: RrdChgCellSecondaryFlags,
+    location: RgceLocation,
+    declared_old_value_size: u32,
+    font_reset_count: u16,
+    old_format: Option<DxfN>,
+    new_format: Option<DxfN>,
+    old_kind: u16,
+    new_kind: u16,
+}
+
+impl RrdChgCellPrefix {
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let revision = Rrd::read(reader)?;
+        let packed = reader.read_u16()?;
+        let new_kind = packed & 7;
+        let old_kind = (packed >> 3) & 7;
+        if new_kind > 5 || old_kind > 5 {
+            return Err(Error::invalid(
+                position + 14,
+                "RRDChgCell value type is invalid",
+            ));
+        }
+        let flags = RrdChgCellFlags::from_bits_retain(packed & !0x003f);
+        let display_number_format = RevisionDisplayNumberFormat::read_from(reader)?;
+        let secondary_flags = RrdChgCellSecondaryFlags::from_bits_retain(reader.read_u8()?);
+        let location = RgceLocation::read(reader)?;
+        let declared_old_value_size = reader.read_u32()?;
+        let font_reset_count = reader.read_u16()?;
+        let old_format = (flags.contains(RrdChgCellFlags::OLD_FORMAT)
+            && !flags.contains(RrdChgCellFlags::OLD_FORMAT_NULL))
+        .then(|| DxfN::read_from(reader))
+        .transpose()?;
+        let new_format = (flags.contains(RrdChgCellFlags::NEW_FORMAT)
+            && !flags.contains(RrdChgCellFlags::NEW_FORMAT_NULL))
+        .then(|| DxfN::read_from(reader))
+        .transpose()?;
+        Ok(Self {
+            revision,
+            flags,
+            display_number_format,
+            secondary_flags,
+            location,
+            declared_old_value_size,
+            font_reset_count,
+            old_format,
+            new_format,
+            old_kind,
+            new_kind,
+        })
+    }
+
+    fn finish(
+        self,
+        old_value: RrdCellValue,
+        new_value: RrdCellValue,
+        physical_segments: Option<Vec<RrdChgCellSegmentLayout>>,
+    ) -> RrdChgCellRecord {
+        RrdChgCellRecord {
+            revision: self.revision,
+            flags: self.flags,
+            display_number_format: self.display_number_format,
+            secondary_flags: self.secondary_flags,
+            location: self.location,
+            declared_old_value_size: self.declared_old_value_size,
+            font_reset_count: self.font_reset_count,
+            old_format: self.old_format,
+            new_format: self.new_format,
+            old_value,
+            new_value,
+            physical_segments,
+        }
+    }
+}
+
+impl RrdChgCellRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        self.revision.validate(position)?;
+        if self.revision.revision_type != RevisionType::ChangeCell
+            || self.revision.sheet_id == u16::MAX
+            || self.flags.intersects(RrdChgCellFlags::RESERVED)
+            || self
+                .secondary_flags
+                .intersects(RrdChgCellSecondaryFlags::RESERVED)
+        {
+            return Err(Error::invalid(position, "RRDChgCell header is invalid"));
+        }
+        let old_format_exists = self.flags.contains(RrdChgCellFlags::OLD_FORMAT)
+            && !self.flags.contains(RrdChgCellFlags::OLD_FORMAT_NULL);
+        let new_format_exists = self.flags.contains(RrdChgCellFlags::NEW_FORMAT)
+            && !self.flags.contains(RrdChgCellFlags::NEW_FORMAT_NULL);
+        if old_format_exists != self.old_format.is_some()
+            || new_format_exists != self.new_format.is_some()
+            || self.declared_old_value_size != self.old_value.declared_old_size(position)?
+        {
+            return Err(Error::invalid(
+                position,
+                "RRDChgCell conditional fields disagree",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for RrdChgCellRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let prefix = RrdChgCellPrefix::read(reader)?;
+        let old_value = RrdCellValue::read(
+            reader,
+            prefix.old_kind,
+            Some(prefix.declared_old_value_size),
+        )?;
+        let new_value = RrdCellValue::read(reader, prefix.new_kind, None)?;
+        let value = prefix.finish(old_value, new_value, None);
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for RrdChgCellRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.revision.write(writer)?;
+        writer
+            .write_u16(self.flags.bits() | self.new_value.kind() | (self.old_value.kind() << 3))?;
+        self.display_number_format.write_to(writer)?;
+        writer.write_u8(self.secondary_flags.bits())?;
+        self.location.write(writer)?;
+        writer.write_u32(self.declared_old_value_size)?;
+        writer.write_u16(self.font_reset_count)?;
+        if let Some(value) = &self.old_format {
+            value.write_to(writer)?;
+        }
+        if let Some(value) = &self.new_format {
+            value.write_to(writer)?;
+        }
+        self.old_value.write(writer)?;
+        self.new_value.write(writer)
+    }
+}
+
+impl Ts {
+    fn from_bits(bits: u32) -> Self {
+        Self {
+            unused1: bits & 1 != 0,
+            italic: bits & 2 != 0,
+            unused2: ((bits >> 2) & 0x1f) as u8,
+            strikeout: bits & 0x80 != 0,
+            unused3: bits >> 8,
+        }
+    }
+
+    fn bits(self, position: u64) -> Result<u32> {
+        if self.unused2 > 0x1f || self.unused3 > 0x00ff_ffff {
+            return Err(Error::invalid(
+                position,
+                "Ts unused fields exceed their bit widths",
+            ));
+        }
+        Ok(u32::from(self.unused1)
+            | (u32::from(self.italic) << 1)
+            | (u32::from(self.unused2) << 2)
+            | (u32::from(self.strikeout) << 7)
+            | (self.unused3 << 8))
+    }
+}
+
+impl Stxp {
+    fn validate(self, position: u64) -> Result<()> {
+        if !matches!(self.height_twips, -1 | 0 | 20..=8191) || self.font_family > 5 {
+            return Err(Error::invalid(
+                position,
+                "Stxp height or font family is invalid",
+            ));
+        }
+        self.text_style.bits(position)?;
+        Ok(())
+    }
+
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let height_twips = reader.read_i32()?;
+        let text_style = Ts::from_bits(reader.read_u32()?);
+        let weight = match reader.read_i16()? {
+            -1 => StxpFontWeight::Ignored,
+            0 => StxpFontWeight::Unspecified,
+            400 => StxpFontWeight::Normal,
+            700 => StxpFontWeight::Bold,
+            _ => return Err(Error::invalid(position + 8, "Stxp font weight is invalid")),
+        };
+        let script_style = match reader.read_i16()? {
+            -1 => StxpScriptStyle::Ignored,
+            0 => StxpScriptStyle::Normal,
+            1 => StxpScriptStyle::Superscript,
+            2 => StxpScriptStyle::Subscript,
+            _ => {
+                return Err(Error::invalid(
+                    position + 10,
+                    "Stxp script style is invalid",
+                ));
+            }
+        };
+        let value = Self {
+            height_twips,
+            text_style,
+            weight,
+            script_style,
+            underline: StxpUnderline::read_from(reader)?,
+            font_family: reader.read_u8()?,
+            character_set: reader.read_u8()?,
+            unused: reader.read_u8()?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_i32(self.height_twips)?;
+        let text_style_position = writer.position()?;
+        writer.write_u32(self.text_style.bits(text_style_position)?)?;
+        writer.write_i16(match self.weight {
+            StxpFontWeight::Ignored => -1,
+            StxpFontWeight::Unspecified => 0,
+            StxpFontWeight::Normal => 400,
+            StxpFontWeight::Bold => 700,
+        })?;
+        writer.write_i16(match self.script_style {
+            StxpScriptStyle::Ignored => -1,
+            StxpScriptStyle::Normal => 0,
+            StxpScriptStyle::Superscript => 1,
+            StxpScriptStyle::Subscript => 2,
+        })?;
+        self.underline.write_to(writer)?;
+        writer.write_u8(self.font_family)?;
+        writer.write_u8(self.character_set)?;
+        writer.write_u8(self.unused)
+    }
+}
+
+impl Icv {
+    fn validate(self, position: u64) -> Result<()> {
+        if !matches!(self.value, 0x0000..=0x0041 | 0x004d..=0x004f | 0x0051 | 0x7fff) {
+            return Err(Error::invalid(position, "Icv color index is invalid"));
+        }
+        Ok(())
+    }
+
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            value: reader.read_u16()?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u16(self.value)
+    }
+}
+
+impl RrdRstEtxpRecord {
+    fn validate(self, position: u64) -> Result<()> {
+        if self.used_font_name_characters > 0x1f
+            || (self.used_font_name_characters > 0 && self.full_string != 1)
+            || self.reserved1 != 0
+            || self.reserved2 != 0
+        {
+            return Err(Error::invalid(position, "RRDRstEtxp fields are invalid"));
+        }
+        self.font.validate(position + 66)?;
+        self.foreground_color.validate(position + 82)
+    }
+}
+
+impl SdkRead for RrdRstEtxpRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let font_index = reader.read_u16()?;
+        let used_font_name_characters = reader.read_u8()?;
+        let full_string = reader.read_u8()?;
+        let mut font_name = [0; 31];
+        for value in &mut font_name {
+            *value = reader.read_u16()?;
+        }
+        let value = Self {
+            font_index,
+            used_font_name_characters,
+            full_string,
+            font_name,
+            font: Stxp::read(reader)?,
+            foreground_color: Icv::read(reader)?,
+            reserved1: reader.read_u16()?,
+            reserved2: reader.read_u32()?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for RrdRstEtxpRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u16(self.font_index)?;
+        writer.write_u8(self.used_font_name_characters)?;
+        writer.write_u8(self.full_string)?;
+        for value in self.font_name {
+            writer.write_u16(value)?;
+        }
+        self.font.write(writer)?;
+        self.foreground_color.write(writer)?;
+        writer.write_u16(self.reserved1)?;
+        writer.write_u32(self.reserved2)
+    }
+}
+
+impl RgceColumn {
+    fn from_bits(bits: u16, position: u64) -> Result<Self> {
+        let column = bits & 0x3fff;
+        if column > 0x00ff {
+            return Err(Error::invalid(position, "Rgce column exceeds 255"));
+        }
+        Ok(Self {
+            column,
+            row_relative: bits & 0x4000 != 0,
+            column_relative: bits & 0x8000 != 0,
+        })
+    }
+
+    fn bits(self, position: u64) -> Result<u16> {
+        if self.column > 0x00ff {
+            return Err(Error::invalid(position, "Rgce column exceeds 255"));
+        }
+        Ok(self.column
+            | (u16::from(self.row_relative) << 14)
+            | (u16::from(self.column_relative) << 15))
+    }
+}
+
+impl RgceLocation {
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let row = reader.read_u16()?;
+        let position = reader.position()?;
+        Ok(Self {
+            row,
+            column: RgceColumn::from_bits(reader.read_u16()?, position)?,
+        })
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        writer.write_u16(self.row)?;
+        let column = self.column.bits(writer.position()?)?;
+        writer.write_u16(column)
+    }
+}
+
+impl RgceLocation8 {
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let location = RgceLocation::read(reader)?;
+        let position = reader.position()?;
+        let reserved = reader.read_u32()?;
+        if reserved != 0 {
+            return Err(Error::invalid(
+                position,
+                "RgceLoc8 reserved field is nonzero",
+            ));
+        }
+        Ok(Self { location, reserved })
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        if self.reserved != 0 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "RgceLoc8 reserved field is nonzero",
+            ));
+        }
+        self.location.write(writer)?;
+        writer.write_u32(self.reserved)
+    }
+}
+
+impl RgceArea {
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let first_row = reader.read_u16()?;
+        let last_row = reader.read_u16()?;
+        let first_position = reader.position()?;
+        let first_column = RgceColumn::from_bits(reader.read_u16()?, first_position)?;
+        let last_position = reader.position()?;
+        let last_column = RgceColumn::from_bits(reader.read_u16()?, last_position)?;
+        Ok(Self {
+            first_row,
+            last_row,
+            first_column,
+            last_column,
+        })
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        writer.write_u16(self.first_row)?;
+        writer.write_u16(self.last_row)?;
+        let first_column = self.first_column.bits(writer.position()?)?;
+        writer.write_u16(first_column)?;
+        let last_column = self.last_column.bits(writer.position()?)?;
+        writer.write_u16(last_column)
+    }
+}
+
+impl RrLocation {
+    fn from_words(row: u16, bits: u16, position: u64) -> Result<Self> {
+        let column = bits & 0x3fff;
+        if column > 0x00ff {
+            return Err(Error::invalid(position, "RRLoc column exceeds 255"));
+        }
+        Ok(Self {
+            row,
+            column,
+            quoted_label: bits & 0x4000 != 0,
+            relative: bits & 0x8000 != 0,
+        })
+    }
+
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let row = reader.read_u16()?;
+        let position = reader.position()?;
+        Self::from_words(row, reader.read_u16()?, position)
+    }
+
+    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+        if self.column > 0x00ff {
+            return Err(Error::invalid(
+                writer.position()?,
+                "RRLoc column exceeds 255",
+            ));
+        }
+        writer.write_u16(self.row)?;
+        writer.write_u16(
+            self.column | (u16::from(self.quoted_label) << 14) | (u16::from(self.relative) << 15),
+        )
+    }
+}
+
+impl NaturalFormulaType {
+    fn is_stacked(self) -> bool {
+        matches!(
+            self,
+            Self::StackedRadical | Self::Stacked0d | Self::Stacked0f
+        )
+    }
+
+    fn is_radical(self) -> bool {
+        matches!(self, Self::Radical | Self::StackedRadical)
+    }
+}
+
+impl Duce {
+    fn validate(&self, position: u64) -> Result<()> {
+        let stacked_count = match self.stacked {
+            DuceStacked::Location(location) if !self.formula_type.is_stacked() => {
+                if location.column > 0x00ff {
+                    return Err(Error::invalid(position, "Duce RRLoc column exceeds 255"));
+                }
+                None
+            }
+            DuceStacked::Flags { location_count, .. }
+                if self.formula_type.is_stacked()
+                    && (2..=0x3fff_ffff).contains(&location_count) =>
+            {
+                Some(location_count)
+            }
+            _ => {
+                return Err(Error::invalid(
+                    position,
+                    "Duce stacked data disagrees with eptg",
+                ));
+            }
+        };
+        match self.radical {
+            DuceRadical::Undefined(_) if !self.formula_type.is_radical() => {}
+            DuceRadical::Area { reference, token } if self.formula_type.is_radical() => {
+                reference.validate(position)?;
+                if token & 0x80 != 0 || token & 0x1f != 0x05 {
+                    return Err(Error::invalid(position, "Duce radical PtgArea is invalid"));
+                }
+            }
+            DuceRadical::AreaError { token, .. } if self.formula_type.is_radical() => {
+                if token & 0x80 != 0 || token & 0x1f != 0x0b {
+                    return Err(Error::invalid(
+                        position,
+                        "Duce radical PtgAreaErr is invalid",
+                    ));
+                }
+            }
+            _ => {
+                return Err(Error::invalid(
+                    position,
+                    "Duce radical data disagrees with eptg",
+                ));
+            }
+        }
+        if stacked_count.map(|count| usize::try_from(count).ok())
+            != Some(Some(self.stacked_locations.len()))
+            && !(stacked_count.is_none() && self.stacked_locations.is_empty())
+        {
+            return Err(Error::invalid(
+                position,
+                "Duce stacked location count does not match rgloc",
+            ));
+        }
+        if self
+            .stacked_locations
+            .iter()
+            .any(|location| location.column > 0x00ff)
+        {
+            return Err(Error::invalid(position, "Duce rgloc column exceeds 255"));
+        }
+        Ok(())
+    }
+
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let stacked_raw = reader.read_u32()?;
+        let radical_raw = reader.read_array::<9>()?;
+        let formula_type = NaturalFormulaType::read_from(reader)?;
+        let stacked = if formula_type.is_stacked() {
+            if stacked_raw & 0x4000_0000 != 0 {
+                return Err(Error::invalid(
+                    position,
+                    "SQElfFlags reserved bit is nonzero",
+                ));
+            }
+            DuceStacked::Flags {
+                location_count: stacked_raw & 0x3fff_ffff,
+                relative: stacked_raw & 0x8000_0000 != 0,
+            }
+        } else {
+            DuceStacked::Location(RrLocation::from_words(
+                stacked_raw as u16,
+                (stacked_raw >> 16) as u16,
+                position,
+            )?)
+        };
+        let radical = if formula_type.is_radical() {
+            let token = radical_raw[8];
+            match token & 0x1f {
+                0x05 if token & 0x80 == 0 => {
+                    let mut child = Reader::new(Cursor::new(&radical_raw[..8]))?;
+                    DuceRadical::Area {
+                        reference: Ref8U::read(&mut child)?,
+                        token,
+                    }
+                }
+                0x0b if token & 0x80 == 0 => DuceRadical::AreaError {
+                    unused: radical_raw[..8].try_into().expect("eight-byte radical"),
+                    token,
+                },
+                _ => return Err(Error::invalid(position, "Duce radical token is invalid")),
+            }
+        } else {
+            DuceRadical::Undefined(radical_raw)
+        };
+        let count = match stacked {
+            DuceStacked::Flags { location_count, .. } => usize::try_from(location_count)
+                .map_err(|_| Error::Limit("Duce rgloc count exceeds usize".into()))?,
+            DuceStacked::Location(_) => 0,
+        };
+        reader.ensure_allocation(count, 4)?;
+        let mut stacked_locations = Vec::with_capacity(count);
+        for _ in 0..count {
+            stacked_locations.push(RrLocation::read(reader)?);
+        }
+        let value = Self {
+            stacked,
+            radical,
+            formula_type,
+            stacked_locations,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+
+    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        match self.stacked {
+            DuceStacked::Location(location) => location.write(writer)?,
+            DuceStacked::Flags {
+                location_count,
+                relative,
+            } => writer.write_u32(location_count | (u32::from(relative) << 31))?,
+        }
+        match self.radical {
+            DuceRadical::Undefined(bytes) => writer.write_all(&bytes)?,
+            DuceRadical::Area { reference, token } => {
+                reference.write(writer)?;
+                writer.write_u8(token)?;
+            }
+            DuceRadical::AreaError { unused, token } => {
+                writer.write_all(&unused)?;
+                writer.write_u8(token)?;
+            }
+        }
+        self.formula_type.write_to(writer)?;
+        for location in &self.stacked_locations {
+            location.write(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl Ducr {
+    fn validate(&self, position: u64) -> Result<()> {
+        if self.reserved1 != 0 || self.original_token & 0x80 != 0 {
+            return Err(Error::invalid(position, "Ducr reserved fields are invalid"));
+        }
+        let base = self.original_token & 0x1f;
+        match (&self.radical, self.original_token, base) {
+            (DucrRadical::NaturalLanguage(value), 0x18, _) => value.validate(position)?,
+            (DucrRadical::Location(value), _, 0x04 | 0x1a) => {
+                if value.reserved != 0 || value.location.column.column > 0x00ff {
+                    return Err(Error::invalid(position, "Ducr RgceLoc8 is invalid"));
+                }
+            }
+            (DucrRadical::Area(value), _, 0x05 | 0x1b) => {
+                if value.first_column.column > 0x00ff || value.last_column.column > 0x00ff {
+                    return Err(Error::invalid(position, "Ducr RgceArea is invalid"));
+                }
+            }
+            (DucrRadical::Unused(bytes), token, other)
+                if token != 0x18
+                    && !matches!(other, 0x04 | 0x05 | 0x1a | 0x1b)
+                    && bytes.iter().all(|byte| *byte == 0) => {}
+            _ => {
+                return Err(Error::invalid(
+                    position,
+                    "Ducr radical does not match its Ptg",
+                ));
+            }
+        }
+        match &self.conditional {
+            DucrConditional::DefinedName { name, .. } => match name {
+                DucrDefinedName::Custom(value) if value.text.trailing_byte.is_none() => {}
+                DucrDefinedName::BuiltIn { .. } => {}
+                _ => return Err(Error::invalid(position, "Ducr defined name is invalid")),
+            },
+            DucrConditional::Location { location, .. } if location.column <= 0x00ff => {}
+            DucrConditional::Location { .. } => {
+                return Err(Error::invalid(position, "Ducr RRLoc is invalid"));
+            }
+        }
+        Ok(())
+    }
+
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let reserved1 = reader.read_u32()?;
+        let token_index = reader.read_u16()?;
+        let original_token = reader.read_u8()?;
+        let flags_position = reader.position()?;
+        let flags = reader.read_u8()?;
+        if flags & 0xfc != 0 {
+            return Err(Error::invalid(
+                flags_position,
+                "Ducr reserved flags are nonzero",
+            ));
+        }
+        let base = original_token & 0x1f;
+        let radical = if original_token == 0x18 {
+            DucrRadical::NaturalLanguage(Duce::read(reader)?)
+        } else {
+            match base {
+                0x04 | 0x1a => DucrRadical::Location(RgceLocation8::read(reader)?),
+                0x05 | 0x1b => DucrRadical::Area(RgceArea::read(reader)?),
+                _ => DucrRadical::Unused(reader.read_array()?),
+            }
+        };
+        let conditional = if flags & 1 != 0 {
+            let sheet_id = reader.read_u16()?;
+            let builtin_position = reader.position()?;
+            let builtin = reader.read_u8()?;
+            let name = if builtin == 0 {
+                DucrDefinedName::Custom(XlUnicodeString::read_from(reader)?)
+            } else {
+                DucrDefinedName::BuiltIn {
+                    name: RevisionBuiltInName::from_raw(builtin).ok_or_else(|| {
+                        Error::invalid(
+                            builtin_position,
+                            format!("invalid Ducr built-in name 0x{builtin:02x}"),
+                        )
+                    })?,
+                    unused: reader.read_array()?,
+                }
+            };
+            DucrConditional::DefinedName { sheet_id, name }
+        } else {
+            DucrConditional::Location {
+                sheet_id: reader.read_u16()?,
+                location: RrLocation::read(reader)?,
+            }
+        };
+        let value = Self {
+            reserved1,
+            token_index,
+            original_token,
+            uses_second_sheet: flags & 2 != 0,
+            radical,
+            conditional,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+
+    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u32(self.reserved1)?;
+        writer.write_u16(self.token_index)?;
+        writer.write_u8(self.original_token)?;
+        let is_defined_name = matches!(self.conditional, DucrConditional::DefinedName { .. });
+        writer.write_u8(u8::from(is_defined_name) | (u8::from(self.uses_second_sheet) << 1))?;
+        match &self.radical {
+            DucrRadical::NaturalLanguage(value) => value.write(writer)?,
+            DucrRadical::Location(value) => value.write(writer)?,
+            DucrRadical::Area(value) => value.write(writer)?,
+            DucrRadical::Unused(bytes) => writer.write_all(bytes)?,
+        }
+        match &self.conditional {
+            DucrConditional::DefinedName { sheet_id, name } => {
+                writer.write_u16(*sheet_id)?;
+                match name {
+                    DucrDefinedName::Custom(value) => {
+                        writer.write_u8(0)?;
+                        value.write_to(writer)?;
+                    }
+                    DucrDefinedName::BuiltIn { name, unused } => {
+                        name.write_to(writer)?;
+                        writer.write_all(unused)?;
+                    }
+                }
+            }
+            DucrConditional::Location { sheet_id, location } => {
+                writer.write_u16(*sheet_id)?;
+                location.write(writer)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl RrdInsDelRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        self.revision.validate(position)?;
+        self.range.validate(position + 16)?;
+        let expected_count = u32::try_from(self.undo.len())
+            .map_err(|_| Error::Limit("RRDInsDel undo count exceeds u32".into()))?;
+        if !matches!(
+            self.revision.revision_type,
+            RevisionType::InsertRow
+                | RevisionType::InsertColumn
+                | RevisionType::DeleteRow
+                | RevisionType::DeleteColumn
+        ) || self.revision.revision_id <= 0
+            || self.revision.sheet_id == u16::MAX
+            || self.declared_undo_count != expected_count
+            || self.undo.iter().any(|value| value.uses_second_sheet)
+        {
+            return Err(Error::invalid(position, "RRDInsDel fields are invalid"));
+        }
+        for value in &self.undo {
+            value.validate(position)?;
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for RrdInsDelRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let revision = Rrd::read(reader)?;
+        let flag_position = reader.position()?;
+        let flags = reader.read_u16()?;
+        if flags & 0xfffe != 0 {
+            return Err(Error::invalid(
+                flag_position,
+                "RRDInsDel reserved flags are nonzero",
+            ));
+        }
+        let range = Ref8U::read(reader)?;
+        let declared_undo_count = reader.read_u32()?;
+        let count = usize::try_from(declared_undo_count)
+            .map_err(|_| Error::Limit("RRDInsDel undo count exceeds usize".into()))?;
+        reader.ensure_allocation(count, 22)?;
+        let mut undo = Vec::with_capacity(count);
+        for _ in 0..count {
+            undo.push(Ducr::read(reader)?);
+        }
+        let value = Self {
+            revision,
+            end_of_list: flags & 1 != 0,
+            range,
+            declared_undo_count,
+            undo,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for RrdInsDelRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.revision.write(writer)?;
+        writer.write_u16(u16::from(self.end_of_list))?;
+        self.range.write(writer)?;
+        writer.write_u32(self.declared_undo_count)?;
+        for value in &self.undo {
+            value.write(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl RrdMoveRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        self.revision.validate(position)?;
+        self.source_range.validate(position + 14)?;
+        self.destination_range.validate(position + 22)?;
+        let expected_count = u32::try_from(self.undo.len())
+            .map_err(|_| Error::Limit("RRDMove undo count exceeds u32".into()))?;
+        if self.revision.revision_type != RevisionType::Move
+            || self.revision.revision_id <= 0
+            || self.revision.sheet_id == u16::MAX
+            || self.declared_undo_count != expected_count
+        {
+            return Err(Error::invalid(position, "RRDMove fields are invalid"));
+        }
+        for value in &self.undo {
+            value.validate(position)?;
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for RrdMoveRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let revision = Rrd::read(reader)?;
+        let source_range = Ref8U::read(reader)?;
+        let destination_range = Ref8U::read(reader)?;
+        let source_sheet_id = reader.read_u16()?;
+        let declared_undo_count = reader.read_u32()?;
+        let count = usize::try_from(declared_undo_count)
+            .map_err(|_| Error::Limit("RRDMove undo count exceeds usize".into()))?;
+        reader.ensure_allocation(count, 22)?;
+        let mut undo = Vec::with_capacity(count);
+        for _ in 0..count {
+            undo.push(Ducr::read(reader)?);
+        }
+        let value = Self {
+            revision,
+            source_range,
+            destination_range,
+            source_sheet_id,
+            declared_undo_count,
+            undo,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for RrdMoveRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.revision.write(writer)?;
+        self.source_range.write(writer)?;
+        self.destination_range.write(writer)?;
+        writer.write_u16(self.source_sheet_id)?;
+        writer.write_u32(self.declared_undo_count)?;
+        for value in &self.undo {
+            value.write(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl RrSortRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        self.revision.validate(position)?;
+        self.range.validate(position + 14)?;
+        let expected_size = u32::try_from(self.sort_map.len())
+            .ok()
+            .and_then(|count| count.checked_mul(8))
+            .ok_or_else(|| Error::Limit("RRSort mapping size exceeds u32".into()))?;
+        if self.revision.revision_type != RevisionType::Sort
+            || self.revision.sheet_id == u16::MAX
+            || self.declared_sort_map_size != expected_size
+        {
+            return Err(Error::invalid(position, "RRSort fields are invalid"));
+        }
+        let (first, last) = if self.sort_columns {
+            (
+                u32::from(self.range.first_column),
+                u32::from(self.range.last_column),
+            )
+        } else {
+            (
+                u32::from(self.range.first_row),
+                u32::from(self.range.last_row),
+            )
+        };
+        if self.sort_map.iter().any(|item| {
+            !(first..=last).contains(&item.new_index) || !(first..=last).contains(&item.old_index)
+        }) {
+            return Err(Error::invalid(
+                position,
+                "RRSort mapping index is outside the affected range",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for RrSortRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let revision = Rrd::read(reader)?;
+        let range = Ref8U::read(reader)?;
+        let flags_position = reader.position()?;
+        let flags = reader.read_u16()?;
+        if flags & 0xfffe != 0 {
+            return Err(Error::invalid(
+                flags_position,
+                "RRSort reserved flags are nonzero",
+            ));
+        }
+        let declared_sort_map_size = reader.read_u32()?;
+        if declared_sort_map_size % 8 != 0 {
+            return Err(Error::invalid(
+                reader.position()?.saturating_sub(4),
+                "RRSort cbSort is not a whole number of SortItem values",
+            ));
+        }
+        let count = usize::try_from(declared_sort_map_size / 8)
+            .map_err(|_| Error::Limit("RRSort mapping count exceeds usize".into()))?;
+        reader.ensure_allocation(count, 8)?;
+        let mut sort_map = Vec::with_capacity(count);
+        for _ in 0..count {
+            sort_map.push(SortItem::read_from(reader)?);
+        }
+        let value = Self {
+            revision,
+            range,
+            sort_columns: flags & 1 != 0,
+            declared_sort_map_size,
+            sort_map,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for RrSortRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.revision.write(writer)?;
+        self.range.write(writer)?;
+        writer.write_u16(u16::from(self.sort_columns))?;
+        writer.write_u32(self.declared_sort_map_size)?;
+        for item in &self.sort_map {
+            item.write_to(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl RrInsertShRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        self.revision.validate(position)?;
+        if self.revision.revision_type != RevisionType::InsertSheet
+            || self.revision.revision_id <= 0
+            || self.revision.sheet_id == u16::MAX
+            || self.reserved != 0
+        {
+            return Err(Error::invalid(position, "RRInsertSh fields are invalid"));
+        }
+        validate_used_fixed_name(
+            &self.name,
+            256,
+            self.used_name_characters,
+            227,
+            127,
+            position,
+            "RRInsertSh stName",
+        )
+    }
+}
+
+impl SdkRead for RrInsertShRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            revision: Rrd::read(reader)?,
+            sheet_position: reader.read_u16()?,
+            reserved: reader.read_u16()?,
+            used_name_characters: reader.read_u16()?,
+            name: read_fixed_biff_unicode(reader, 256)?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for RrInsertShRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.revision.write(writer)?;
+        writer.write_u16(self.sheet_position)?;
+        writer.write_u16(self.reserved)?;
+        writer.write_u16(self.used_name_characters)?;
+        write_fixed_biff_unicode(&self.name, 256, "RRInsertSh stName", writer)
+    }
+}
+
+impl SdkRead for RrdConflictRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let revision = Rrd::read(reader)?;
+        if revision.revision_type != RevisionType::Conflict || revision.revision_id <= 0 {
+            return Err(Error::invalid(position, "RRDConflict RRD is invalid"));
+        }
+        Ok(Self { revision })
+    }
+}
+
+impl SdkWrite for RrdConflictRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if self.revision.revision_type != RevisionType::Conflict || self.revision.revision_id <= 0 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "RRDConflict RRD is invalid",
+            ));
+        }
+        self.revision.write(writer)
+    }
+}
+
+impl RrdInfoRecord {
+    fn validate(self, position: u64) -> Result<()> {
+        let shared = self.sharing_flags.contains(RrdInfoSharingFlags::SHARED);
+        let tracked = self
+            .sharing_flags
+            .contains(RrdInfoSharingFlags::TRACK_REVISIONS);
+        let exclusive = self.sharing_flags.contains(RrdInfoSharingFlags::EXCLUSIVE);
+        let no_history = self
+            .history_flags
+            .contains(RrdInfoHistoryFlags::NO_REVISION_HISTORY);
+        if self.reserved1 != 0
+            || self.sharing_flags.intersects(RrdInfoSharingFlags::RESERVED)
+            || self.history_flags.intersects(RrdInfoHistoryFlags::RESERVED)
+            || self.revision_id < 0
+            || self.revision_history_days > 0x7fff
+            || (shared && exclusive)
+            || (self.sharing_flags.intersects(
+                RrdInfoSharingFlags::DISK_HAS_REVISIONS
+                    | RrdInfoSharingFlags::AUTO_DELETE_REVISIONS,
+            ) && !tracked)
+            || (tracked && !shared)
+            || (self
+                .history_flags
+                .contains(RrdInfoHistoryFlags::PROTECT_REVISION_HISTORY)
+                && !shared)
+            || (no_history && (!shared || self.revision_history_days != 0))
+            || (!no_history && self.revision_history_days == 0)
+        {
+            return Err(Error::invalid(position, "RRDInfo fields are inconsistent"));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for RrdInfoRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            biff_version: reader.read_u16()?,
+            reserved1: reader.read_u16()?,
+            sharing_flags: RrdInfoSharingFlags::from_bits_retain(reader.read_u16()?),
+            last_revision_guid: reader.read_array()?,
+            root_revision_guid: reader.read_array()?,
+            revision_id: reader.read_i32()?,
+            version: reader.read_u32()?,
+            history_flags: RrdInfoHistoryFlags::from_bits_retain(reader.read_u16()?),
+            revision_history_days: reader.read_u16()?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for RrdInfoRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u16(self.biff_version)?;
+        writer.write_u16(self.reserved1)?;
+        writer.write_u16(self.sharing_flags.bits())?;
+        writer.write_all(&self.last_revision_guid)?;
+        writer.write_all(&self.root_revision_guid)?;
+        writer.write_i32(self.revision_id)?;
+        writer.write_u32(self.version)?;
+        writer.write_u16(self.history_flags.bits())?;
+        writer.write_u16(self.revision_history_days)
+    }
+}
+
+impl SdkRead for RrdUserViewRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let revision = Rrd::read(reader)?;
+        if revision.revision_id != 0
+            || !matches!(
+                revision.revision_type,
+                RevisionType::AddView | RevisionType::DeleteView
+            )
+            || revision.sheet_id != u16::MAX
+        {
+            return Err(Error::invalid(position, "RRDUserView RRD is invalid"));
+        }
+        Ok(Self {
+            revision,
+            view_guid: reader.read_array()?,
+        })
+    }
+}
+
+impl SdkWrite for RrdUserViewRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if self.revision.revision_id != 0
+            || !matches!(
+                self.revision.revision_type,
+                RevisionType::AddView | RevisionType::DeleteView
+            )
+            || self.revision.sheet_id != u16::MAX
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "RRDUserView RRD is invalid",
+            ));
+        }
+        self.revision.write(writer)?;
+        writer.write_all(&self.view_guid)?;
+        Ok(())
+    }
+}
+
+impl SdkRead for ContinueFrtRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let header = FrtHeaderOld::read_from(reader)?;
+        if header.record_type != CONTINUE_FRT {
+            return Err(Error::invalid(
+                position,
+                "ContinueFrt header record type is not 0x0812",
+            ));
+        }
+        let len = usize::try_from(reader.remaining()?)
+            .map_err(|_| Error::Limit("ContinueFrt payload exceeds usize".into()))?;
+        if len >= 8221 {
+            return Err(Error::invalid(position, "ContinueFrt rgb is too large"));
+        }
+        Ok(Self {
+            header,
+            continuation: reader.read_vec(len)?,
+        })
+    }
+}
+
+impl SdkWrite for ContinueFrtRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if self.header.record_type != CONTINUE_FRT || self.continuation.len() >= 8221 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "ContinueFrt header or continuation length is invalid",
+            ));
+        }
+        self.header.write_to(writer)?;
+        writer.write_all(&self.continuation)?;
+        Ok(())
+    }
+}
+
+impl SdkRead for ContinueFrt11Record {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let header = FrtHeader::read_from(reader)?;
+        if header.record_type != CONTINUE_FRT11 {
+            return Err(Error::invalid(
+                position,
+                "ContinueFrt11 header record type is not 0x0875",
+            ));
+        }
+        let len = usize::try_from(reader.remaining()?)
+            .map_err(|_| Error::Limit("ContinueFrt11 payload exceeds usize".into()))?;
+        if len >= 8213 {
+            return Err(Error::invalid(position, "ContinueFrt11 rgb is too large"));
+        }
+        Ok(Self {
+            header,
+            continuation: reader.read_vec(len)?,
+        })
+    }
+}
+
+impl SdkWrite for ContinueFrt11Record {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if self.header.record_type != CONTINUE_FRT11 || self.continuation.len() >= 8213 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "ContinueFrt11 header or continuation length is invalid",
+            ));
+        }
+        self.header.write_to(writer)?;
+        writer.write_all(&self.continuation)?;
+        Ok(())
+    }
+}
+
+impl SdkRead for CrtMlFrtContinueRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let header = FrtHeader::read_from(reader)?;
+        if header.record_type != CRT_ML_FRT_CONTINUE {
+            return Err(Error::invalid(
+                position,
+                "CrtMlFrtContinue header record type is not 0x089f",
+            ));
+        }
+        let len = usize::try_from(reader.remaining()?)
+            .map_err(|_| Error::Limit("CrtMlFrtContinue payload exceeds usize".into()))?;
+        if len > MAX_BIFF_RECORD_DATA - 12 {
+            return Err(Error::invalid(
+                position,
+                "CrtMlFrtContinue XML token chain is too large",
+            ));
+        }
+        Ok(Self {
+            header,
+            xml_token_chain: reader.read_vec(len)?,
+        })
+    }
+}
+
+impl SdkWrite for CrtMlFrtContinueRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if self.header.record_type != CRT_ML_FRT_CONTINUE
+            || self.xml_token_chain.len() > MAX_BIFF_RECORD_DATA - 12
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "CrtMlFrtContinue header or token-chain length is invalid",
+            ));
+        }
+        self.header.write_to(writer)?;
+        writer.write_all(&self.xml_token_chain)?;
         Ok(())
     }
 }
@@ -11631,6 +17556,506 @@ impl SdkWrite for SxvdRecord {
         writer.write_u16(self.declared_name_length)?;
         if let Some(name) = &self.name {
             name.write(writer)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_pivot_xl_string(value: &XlUnicodeString, minimum: usize, label: &str) -> Result<()> {
+    let count = value.text.character_count();
+    if !(minimum..=255).contains(&count) {
+        return Err(Error::invalid(
+            0,
+            format!("{label} character count is outside its specified range"),
+        ));
+    }
+    Ok(())
+}
+
+impl SdkRead for SxViewExRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let header = FrtHeaderOld::read_from(reader)?;
+        let hierarchy_count = reader.read_i32()?;
+        let page_axis_extension_count = reader.read_i32()?;
+        let field_extension_count = reader.read_i32()?;
+        let declared_future_size = reader.read_u32()?;
+        let future_size = usize::try_from(declared_future_size)
+            .map_err(|_| Error::Limit("SXViewEx future data exceeds usize".into()))?;
+        if header.record_type != SX_VIEW_EX
+            || hierarchy_count < 1
+            || page_axis_extension_count < 0
+            || field_extension_count < 0
+            || future_size > 1024
+        {
+            return Err(Error::invalid(position, "SXViewEx fields are invalid"));
+        }
+        Ok(Self {
+            header,
+            hierarchy_count,
+            page_axis_extension_count,
+            field_extension_count,
+            declared_future_size,
+            future: reader.read_vec(future_size)?,
+        })
+    }
+}
+
+impl SdkWrite for SxViewExRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if self.header.record_type != SX_VIEW_EX
+            || self.hierarchy_count < 1
+            || self.page_axis_extension_count < 0
+            || self.field_extension_count < 0
+            || self.future.len() > 1024
+            || usize::try_from(self.declared_future_size).ok() != Some(self.future.len())
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "SXViewEx fields are invalid",
+            ));
+        }
+        self.header.write_to(writer)?;
+        writer.write_i32(self.hierarchy_count)?;
+        writer.write_i32(self.page_axis_extension_count)?;
+        writer.write_i32(self.field_extension_count)?;
+        writer.write_u32(self.declared_future_size)?;
+        writer.write_all(&self.future)?;
+        Ok(())
+    }
+}
+
+fn join_frt_continued_payload(
+    first: &[u8],
+    continues: &[ContinueFrtRecord],
+    limits: Limits,
+    label: &str,
+) -> Result<(Vec<u8>, Option<Vec<FrtContinuedSegmentLayout>>)> {
+    let total_len = std::iter::once(first.len())
+        .chain(continues.iter().map(|value| value.continuation.len()))
+        .try_fold(0usize, |total, len| {
+            total
+                .checked_add(len)
+                .ok_or_else(|| Error::Limit(format!("{label} physical length overflow")))
+        })?;
+    if total_len > limits.max_allocation {
+        return Err(Error::Limit(format!(
+            "{label} physical data exceeds {} bytes",
+            limits.max_allocation
+        )));
+    }
+    if continues.len() > limits.max_entries {
+        return Err(Error::Limit(format!(
+            "{label} ContinueFrt count exceeds {}",
+            limits.max_entries
+        )));
+    }
+    let mut logical = Vec::with_capacity(total_len);
+    logical.extend_from_slice(first);
+    for value in continues {
+        logical.extend_from_slice(&value.continuation);
+    }
+    let physical_segments = if continues.is_empty() {
+        None
+    } else {
+        let mut layouts = Vec::with_capacity(continues.len() + 1);
+        layouts.push(FrtContinuedSegmentLayout {
+            logical_byte_count: u16::try_from(first.len())
+                .map_err(|_| Error::Limit(format!("{label} first segment exceeds u16")))?,
+            continuation_header: None,
+        });
+        for value in continues {
+            layouts.push(FrtContinuedSegmentLayout {
+                logical_byte_count: u16::try_from(value.continuation.len()).map_err(|_| {
+                    Error::Limit(format!("{label} ContinueFrt segment exceeds u16"))
+                })?,
+                continuation_header: Some(value.header),
+            });
+        }
+        Some(layouts)
+    };
+    Ok((logical, physical_segments))
+}
+
+fn encode_frt_continued_payload(
+    record_type: u16,
+    logical: Vec<u8>,
+    physical_segments: Option<&[FrtContinuedSegmentLayout]>,
+    label: &str,
+) -> Result<Vec<EncodedBiffRecord>> {
+    let Some(layouts) = physical_segments else {
+        if logical.len() > MAX_BIFF_RECORD_DATA {
+            return Err(Error::invalid(
+                0,
+                format!("{label} exceeds one BIFF record and has no physical layout"),
+            ));
+        }
+        return Ok(vec![EncodedBiffRecord {
+            record_type,
+            payload: logical,
+        }]);
+    };
+    let layout_len = layouts.iter().try_fold(0usize, |total, layout| {
+        total
+            .checked_add(usize::from(layout.logical_byte_count))
+            .ok_or_else(|| Error::Limit(format!("{label} layout length overflow")))
+    })?;
+    if layouts.is_empty() || layout_len != logical.len() {
+        return Err(Error::invalid(
+            0,
+            format!("{label} physical layout does not match logical bytes"),
+        ));
+    }
+    let mut offset = 0usize;
+    let mut encoded = Vec::with_capacity(layouts.len());
+    for (index, layout) in layouts.iter().enumerate() {
+        let count = usize::from(layout.logical_byte_count);
+        let end = offset
+            .checked_add(count)
+            .ok_or_else(|| Error::Limit(format!("{label} segment offset overflow")))?;
+        let chunk = logical
+            .get(offset..end)
+            .ok_or_else(|| Error::invalid(0, format!("{label} segment exceeds logical bytes")))?;
+        if index == 0 {
+            if layout.continuation_header.is_some() || chunk.len() > MAX_BIFF_RECORD_DATA {
+                return Err(Error::invalid(
+                    0,
+                    format!("{label} first physical segment is invalid"),
+                ));
+            }
+            encoded.push(EncodedBiffRecord {
+                record_type,
+                payload: chunk.to_vec(),
+            });
+        } else {
+            let header = layout.continuation_header.ok_or_else(|| {
+                Error::invalid(0, format!("{label} continuation header is missing"))
+            })?;
+            if header.record_type != CONTINUE_FRT || chunk.len() >= 8221 {
+                return Err(Error::invalid(
+                    0,
+                    format!("{label} ContinueFrt segment is invalid"),
+                ));
+            }
+            encoded.push(EncodedBiffRecord {
+                record_type: CONTINUE_FRT,
+                payload: encode_sdk(&ContinueFrtRecord {
+                    header,
+                    continuation: chunk.to_vec(),
+                })?,
+            });
+        }
+        offset = end;
+    }
+    Ok(encoded)
+}
+
+impl HiddenMemberSet {
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let declared_member_count = reader.read_u32()?;
+        let count = usize::try_from(declared_member_count)
+            .map_err(|_| Error::Limit("HiddenMemberSet count exceeds usize".into()))?;
+        reader.ensure_allocation(count, 3)?;
+        let mut member_names = Vec::with_capacity(count);
+        for _ in 0..count {
+            member_names.push(XlUnicodeString::read_from(reader)?);
+        }
+        Ok(Self {
+            declared_member_count,
+            member_names,
+        })
+    }
+
+    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if usize::try_from(self.declared_member_count).ok() != Some(self.member_names.len()) {
+            return Err(Error::invalid(
+                writer.position()?,
+                "HiddenMemberSet member count mismatch",
+            ));
+        }
+        writer.write_u32(self.declared_member_count)?;
+        for name in &self.member_names {
+            name.write_to(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl SxThRecord {
+    fn from_sequence(
+        first: &[u8],
+        continues: &[ContinueFrtRecord],
+        limits: Limits,
+    ) -> Result<Self> {
+        let (logical, physical_segments) =
+            join_frt_continued_payload(first, continues, limits, "SXTH")?;
+        let mut value: Self = parse_sdk(&logical, 0, SX_TH)?;
+        value.physical_segments = physical_segments;
+        value.validate(0)?;
+        Ok(value)
+    }
+
+    fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
+        encode_frt_continued_payload(
+            SX_TH,
+            encode_sdk(self)?,
+            self.physical_segments.as_deref(),
+            "SXTH",
+        )
+    }
+
+    fn validate(&self, position: u64) -> Result<()> {
+        let expected_hidden_count = if self.declared_associated_field_count != 0 {
+            usize::try_from(self.declared_hidden_member_set_count).unwrap_or(usize::MAX)
+        } else {
+            0
+        };
+        if self.header.record_type != SX_TH
+            || self.axis.bits() & !0x000f != 0
+            || self.reserved != 0
+            || self.axis_field_count < 0
+            || usize::try_from(self.declared_associated_field_count).ok()
+                != Some(self.associated_fields.len())
+            || self.associated_fields.iter().any(|value| *value < -1)
+            || self.hidden_member_sets.len() != expected_hidden_count
+            || self.flags.contains(SxThFlags::FILTER_INCLUSIVE)
+                && self.declared_hidden_member_set_count != 0
+        {
+            return Err(Error::invalid(position, "SXTH fields are invalid"));
+        }
+        if self.flags.contains(SxThFlags::MEASURE)
+            && (self.flags.contains(SxThFlags::NAMED_SET)
+                || self
+                    .axis
+                    .intersects(SxAxis::ROW | SxAxis::COLUMN | SxAxis::PAGE)
+                || self
+                    .drag_flags
+                    .intersects(SxThDragFlags::ROW | SxThDragFlags::COLUMN | SxThDragFlags::PAGE)
+                || self.dimension_name.text.character_count() != 0)
+        {
+            return Err(Error::invalid(
+                position,
+                "SXTH measure hierarchy fields are invalid",
+            ));
+        }
+        validate_pivot_xl_string(&self.unique_name, 1, "SXTH unique name")?;
+        validate_pivot_xl_string(&self.display_name, 1, "SXTH display name")?;
+        validate_pivot_xl_string(&self.default_member, 0, "SXTH default member")?;
+        validate_pivot_xl_string(&self.all_member, 0, "SXTH ALL member")?;
+        validate_pivot_xl_string(&self.dimension_name, 0, "SXTH dimension name")?;
+        for hidden_set in &self.hidden_member_sets {
+            if usize::try_from(hidden_set.declared_member_count).ok()
+                != Some(hidden_set.member_names.len())
+            {
+                return Err(Error::invalid(
+                    position,
+                    "SXTH hidden-member count mismatch",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for SxThRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let header = FrtHeaderOld::read_from(reader)?;
+        let flags = SxThFlags::from_bits_retain(reader.read_u32()?);
+        let axis = SxAxis::from_bits_retain(reader.read_u16()?);
+        let reserved = reader.read_u16()?;
+        let pivot_field_index = reader.read_i32()?;
+        let axis_field_count = reader.read_i32()?;
+        let drag_flags = SxThDragFlags::from_bits_retain(reader.read_u16()?);
+        let unique_name = XlUnicodeString::read_from(reader)?;
+        let display_name = XlUnicodeString::read_from(reader)?;
+        let default_member = XlUnicodeString::read_from(reader)?;
+        let all_member = XlUnicodeString::read_from(reader)?;
+        let dimension_name = XlUnicodeString::read_from(reader)?;
+        let declared_associated_field_count = reader.read_u32()?;
+        let associated_count = usize::try_from(declared_associated_field_count)
+            .map_err(|_| Error::Limit("SXTH associated-field count exceeds usize".into()))?;
+        reader.ensure_allocation(associated_count, 4)?;
+        let mut associated_fields = Vec::with_capacity(associated_count);
+        for _ in 0..associated_count {
+            associated_fields.push(reader.read_i32()?);
+        }
+        let declared_hidden_member_set_count = reader.read_u32()?;
+        let hidden_count = if declared_associated_field_count != 0 {
+            usize::try_from(declared_hidden_member_set_count)
+                .map_err(|_| Error::Limit("SXTH hidden-member-set count exceeds usize".into()))?
+        } else {
+            0
+        };
+        reader.ensure_allocation(hidden_count, 4)?;
+        let mut hidden_member_sets = Vec::with_capacity(hidden_count);
+        for _ in 0..hidden_count {
+            hidden_member_sets.push(HiddenMemberSet::read(reader)?);
+        }
+        let value = Self {
+            header,
+            flags,
+            axis,
+            reserved,
+            pivot_field_index,
+            axis_field_count,
+            drag_flags,
+            unique_name,
+            display_name,
+            default_member,
+            all_member,
+            dimension_name,
+            declared_associated_field_count,
+            associated_fields,
+            declared_hidden_member_set_count,
+            hidden_member_sets,
+            physical_segments: None,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for SxThRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.header.write_to(writer)?;
+        writer.write_u32(self.flags.bits())?;
+        writer.write_u16(self.axis.bits())?;
+        writer.write_u16(self.reserved)?;
+        writer.write_i32(self.pivot_field_index)?;
+        writer.write_i32(self.axis_field_count)?;
+        writer.write_u16(self.drag_flags.bits())?;
+        self.unique_name.write_to(writer)?;
+        self.display_name.write_to(writer)?;
+        self.default_member.write_to(writer)?;
+        self.all_member.write_to(writer)?;
+        self.dimension_name.write_to(writer)?;
+        writer.write_u32(self.declared_associated_field_count)?;
+        for value in &self.associated_fields {
+            writer.write_i32(*value)?;
+        }
+        writer.write_u32(self.declared_hidden_member_set_count)?;
+        for value in &self.hidden_member_sets {
+            value.write(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for SxPiExRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            header: FrtHeaderOld::read_from(reader)?,
+            hierarchy_index: reader.read_u32()?,
+            unique_name: XlUnicodeString::read_from(reader)?,
+            display_name: XlUnicodeString::read_from(reader)?,
+        };
+        if value.header.record_type != SX_PI_EX {
+            return Err(Error::invalid(position, "SXPIEx FRT record type mismatch"));
+        }
+        validate_pivot_xl_string(&value.unique_name, 0, "SXPIEx unique name")?;
+        validate_pivot_xl_string(&value.display_name, 0, "SXPIEx display name")?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for SxPiExRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if self.header.record_type != SX_PI_EX {
+            return Err(Error::invalid(
+                writer.position()?,
+                "SXPIEx FRT record type mismatch",
+            ));
+        }
+        validate_pivot_xl_string(&self.unique_name, 0, "SXPIEx unique name")?;
+        validate_pivot_xl_string(&self.display_name, 0, "SXPIEx display name")?;
+        self.header.write_to(writer)?;
+        writer.write_u32(self.hierarchy_index)?;
+        self.unique_name.write_to(writer)?;
+        self.display_name.write_to(writer)
+    }
+}
+
+impl SxvdTExRecord {
+    fn from_sequence(
+        first: &[u8],
+        continues: &[ContinueFrtRecord],
+        limits: Limits,
+    ) -> Result<Self> {
+        let (logical, physical_segments) =
+            join_frt_continued_payload(first, continues, limits, "SXVDTEx")?;
+        let mut value: Self = parse_sdk(&logical, 0, SXVD_TEX)?;
+        value.physical_segments = physical_segments;
+        value.validate(0)?;
+        Ok(value)
+    }
+
+    fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
+        encode_frt_continued_payload(
+            SXVD_TEX,
+            encode_sdk(self)?,
+            self.physical_segments.as_deref(),
+            "SXVDTEx",
+        )
+    }
+
+    fn validate(&self, position: u64) -> Result<()> {
+        if self.header.record_type != SXVD_TEX
+            || self.flags.intersects(SxvdTExFlags::RESERVED)
+            || self.hierarchy_index < -1
+            || usize::try_from(self.declared_item_count).ok() != Some(self.item_flags.len())
+            || self
+                .item_flags
+                .iter()
+                .any(|flags| flags.intersects(SxviExFlags::RESERVED1 | SxviExFlags::RESERVED2))
+        {
+            return Err(Error::invalid(position, "SXVDTEx fields are invalid"));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for SxvdTExRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let header = FrtHeaderOld::read_from(reader)?;
+        let flags = SxvdTExFlags::from_bits_retain(reader.read_u16()?);
+        let hierarchy_index = reader.read_u16()? as i16;
+        let level_index = reader.read_i32()?;
+        let declared_item_count = reader.read_i32()?;
+        let count = usize::try_from(declared_item_count)
+            .map_err(|_| Error::invalid(position, "SXVDTEx item count is negative"))?;
+        reader.ensure_allocation(count, 2)?;
+        let mut item_flags = Vec::with_capacity(count);
+        for _ in 0..count {
+            item_flags.push(SxviExFlags::from_bits_retain(reader.read_u16()?));
+        }
+        let value = Self {
+            header,
+            flags,
+            hierarchy_index,
+            level_index,
+            declared_item_count,
+            item_flags,
+            physical_segments: None,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for SxvdTExRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.header.write_to(writer)?;
+        writer.write_u16(self.flags.bits())?;
+        writer.write_u16(self.hierarchy_index as u16)?;
+        writer.write_i32(self.level_index)?;
+        writer.write_i32(self.declared_item_count)?;
+        for flags in &self.item_flags {
+            writer.write_u16(flags.bits())?;
         }
         Ok(())
     }
@@ -11909,31 +18334,582 @@ impl DxfN12List {
     }
 }
 
-impl Feature11AutoFilter {
-    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let declared_size = reader.read_u32()?;
-        let unused = reader.read_u16()?;
-        if declared_size != 0 {
+fn read_feat11_row_ids<R: Read + Seek>(reader: &mut Reader<R>) -> Result<(u16, Vec<u32>)> {
+    let declared_id_count = reader.read_u16()?;
+    reader.ensure_allocation(usize::from(declared_id_count), 4)?;
+    let mut row_ids = Vec::with_capacity(usize::from(declared_id_count));
+    for _ in 0..declared_id_count {
+        row_ids.push(reader.read_u32()?);
+    }
+    Ok((declared_id_count, row_ids))
+}
+
+fn write_feat11_row_ids<W: Write + Seek>(
+    writer: &mut Writer<W>,
+    declared_id_count: u16,
+    row_ids: &[u32],
+) -> Result<()> {
+    if usize::from(declared_id_count) != row_ids.len() {
+        return Err(Error::invalid(
+            writer.position()?,
+            "Feat11 SharePoint row ID count mismatch",
+        ));
+    }
+    writer.write_u16(declared_id_count)?;
+    for row_id in row_ids {
+        writer.write_u32(*row_id)?;
+    }
+    Ok(())
+}
+
+impl SdkRead for Feat11RgSharepointIdDel {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let (declared_id_count, row_ids) = read_feat11_row_ids(reader)?;
+        Ok(Self {
+            declared_id_count,
+            row_ids,
+        })
+    }
+}
+
+impl SdkWrite for Feat11RgSharepointIdDel {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        write_feat11_row_ids(writer, self.declared_id_count, &self.row_ids)
+    }
+}
+
+impl SdkRead for Feat11RgSharepointIdChange {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let (declared_id_count, row_ids) = read_feat11_row_ids(reader)?;
+        Ok(Self {
+            declared_id_count,
+            row_ids,
+        })
+    }
+}
+
+impl SdkWrite for Feat11RgSharepointIdChange {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        write_feat11_row_ids(writer, self.declared_id_count, &self.row_ids)
+    }
+}
+
+impl SdkRead for Feat11RgInvalidCells {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let declared_cell_count = reader.read_u16()?;
+        reader.ensure_allocation(usize::from(declared_cell_count), 8)?;
+        let mut cells = Vec::with_capacity(usize::from(declared_cell_count));
+        for _ in 0..declared_cell_count {
+            cells.push(Feat11CellStruct::read_from(reader)?);
+        }
+        Ok(Self {
+            declared_cell_count,
+            cells,
+        })
+    }
+}
+
+impl SdkWrite for Feat11RgInvalidCells {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if usize::from(self.declared_cell_count) != self.cells.len() {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feat11 invalid cell count mismatch",
+            ));
+        }
+        writer.write_u16(self.declared_cell_count)?;
+        for cell in &self.cells {
+            cell.write_to(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for Feat11XMap {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let declared_entry_count = reader.read_u16()?;
+        if declared_entry_count > 1 {
             return Err(Error::invalid(
                 reader.position()?,
-                "Feature11 embedded AutoFilter criteria are not implemented yet",
+                "Feat11XMap iXmapMac exceeds one entry",
+            ));
+        }
+        reader.ensure_allocation(usize::from(declared_entry_count), 11)?;
+        let mut entries = Vec::with_capacity(usize::from(declared_entry_count));
+        for _ in 0..declared_entry_count {
+            entries.push(Feat11XMapEntry::read_from(reader)?);
+        }
+        Ok(Self {
+            declared_entry_count,
+            entries,
+        })
+    }
+}
+
+impl SdkWrite for Feat11XMap {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if self.declared_entry_count > 1
+            || usize::from(self.declared_entry_count) != self.entries.len()
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feat11XMap entry count is invalid",
+            ));
+        }
+        writer.write_u16(self.declared_entry_count)?;
+        for entry in &self.entries {
+            entry.write_to(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for Feat11XMapEntry {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let flags = Feat11XMapEntryFlags::from_bits_retain(reader.read_u32()?);
+        if !flags.contains(Feat11XMapEntryFlags::LOAD_XMAP) {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feat11XMapEntry fLoadXMap is not set",
+            ));
+        }
+        let details = Feat11XMapEntry2::read_from(reader)?;
+        if details.xpath.text.character_count() >= 32_000 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feat11XMapEntry XPath has 32000 or more characters",
+            ));
+        }
+        Ok(Self { flags, details })
+    }
+}
+
+impl SdkWrite for Feat11XMapEntry {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if !self.flags.contains(Feat11XMapEntryFlags::LOAD_XMAP) {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feat11XMapEntry fLoadXMap is not set",
+            ));
+        }
+        if self.details.xpath.text.character_count() >= 32_000 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feat11XMapEntry XPath has 32000 or more characters",
+            ));
+        }
+        writer.write_u32(self.flags.bits())?;
+        self.details.write_to(writer)
+    }
+}
+
+impl Feat11WssListInfo {
+    fn read<R: Read + Seek>(reader: &mut Reader<R>, web_data_type: u32) -> Result<Self> {
+        let locale_id = reader.read_u32()?;
+        let decimal_places = reader.read_u32()?;
+        let display_flags = Feat11WssDisplayFlags::from_bits_retain(reader.read_u32()?);
+        let validation_flags = Feat11WssValidationFlags::from_bits_retain(reader.read_u32()?);
+        if (display_flags.bits() & Feat11WssDisplayFlags::READING_ORDER_MASK.bits()) >> 3 == 3 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feat11WSSListInfo reading order is reserved",
+            ));
+        }
+        let default_type = ((validation_flags.bits()
+            & Feat11WssValidationFlags::DEFAULT_TYPE_MASK.bits())
+            >> 8) as u8;
+        if validation_flags.contains(Feat11WssValidationFlags::DEFAULT_SET) && default_type > 3 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feat11WSSListInfo default type is invalid",
+            ));
+        }
+        let default_value = match web_data_type {
+            1 => Some(Feat11WssDefaultValue::Text(XlUnicodeString::read_from(
+                reader,
+            )?)),
+            2 => Some(Feat11WssDefaultValue::NumberBits(reader.read_u64()?)),
+            3 => {
+                let value = reader.read_u32()?;
+                if value > 1 {
+                    return Err(Error::invalid(
+                        reader.position()?,
+                        "Feat11WSSListInfo Boolean default is not zero or one",
+                    ));
+                }
+                Some(Feat11WssDefaultValue::Boolean(value))
+            }
+            4 => Some(Feat11WssDefaultValue::DateBits(reader.read_u64()?)),
+            5 | 7 | 9 | 10 => None,
+            6 => Some(Feat11WssDefaultValue::CurrencyBits(reader.read_u64()?)),
+            8 => Some(Feat11WssDefaultValue::Choice(XlUnicodeString::read_from(
+                reader,
+            )?)),
+            11 => Some(Feat11WssDefaultValue::MultiChoice(
+                XlUnicodeString::read_from(reader)?,
+            )),
+            _ => {
+                return Err(Error::invalid(
+                    reader.position()?,
+                    format!("Feat11WSSListInfo lfdt {web_data_type} is invalid"),
+                ));
+            }
+        };
+        if let Some(value) = &default_value {
+            value.validate(reader.position()?)?;
+        }
+        let validation_formula = validation_flags
+            .contains(Feat11WssValidationFlags::LOAD_FORMULA)
+            .then(|| XlUnicodeString::read_from(reader))
+            .transpose()?;
+        let reserved = reader.read_u32()?;
+        Ok(Self {
+            locale_id,
+            decimal_places,
+            display_flags,
+            validation_flags,
+            default_value,
+            validation_formula,
+            reserved,
+        })
+    }
+
+    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>, web_data_type: u32) -> Result<()> {
+        if (self.display_flags.bits() & Feat11WssDisplayFlags::READING_ORDER_MASK.bits()) >> 3 == 3
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feat11WSSListInfo reading order is reserved",
+            ));
+        }
+        let default_type = ((self.validation_flags.bits()
+            & Feat11WssValidationFlags::DEFAULT_TYPE_MASK.bits())
+            >> 8) as u8;
+        if self
+            .validation_flags
+            .contains(Feat11WssValidationFlags::DEFAULT_SET)
+            && default_type > 3
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feat11WSSListInfo default type is invalid",
+            ));
+        }
+        if self
+            .validation_flags
+            .contains(Feat11WssValidationFlags::LOAD_FORMULA)
+            != self.validation_formula.is_some()
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feat11WSSListInfo formula flag disagrees with its field",
+            ));
+        }
+        let value_matches_type = matches!(
+            (&self.default_value, web_data_type),
+            (Some(Feat11WssDefaultValue::Text(_)), 1)
+                | (Some(Feat11WssDefaultValue::NumberBits(_)), 2)
+                | (Some(Feat11WssDefaultValue::Boolean(_)), 3)
+                | (Some(Feat11WssDefaultValue::DateBits(_)), 4)
+                | (None, 5 | 7 | 9 | 10)
+                | (Some(Feat11WssDefaultValue::CurrencyBits(_)), 6)
+                | (Some(Feat11WssDefaultValue::Choice(_)), 8)
+                | (Some(Feat11WssDefaultValue::MultiChoice(_)), 11)
+        );
+        if !value_matches_type {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feat11WSSListInfo default value disagrees with lfdt",
+            ));
+        }
+        if let Some(value) = &self.default_value {
+            value.validate(writer.position()?)?;
+        }
+        writer.write_u32(self.locale_id)?;
+        writer.write_u32(self.decimal_places)?;
+        writer.write_u32(self.display_flags.bits())?;
+        writer.write_u32(self.validation_flags.bits())?;
+        if let Some(value) = &self.default_value {
+            value.write(writer)?;
+        }
+        if let Some(formula) = &self.validation_formula {
+            formula.write_to(writer)?;
+        }
+        writer.write_u32(self.reserved)?;
+        Ok(())
+    }
+}
+
+impl Feat11WssDefaultValue {
+    fn validate(&self, position: u64) -> Result<()> {
+        match self {
+            Self::Text(value) | Self::Choice(value) | Self::MultiChoice(value)
+                if value.text.character_count() > 255 =>
+            {
+                Err(Error::invalid(
+                    position,
+                    "Feat11WSSListInfo string default exceeds 255 characters",
+                ))
+            }
+            Self::Boolean(value) if *value > 1 => Err(Error::invalid(
+                position,
+                "Feat11WSSListInfo Boolean default is not zero or one",
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        match self {
+            Self::Text(value) | Self::Choice(value) | Self::MultiChoice(value) => {
+                value.write_to(writer)
+            }
+            Self::NumberBits(value) | Self::DateBits(value) | Self::CurrencyBits(value) => {
+                writer.write_u64(*value)?;
+                Ok(())
+            }
+            Self::Boolean(value) => {
+                writer.write_u32(*value)?;
+                Ok(())
+            }
+        }
+    }
+}
+
+impl CachedDiskHeader {
+    fn read<R: Read + Seek>(reader: &mut Reader<R>, load_style_name: bool) -> Result<Self> {
+        let declared_format_size = reader.read_u32()?;
+        let format = DxfN12List::read_sized(reader, declared_format_size)?;
+        let style_name = load_style_name
+            .then(|| XlUnicodeString::read_from(reader))
+            .transpose()?;
+        Ok(Self {
+            declared_format_size,
+            format,
+            style_name,
+        })
+    }
+
+    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>, load_style_name: bool) -> Result<()> {
+        if load_style_name != self.style_name.is_some() {
+            return Err(Error::invalid(
+                writer.position()?,
+                "CachedDiskHeader style-name flag disagrees with its field",
+            ));
+        }
+        let bytes = self.format.to_bytes()?;
+        if bytes.len() != usize::try_from(self.declared_format_size).unwrap_or(usize::MAX) {
+            return Err(Error::invalid(
+                writer.position()?,
+                "CachedDiskHeader format size mismatch",
+            ));
+        }
+        writer.write_u32(self.declared_format_size)?;
+        writer.write_all(&bytes)?;
+        if let Some(style_name) = &self.style_name {
+            style_name.write_to(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for ListParsedFormula {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let declared_token_size = reader.read_u16()?;
+        if declared_token_size == 0 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "ListParsedFormula cce must be greater than zero",
+            ));
+        }
+        let formula =
+            FormulaTokenStream::from_bytes(&reader.read_vec(usize::from(declared_token_size))?)?;
+        Ok(Self {
+            declared_token_size,
+            formula,
+        })
+    }
+}
+
+impl SdkWrite for ListParsedFormula {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        let bytes = self.formula.to_bytes()?;
+        if self.declared_token_size == 0 || usize::from(self.declared_token_size) != bytes.len() {
+            return Err(Error::invalid(
+                writer.position()?,
+                "ListParsedFormula cce does not match rgce",
+            ));
+        }
+        writer.write_u16(self.declared_token_size)?;
+        writer.write_all(&bytes)?;
+        Ok(())
+    }
+}
+
+impl SdkRead for ListParsedArrayFormula {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let declared_token_size = reader.read_u16()?;
+        if declared_token_size == 0 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "ListParsedArrayFormula cce must be greater than zero",
+            ));
+        }
+        let mut formula =
+            FormulaTokenStream::from_bytes(&reader.read_vec(usize::from(declared_token_size))?)?;
+        let extra_start = reader.position()?;
+        let remaining = usize::try_from(reader.remaining()?)
+            .map_err(|_| Error::Limit("ListParsedArrayFormula RgbExtra exceeds usize".into()))?;
+        let extra_and_following = reader.read_vec(remaining)?;
+        let following = formula.parse_extra_data(&extra_and_following)?;
+        let consumed = extra_and_following.len() - following.len();
+        reader.seek_to(
+            extra_start
+                .checked_add(consumed as u64)
+                .ok_or_else(|| Error::Limit("ListParsedArrayFormula position overflow".into()))?,
+        )?;
+        if formula.missing_extra_count() != 0 {
+            return Err(Error::invalid(
+                extra_start,
+                "ListParsedArrayFormula is missing required RgbExtra data",
+            ));
+        }
+        Ok(Self {
+            declared_token_size,
+            formula,
+        })
+    }
+}
+
+impl SdkWrite for ListParsedArrayFormula {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        let rgce = self.formula.to_bytes()?;
+        if self.declared_token_size == 0 || usize::from(self.declared_token_size) != rgce.len() {
+            return Err(Error::invalid(
+                writer.position()?,
+                "ListParsedArrayFormula cce does not match rgce",
+            ));
+        }
+        if self.formula.missing_extra_count() != 0 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "ListParsedArrayFormula is missing required RgbExtra data",
+            ));
+        }
+        writer.write_u16(self.declared_token_size)?;
+        writer.write_all(&rgce)?;
+        writer.write_all(&self.formula.extra_data_to_bytes()?)?;
+        Ok(())
+    }
+}
+
+impl SdkRead for Feat11Fmla {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let declared_size = reader.read_u16()?;
+        let mut child = reader.sub_reader(u64::from(declared_size))?;
+        let formula = ListParsedFormula::read_from(&mut child)?;
+        if child.remaining()? != 0 {
+            return Err(Error::invalid(
+                child.position()?,
+                "Feat11Fmla cbFmla does not match rgbFmla",
             ));
         }
         Ok(Self {
             declared_size,
-            unused,
+            formula,
         })
     }
+}
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.declared_size != 0 {
+impl SdkWrite for Feat11Fmla {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        let bytes = encode_sdk(&self.formula)?;
+        if usize::from(self.declared_size) != bytes.len() {
             return Err(Error::invalid(
                 writer.position()?,
-                "Feature11 embedded AutoFilter criteria are not implemented yet",
+                "Feat11Fmla cbFmla does not match rgbFmla",
+            ));
+        }
+        writer.write_u16(self.declared_size)?;
+        writer.write_all(&bytes)?;
+        Ok(())
+    }
+}
+
+impl Feat11TotalFmla {
+    fn read<R: Read + Seek>(reader: &mut Reader<R>, array: bool) -> Result<Self> {
+        if array {
+            Ok(Self::ArrayFormula(ListParsedArrayFormula::read_from(
+                reader,
+            )?))
+        } else {
+            Ok(Self::Formula(ListParsedFormula::read_from(reader)?))
+        }
+    }
+
+    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>, array: bool) -> Result<()> {
+        match (self, array) {
+            (Self::Formula(value), false) => value.write_to(writer),
+            (Self::ArrayFormula(value), true) => value.write_to(writer),
+            _ => Err(Error::invalid(
+                writer.position()?,
+                "Feat11TotalFmla variant disagrees with fLoadTotalArray",
+            )),
+        }
+    }
+}
+
+impl SdkRead for Feature11AutoFilter {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let declared_size = reader.read_u32()?;
+        let unused = reader.read_u16()?;
+        if declared_size > 2080 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feature11 embedded AutoFilter exceeds 2080 bytes",
+            ));
+        }
+        let filter = if declared_size == 0 {
+            None
+        } else {
+            let mut child = reader.sub_reader(u64::from(declared_size))?;
+            let filter = Box::new(AutoFilterRecord::read_from(&mut child)?);
+            if child.remaining()? != 0 {
+                return Err(Error::invalid(
+                    child.position()?,
+                    "Feature11 embedded AutoFilter has trailing bytes",
+                ));
+            }
+            Some(filter)
+        };
+        Ok(Self {
+            declared_size,
+            unused,
+            filter,
+        })
+    }
+}
+
+impl SdkWrite for Feature11AutoFilter {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        let filter_bytes = self
+            .filter
+            .as_deref()
+            .map(encode_sdk)
+            .transpose()?
+            .unwrap_or_default();
+        if filter_bytes.len() != usize::try_from(self.declared_size).unwrap_or(usize::MAX)
+            || self.declared_size > 2080
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feature11 embedded AutoFilter size mismatch",
             ));
         }
         writer.write_u32(self.declared_size)?;
-        writer.write_u16(self.unused)
+        writer.write_u16(self.unused)?;
+        writer.write_all(&filter_bytes)?;
+        Ok(())
     }
 }
 
@@ -11953,6 +18929,18 @@ impl Feature11FieldDataItem {
         let flags = Feature11FieldFlags::from_bits_retain(reader.read_u32()?);
         let insert_row_format_size = reader.read_u32()?;
         let insert_row_style_index = reader.read_u32()?;
+        if source_type != 1 && web_data_type != 0 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feature11 lfdt is nonzero outside a Web data source",
+            ));
+        }
+        if source_type != 2 && xml_data_type != 0 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feature11 lfxidt is nonzero outside an XML data source",
+            ));
+        }
         let field_name = XlUnicodeString::read_from(reader)?;
         let caption = (!table_flags.contains(TableFeatureFlags::SINGLE_CELL))
             .then(|| XlUnicodeString::read_from(reader))
@@ -11965,24 +18953,96 @@ impl Feature11FieldDataItem {
             .transpose()?;
         let auto_filter = flags
             .contains(Feature11FieldFlags::AUTO_FILTER)
-            .then(|| Feature11AutoFilter::read(reader))
+            .then(|| Feature11AutoFilter::read_from(reader))
             .transpose()?;
-        let unsupported_flags = flags
-            & (Feature11FieldFlags::LOAD_XML_MAP
-                | Feature11FieldFlags::LOAD_FORMULA
-                | Feature11FieldFlags::LOAD_TOTAL_FORMULA
-                | Feature11FieldFlags::LOAD_TOTAL_ARRAY
-                | Feature11FieldFlags::SAVE_STYLE_NAME
-                | Feature11FieldFlags::LOAD_TOTAL_STRING);
-        if !unsupported_flags.is_empty() || source_type != 0 || header_row_count == 0 {
+        if source_type > 3 {
             return Err(Error::invalid(
                 reader.position()?,
-                format!(
-                    "Feature11 field requires unimplemented source/header branches: source {source_type}, header rows {header_row_count}, flags 0x{:08x}",
-                    unsupported_flags.bits()
-                ),
+                format!("Feature11 source type {source_type} is invalid"),
             ));
         }
+        if flags.contains(Feature11FieldFlags::LOAD_TOTAL_ARRAY)
+            && !flags.contains(Feature11FieldFlags::LOAD_TOTAL_FORMULA)
+        {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feature11 fLoadTotalArray requires fLoadTotalFmla",
+            ));
+        }
+        if flags.contains(Feature11FieldFlags::LOAD_FORMULA) && source_type != 1 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feature11 fLoadFmla requires a Web data source",
+            ));
+        }
+        if flags.contains(Feature11FieldFlags::LOAD_XML_MAP) && source_type != 2 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feature11 fLoadXmapi requires an XML data source",
+            ));
+        }
+        if flags.contains(Feature11FieldFlags::LOAD_TOTAL_FORMULA) && total_aggregation != 9 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feature11 fLoadTotalFmla requires custom aggregation",
+            ));
+        }
+        if flags.contains(Feature11FieldFlags::LOAD_TOTAL_STRING) && total_aggregation != 0 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feature11 fLoadTotalStr requires no aggregation formula",
+            ));
+        }
+        if source_type == 1 && flags.contains(Feature11FieldFlags::AUTO_CREATE_CALCULATED_COLUMN) {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feature11 Web fields cannot auto-create calculated columns",
+            ));
+        }
+        let xml_map = flags
+            .contains(Feature11FieldFlags::LOAD_XML_MAP)
+            .then(|| Feat11XMap::read_from(reader))
+            .transpose()?;
+        let formula = flags
+            .contains(Feature11FieldFlags::LOAD_FORMULA)
+            .then(|| Feat11Fmla::read_from(reader))
+            .transpose()?;
+        let total_formula = flags
+            .contains(Feature11FieldFlags::LOAD_TOTAL_FORMULA)
+            .then(|| {
+                Feat11TotalFmla::read(
+                    reader,
+                    flags.contains(Feature11FieldFlags::LOAD_TOTAL_ARRAY),
+                )
+            })
+            .transpose()?;
+        let total_text = flags
+            .contains(Feature11FieldFlags::LOAD_TOTAL_STRING)
+            .then(|| XlUnicodeString::read_from(reader))
+            .transpose()?;
+        let wss_info = (source_type == 1)
+            .then(|| Feat11WssListInfo::read(reader, web_data_type))
+            .transpose()?;
+        let query_field_id = (source_type == 3).then(|| reader.read_u32()).transpose()?;
+        if query_field_id == Some(0) {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feature11 qsif must be greater than zero",
+            ));
+        }
+        let has_cached_header =
+            header_row_count == 0 && !table_flags.contains(TableFeatureFlags::SINGLE_CELL);
+        if flags.contains(Feature11FieldFlags::SAVE_STYLE_NAME) && !has_cached_header {
+            return Err(Error::invalid(
+                reader.position()?,
+                "Feature11 fSaveStyleName requires CachedDiskHeader",
+            ));
+        }
+        let cached_header = has_cached_header
+            .then(|| {
+                CachedDiskHeader::read(reader, flags.contains(Feature11FieldFlags::SAVE_STYLE_NAME))
+            })
+            .transpose()?;
         Ok(Self {
             field_id,
             web_data_type,
@@ -11998,6 +19058,13 @@ impl Feature11FieldDataItem {
             aggregate_format,
             insert_row_format,
             auto_filter,
+            xml_map,
+            formula,
+            total_formula,
+            total_text,
+            wss_info,
+            query_field_id,
+            cached_header,
         })
     }
 
@@ -12008,10 +19075,68 @@ impl Feature11FieldDataItem {
         table_flags: TableFeatureFlags,
         header_row_count: u32,
     ) -> Result<()> {
-        if source_type != 0 || header_row_count == 0 {
+        if source_type > 3 {
             return Err(Error::invalid(
                 writer.position()?,
-                "Feature11 source/header branch is not implemented yet",
+                format!("Feature11 source type {source_type} is invalid"),
+            ));
+        }
+        if self.flags.contains(Feature11FieldFlags::LOAD_TOTAL_ARRAY)
+            && !self.flags.contains(Feature11FieldFlags::LOAD_TOTAL_FORMULA)
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feature11 fLoadTotalArray requires fLoadTotalFmla",
+            ));
+        }
+        if self.flags.contains(Feature11FieldFlags::LOAD_FORMULA) && source_type != 1 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feature11 fLoadFmla requires a Web data source",
+            ));
+        }
+        if self.flags.contains(Feature11FieldFlags::LOAD_XML_MAP) && source_type != 2 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feature11 fLoadXmapi requires an XML data source",
+            ));
+        }
+        if self.flags.contains(Feature11FieldFlags::LOAD_TOTAL_FORMULA)
+            && self.total_aggregation != 9
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feature11 fLoadTotalFmla requires custom aggregation",
+            ));
+        }
+        if self.flags.contains(Feature11FieldFlags::LOAD_TOTAL_STRING)
+            && self.total_aggregation != 0
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feature11 fLoadTotalStr requires no aggregation formula",
+            ));
+        }
+        if source_type == 1
+            && self
+                .flags
+                .contains(Feature11FieldFlags::AUTO_CREATE_CALCULATED_COLUMN)
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feature11 Web fields cannot auto-create calculated columns",
+            ));
+        }
+        if source_type != 1 && self.web_data_type != 0 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feature11 lfdt is nonzero outside a Web data source",
+            ));
+        }
+        if source_type != 2 && self.xml_data_type != 0 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feature11 lfxidt is nonzero outside an XML data source",
             ));
         }
         writer.write_u32(self.field_id)?;
@@ -12067,8 +19192,90 @@ impl Feature11FieldDataItem {
                 "Feature11 AutoFilter flag disagrees with its field",
             ));
         }
-        if let Some(auto_filter) = self.auto_filter {
-            auto_filter.write(writer)?;
+        if let Some(auto_filter) = &self.auto_filter {
+            auto_filter.write_to(writer)?;
+        }
+        for (flag, present, label) in [
+            (
+                Feature11FieldFlags::LOAD_XML_MAP,
+                self.xml_map.is_some(),
+                "XML map",
+            ),
+            (
+                Feature11FieldFlags::LOAD_FORMULA,
+                self.formula.is_some(),
+                "formula",
+            ),
+            (
+                Feature11FieldFlags::LOAD_TOTAL_FORMULA,
+                self.total_formula.is_some(),
+                "total formula",
+            ),
+            (
+                Feature11FieldFlags::LOAD_TOTAL_STRING,
+                self.total_text.is_some(),
+                "total text",
+            ),
+        ] {
+            if self.flags.contains(flag) != present {
+                return Err(Error::invalid(
+                    writer.position()?,
+                    format!("Feature11 {label} flag disagrees with its field"),
+                ));
+            }
+        }
+        if let Some(xml_map) = &self.xml_map {
+            xml_map.write_to(writer)?;
+        }
+        if let Some(formula) = &self.formula {
+            formula.write_to(writer)?;
+        }
+        if let Some(total_formula) = &self.total_formula {
+            total_formula.write(
+                writer,
+                self.flags.contains(Feature11FieldFlags::LOAD_TOTAL_ARRAY),
+            )?;
+        }
+        if let Some(total_text) = &self.total_text {
+            total_text.write_to(writer)?;
+        }
+        if (source_type == 1) != self.wss_info.is_some() {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feature11 Web source disagrees with wssInfo",
+            ));
+        }
+        if let Some(wss_info) = &self.wss_info {
+            wss_info.write(writer, self.web_data_type)?;
+        }
+        if (source_type == 3) != self.query_field_id.is_some() || self.query_field_id == Some(0) {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feature11 query source disagrees with qsif",
+            ));
+        }
+        if let Some(query_field_id) = self.query_field_id {
+            writer.write_u32(query_field_id)?;
+        }
+        let has_cached_header =
+            header_row_count == 0 && !table_flags.contains(TableFeatureFlags::SINGLE_CELL);
+        if has_cached_header != self.cached_header.is_some() {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feature11 header state disagrees with CachedDiskHeader",
+            ));
+        }
+        if self.flags.contains(Feature11FieldFlags::SAVE_STYLE_NAME) && !has_cached_header {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Feature11 fSaveStyleName requires CachedDiskHeader",
+            ));
+        }
+        if let Some(cached_header) = &self.cached_header {
+            cached_header.write(
+                writer,
+                self.flags.contains(Feature11FieldFlags::SAVE_STYLE_NAME),
+            )?;
         }
         Ok(())
     }
@@ -12106,19 +19313,6 @@ impl SdkRead for TableFeatureType {
                 format!("TableFeatureType cbFSData is {fixed_data_size}, expected 64"),
             ));
         }
-        let unsupported_table_flags = flags
-            & (TableFeatureFlags::LOAD_DELETED_IDS
-                | TableFeatureFlags::LOAD_CHANGED_IDS
-                | TableFeatureFlags::LOAD_INVALID_CELLS);
-        if !unsupported_table_flags.is_empty() {
-            return Err(Error::invalid(
-                reader.position()?,
-                format!(
-                    "TableFeatureType requires unimplemented trailing arrays 0x{:08x}",
-                    unsupported_table_flags.bits()
-                ),
-            ));
-        }
         let mut fields = Vec::with_capacity(usize::from(field_count));
         reader.ensure_allocation(usize::from(field_count), 36)?;
         for _ in 0..field_count {
@@ -12129,6 +19323,18 @@ impl SdkRead for TableFeatureType {
                 header_row_count,
             )?);
         }
+        let deleted_row_ids = flags
+            .contains(TableFeatureFlags::LOAD_DELETED_IDS)
+            .then(|| Feat11RgSharepointIdDel::read_from(reader))
+            .transpose()?;
+        let changed_row_ids = flags
+            .contains(TableFeatureFlags::LOAD_CHANGED_IDS)
+            .then(|| Feat11RgSharepointIdChange::read_from(reader))
+            .transpose()?;
+        let invalid_cells = flags
+            .contains(TableFeatureFlags::LOAD_INVALID_CELLS)
+            .then(|| Feat11RgInvalidCells::read_from(reader))
+            .transpose()?;
         Ok(Self {
             source_type,
             list_id,
@@ -12149,6 +19355,9 @@ impl SdkRead for TableFeatureType {
             csp_name,
             entry_id,
             fields,
+            deleted_row_ids,
+            changed_row_ids,
+            invalid_cells,
         })
     }
 }
@@ -12171,6 +19380,21 @@ impl SdkWrite for TableFeatureType {
                 TableFeatureFlags::LOAD_ENTRY_ID,
                 self.entry_id.is_some(),
                 "entry ID",
+            ),
+            (
+                TableFeatureFlags::LOAD_DELETED_IDS,
+                self.deleted_row_ids.is_some(),
+                "deleted row IDs",
+            ),
+            (
+                TableFeatureFlags::LOAD_CHANGED_IDS,
+                self.changed_row_ids.is_some(),
+                "changed row IDs",
+            ),
+            (
+                TableFeatureFlags::LOAD_INVALID_CELLS,
+                self.invalid_cells.is_some(),
+                "invalid cells",
             ),
         ] {
             if self.flags.contains(flag) != present {
@@ -12204,6 +19428,15 @@ impl SdkWrite for TableFeatureType {
         }
         for field in &self.fields {
             field.write(writer, self.source_type, self.flags, self.header_row_count)?;
+        }
+        if let Some(deleted_row_ids) = &self.deleted_row_ids {
+            deleted_row_ids.write_to(writer)?;
+        }
+        if let Some(changed_row_ids) = &self.changed_row_ids {
+            changed_row_ids.write_to(writer)?;
+        }
+        if let Some(invalid_cells) = &self.invalid_cells {
+            invalid_cells.write_to(writer)?;
         }
         Ok(())
     }
@@ -12280,6 +19513,52 @@ impl SdkWrite for Feature11Record {
         }
         writer.write_all(&feature_bytes)?;
         Ok(())
+    }
+}
+
+impl Feature12Record {
+    fn validate(&self, position: u64) -> Result<()> {
+        if self.feature.header.record_type != FEATURE12 {
+            return Err(Error::invalid(
+                position,
+                "Feature12 FRT record type mismatch",
+            ));
+        }
+        let table = &self.feature.feature;
+        let has_extended_property = table.source_type == 3
+            || (table.header_row_count == 0
+                && !table.flags.contains(TableFeatureFlags::SINGLE_CELL))
+            || table.fields.iter().any(|field| {
+                field.flags.intersects(
+                    Feature11FieldFlags::LOAD_TOTAL_FORMULA
+                        | Feature11FieldFlags::LOAD_TOTAL_STRING,
+                )
+            });
+        if !has_extended_property {
+            return Err(Error::invalid(
+                position,
+                "Feature12 has no Feature12-only table property",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for Feature12Record {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            feature: Feature11Record::read_from(reader)?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for Feature12Record {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.feature.write_to(writer)
     }
 }
 
@@ -15476,6 +22755,29 @@ impl<'a> SstSequenceCursor<'a> {
         Ok(bytes)
     }
 
+    fn read_remaining_plain(&mut self, limits: Limits, context: &str) -> Result<Vec<u8>> {
+        let remaining = self.segments[self.segment_index..]
+            .iter()
+            .enumerate()
+            .try_fold(0usize, |total, (index, segment)| {
+                let count = if index == 0 {
+                    segment.len() - self.offset
+                } else {
+                    segment.len()
+                };
+                total
+                    .checked_add(count)
+                    .ok_or_else(|| Error::Limit(format!("{context} length overflow")))
+            })?;
+        if remaining > limits.max_allocation {
+            return Err(Error::Limit(format!(
+                "{context} exceeds {} bytes",
+                limits.max_allocation
+            )));
+        }
+        self.read_bytes(remaining, context)
+    }
+
     fn read_characters(
         &mut self,
         character_count: usize,
@@ -15582,6 +22884,78 @@ impl<'a> SstSequenceCursor<'a> {
         })
     }
 
+    fn read_rich_extended_string(&mut self, limits: Limits) -> Result<XlUnicodeRichExtendedString> {
+        let fixed = self.read_contiguous(3, "revision rich-string header")?;
+        let declared_character_count = u16::from_le_bytes([fixed[0], fixed[1]]);
+        let flags = SstStringFlags::from_bits_retain(fixed[2]);
+        if flags.bits() & !0x0d != 0 {
+            return Err(Error::invalid(
+                0,
+                "revision rich-string reserved flags are nonzero",
+            ));
+        }
+        let declared_format_run_count = flags
+            .contains(SstStringFlags::RICH_TEXT)
+            .then(|| self.read_u16("revision rich-text run count"))
+            .transpose()?;
+        let declared_extension_length = flags
+            .contains(SstStringFlags::EXTENDED)
+            .then(|| self.read_u32("revision rich-string extension length"))
+            .transpose()?;
+        let character_chunks = self.read_characters(
+            usize::from(declared_character_count),
+            flags.bits() & SstStringFlags::HIGH_BYTE.bits(),
+        )?;
+        let run_count = usize::from(declared_format_run_count.unwrap_or(0));
+        if run_count > limits.max_entries {
+            return Err(Error::Limit(format!(
+                "revision rich-text run count exceeds {}",
+                limits.max_entries
+            )));
+        }
+        let mut format_runs = Vec::with_capacity(run_count);
+        for _ in 0..run_count {
+            format_runs.push(FormatRun {
+                character_index: self.read_u16("revision format-run character index")?,
+                font_index: self.read_u16("revision format-run font index")?,
+            });
+        }
+        let extension_length = usize::try_from(declared_extension_length.unwrap_or(0))
+            .map_err(|_| Error::Limit("revision rich-string extension exceeds usize".into()))?;
+        if extension_length > limits.max_allocation {
+            return Err(Error::Limit(format!(
+                "revision rich-string extension exceeds {}",
+                limits.max_allocation
+            )));
+        }
+        let extension = if declared_extension_length.is_some() {
+            match SstExtensionData::from_bytes(
+                self.read_bytes(extension_length, "revision rich-string extension")?,
+            ) {
+                SstExtensionData::ExtRst(value) => Some(value),
+                _ => {
+                    return Err(Error::invalid(
+                        0,
+                        "revision rich-string ExtRst is malformed",
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let value = XlUnicodeRichExtendedString {
+            declared_character_count,
+            flags,
+            declared_format_run_count,
+            declared_extension_length,
+            character_chunks,
+            format_runs,
+            extension,
+        };
+        value.validate(0)?;
+        Ok(value)
+    }
+
     fn read_trailing(mut self) -> Result<(Vec<u8>, Vec<SstSegmentLayout>)> {
         let mut trailing = Vec::new();
         loop {
@@ -15608,6 +22982,181 @@ impl<'a> SstSequenceCursor<'a> {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok((trailing, layouts))
+    }
+}
+
+impl RrdCellValue {
+    fn read_from_sequence(
+        cursor: &mut SstSequenceCursor<'_>,
+        kind: u16,
+        old_size: Option<u32>,
+        limits: Limits,
+    ) -> Result<Self> {
+        if kind == 0 {
+            return Ok(Self::Blank);
+        }
+        if kind == 3 {
+            return cursor.read_rich_extended_string(limits).map(Self::String);
+        }
+        let byte_count = match kind {
+            1 => 4,
+            2 => 8,
+            4 => 2,
+            5 => match old_size {
+                Some(size) => usize::try_from(size)
+                    .map_err(|_| Error::Limit("old revision formula exceeds usize".into()))?,
+                None => {
+                    let bytes = cursor.read_remaining_plain(limits, "new revision formula")?;
+                    let mut reader = Reader::new(Cursor::new(bytes))?;
+                    return Self::read(&mut reader, kind, None);
+                }
+            },
+            _ => return Err(Error::invalid(0, "revision cell value type is invalid")),
+        };
+        if byte_count > limits.max_allocation {
+            return Err(Error::Limit(format!(
+                "revision cell value exceeds {} bytes",
+                limits.max_allocation
+            )));
+        }
+        let bytes = cursor.read_bytes(byte_count, "revision cell value")?;
+        let mut reader = Reader::new(Cursor::new(bytes))?;
+        let value = Self::read(&mut reader, kind, old_size)?;
+        if reader.remaining()? != 0 {
+            return Err(Error::invalid(0, "revision cell value has trailing bytes"));
+        }
+        Ok(value)
+    }
+}
+
+impl RrdChgCellRecord {
+    fn from_sequence(first: &[u8], continues: &[&[u8]], limits: Limits) -> Result<Self> {
+        let total_len = std::iter::once(first)
+            .chain(continues.iter().copied())
+            .try_fold(0usize, |total, segment| {
+                total
+                    .checked_add(segment.len())
+                    .ok_or_else(|| Error::Limit("RRDChgCell physical length overflow".into()))
+            })?;
+        if total_len > limits.max_allocation {
+            return Err(Error::Limit(format!(
+                "RRDChgCell physical data exceeds {} bytes",
+                limits.max_allocation
+            )));
+        }
+        let mut joined = Vec::with_capacity(total_len);
+        joined.extend_from_slice(first);
+        for segment in continues {
+            joined.extend_from_slice(segment);
+        }
+        let mut reader = Reader::new(Cursor::new(joined))?;
+        let prefix = RrdChgCellPrefix::read(&mut reader)?;
+        let prefix_len = usize::try_from(reader.position()?)
+            .map_err(|_| Error::Limit("RRDChgCell prefix exceeds usize".into()))?;
+
+        let mut segments = Vec::with_capacity(continues.len() + 1);
+        segments.push(first);
+        segments.extend_from_slice(continues);
+        let mut cursor = SstSequenceCursor::new(segments)?;
+        cursor.read_bytes(prefix_len, "RRDChgCell prefix")?;
+        let old_value = RrdCellValue::read_from_sequence(
+            &mut cursor,
+            prefix.old_kind,
+            Some(prefix.declared_old_value_size),
+            limits,
+        )?;
+        let new_value =
+            RrdCellValue::read_from_sequence(&mut cursor, prefix.new_kind, None, limits)?;
+        let (trailing, layouts) = cursor.read_trailing()?;
+        if !trailing.is_empty() {
+            return Err(Error::invalid(0, "RRDChgCell has trailing bytes"));
+        }
+        let physical_segments = layouts
+            .into_iter()
+            .map(|layout| RrdChgCellSegmentLayout {
+                logical_byte_count: layout.logical_byte_count,
+                continuation_encoding: layout.continuation_encoding,
+            })
+            .collect();
+        let value = prefix.finish(old_value, new_value, Some(physical_segments));
+        value.validate(0)?;
+        Ok(value)
+    }
+
+    fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
+        let logical = encode_sdk(self)?;
+        let Some(layouts) = &self.physical_segments else {
+            if logical.len() > MAX_BIFF_RECORD_DATA {
+                return Err(Error::invalid(
+                    0,
+                    "RRDChgCell exceeds one BIFF record and has no physical layout",
+                ));
+            }
+            return Ok(vec![EncodedBiffRecord {
+                record_type: RRD_CHG_CELL,
+                payload: logical,
+            }]);
+        };
+        if layouts.is_empty()
+            || layouts.iter().try_fold(0usize, |total, layout| {
+                total
+                    .checked_add(usize::from(layout.logical_byte_count))
+                    .ok_or_else(|| Error::Limit("RRDChgCell layout length overflow".into()))
+            })? != logical.len()
+        {
+            return Err(Error::invalid(
+                0,
+                "RRDChgCell physical layout does not match logical bytes",
+            ));
+        }
+        let mut offset = 0usize;
+        let mut encoded = Vec::with_capacity(layouts.len());
+        for (index, layout) in layouts.iter().enumerate() {
+            if index == 0 && layout.continuation_encoding.is_some() {
+                return Err(Error::invalid(
+                    0,
+                    "first RRDChgCell segment has a continuation encoding",
+                ));
+            }
+            if layout
+                .continuation_encoding
+                .is_some_and(|encoding| encoding > 1)
+            {
+                return Err(Error::invalid(
+                    0,
+                    "RRDChgCell continuation encoding is invalid",
+                ));
+            }
+            let end = offset + usize::from(layout.logical_byte_count);
+            let mut payload = Vec::with_capacity(
+                usize::from(layout.logical_byte_count)
+                    + usize::from(layout.continuation_encoding.is_some()),
+            );
+            if let Some(encoding) = layout.continuation_encoding {
+                payload.push(encoding);
+            }
+            payload.extend_from_slice(&logical[offset..end]);
+            if payload.len() > MAX_BIFF_RECORD_DATA {
+                return Err(Error::invalid(0, "RRDChgCell segment exceeds 8224 bytes"));
+            }
+            encoded.push(EncodedBiffRecord {
+                record_type: if index == 0 { RRD_CHG_CELL } else { CONTINUE },
+                payload,
+            });
+            offset = end;
+        }
+        let continues = encoded[1..]
+            .iter()
+            .map(|record| record.payload.as_slice())
+            .collect::<Vec<_>>();
+        let reparsed = Self::from_sequence(&encoded[0].payload, &continues, Limits::default())?;
+        if reparsed != *self {
+            return Err(Error::invalid(
+                0,
+                "RRDChgCell physical layout disagrees with character chunk boundaries",
+            ));
+        }
+        Ok(encoded)
     }
 }
 
@@ -15794,6 +23343,14 @@ impl BiffStream {
     }
 
     pub fn from_bytes_with_limits(bytes: &[u8], limits: Limits) -> Result<Self> {
+        Self::from_bytes_with_mode(bytes, limits, None)
+    }
+
+    fn from_bytes_with_mode(
+        bytes: &[u8],
+        limits: Limits,
+        forced_biff8: Option<bool>,
+    ) -> Result<Self> {
         if bytes.len() as u64 > limits.max_stream_size {
             return Err(Error::Limit(format!(
                 "BIFF stream length {} exceeds {}",
@@ -15804,12 +23361,25 @@ impl BiffStream {
         let mut records = Vec::new();
         let mut cursor = 0usize;
         let mut encrypted = false;
-        let mut biff8 = false;
+        let detect_biff8 = forced_biff8.is_none();
+        let mut biff8 = forced_biff8.unwrap_or(false);
         let mut sx_li_dimensions: Option<(u16, u16, u8)> = None;
+        let mut sx_dbb_context: Option<SxDbbContext> = None;
+        let mut rrd_rst_etxp_context: Option<RrdRstEtxpContext> = None;
+        let mut rrd_info_version = None;
+        let mut mdx_string_count = 0i32;
         while cursor < bytes.len() {
             if bytes[cursor..].iter().all(|value| *value == 0) {
+                if rrd_rst_etxp_context.is_some() {
+                    return Err(Error::invalid(
+                        cursor as u64,
+                        "RRDChgCell lacks its declared RRDRstEtxp records",
+                    ));
+                }
                 if biff8 {
                     stitch_continued_records(&mut records, limits)?;
+                    validate_pivot_view_extensions(&records)?;
+                    validate_function_groups_and_table_styles(&records)?;
                 }
                 return Ok(Self {
                     records,
@@ -15826,10 +23396,61 @@ impl BiffStream {
                 ));
             }
             let payload = take_bytes(bytes, &mut cursor, size, "truncated BIFF record data")?;
+            let mut rrd_chg_cell_continues = Vec::new();
+            if record_type == RRD_CHG_CELL && biff8 && !encrypted {
+                let mut scan = cursor;
+                while scan + 4 <= bytes.len()
+                    && u16::from_le_bytes([bytes[scan], bytes[scan + 1]]) == CONTINUE
+                {
+                    let continue_offset = scan;
+                    scan += 2;
+                    let continue_size =
+                        usize::from(u16::from_le_bytes([bytes[scan], bytes[scan + 1]]));
+                    scan += 2;
+                    if continue_size > MAX_BIFF_RECORD_DATA {
+                        return Err(Error::invalid(
+                            continue_offset as u64 + 2,
+                            "BIFF Continue data exceeds 8224 bytes",
+                        ));
+                    }
+                    let continue_payload = take_bytes(
+                        bytes,
+                        &mut scan,
+                        continue_size,
+                        "truncated RRDChgCell Continue data",
+                    )?;
+                    rrd_chg_cell_continues.push(continue_payload);
+                    if rrd_chg_cell_continues.len() > limits.max_entries {
+                        return Err(Error::Limit(format!(
+                            "RRDChgCell Continue count exceeds {}",
+                            limits.max_entries
+                        )));
+                    }
+                }
+                cursor = scan;
+            }
+            if rrd_rst_etxp_context.is_some() && record_type != RRD_RST_ETXP {
+                return Err(Error::invalid(
+                    offset as u64,
+                    "RRDChgCell RRDRstEtxp records are not contiguous",
+                ));
+            }
             if record_type == BOF {
                 sx_li_dimensions = None;
+                sx_dbb_context = None;
+                rrd_info_version = None;
             }
-            let data = if record_type == SX_LI && biff8 && !encrypted {
+            let data = if record_type == RRD_CHG_CELL
+                && biff8
+                && !encrypted
+                && !rrd_chg_cell_continues.is_empty()
+            {
+                BiffRecordData::RrdChgCell(Box::new(RrdChgCellRecord::from_sequence(
+                    payload,
+                    &rrd_chg_cell_continues,
+                    limits,
+                )?))
+            } else if record_type == SX_LI && biff8 && !encrypted {
                 let (row_dimensions, column_dimensions, next_axis) =
                     sx_li_dimensions.as_mut().ok_or_else(|| {
                         Error::invalid(
@@ -15849,10 +23470,15 @@ impl BiffStream {
                 };
                 *next_axis += 1;
                 BiffRecordData::SxLi(parse_sx_li(payload, offset, axis_dimension_count)?)
+            } else if record_type == SX_DBB && biff8 && !encrypted {
+                let context = sx_dbb_context.as_ref().ok_or_else(|| {
+                    Error::invalid(offset as u64, "SXDBB has no preceding SXDB context")
+                })?;
+                BiffRecordData::SxDbb(SxDbbRecord::from_bytes(payload, context, offset + 4)?)
             } else {
                 decode_record(record_type, payload, encrypted, biff8, offset)?
             };
-            if records.is_empty() {
+            if records.is_empty() && detect_biff8 {
                 biff8 = matches!(
                     &data,
                     BiffRecordData::Bof(BofRecord {
@@ -15867,6 +23493,52 @@ impl BiffStream {
             if let BiffRecordData::SxView(view) = &data {
                 sx_li_dimensions = Some((view.row_field_count, view.column_field_count, 0));
             }
+            match &data {
+                BiffRecordData::SxDb(value) => {
+                    sx_dbb_context = Some(SxDbbContext::from_db(value)?);
+                }
+                BiffRecordData::SxFdb(value) => {
+                    if let Some(context) = &mut sx_dbb_context {
+                        context.observe_field(value);
+                    }
+                }
+                _ => {}
+            }
+            match &data {
+                BiffRecordData::RrdInfo(value) => rrd_info_version = Some(value.biff_version),
+                BiffRecordData::RrdTqsif(value)
+                    if !value.matches_revision_version(rrd_info_version) =>
+                {
+                    return Err(Error::invalid(
+                        offset as u64,
+                        "RRDTQSIF range does not match RRDInfo wXLVer",
+                    ));
+                }
+                _ => {}
+            }
+            data.validate_mdx_string_references(mdx_string_count, offset as u64)?;
+            if matches!(&data, BiffRecordData::MdxStr(_)) {
+                mdx_string_count = mdx_string_count
+                    .checked_add(1)
+                    .ok_or_else(|| Error::Limit("MDXStr record count exceeds i32".into()))?;
+            }
+            match &data {
+                BiffRecordData::RrdChgCell(value) => {
+                    rrd_rst_etxp_context = RrdRstEtxpContext::new(value.font_reset_count);
+                }
+                BiffRecordData::RrdRstEtxp(value) => {
+                    let complete = rrd_rst_etxp_context
+                        .as_mut()
+                        .ok_or_else(|| {
+                            Error::invalid(offset as u64, "RRDRstEtxp has no preceding RRDChgCell")
+                        })?
+                        .observe(value, offset as u64)?;
+                    if complete {
+                        rrd_rst_etxp_context = None;
+                    }
+                }
+                _ => {}
+            }
             records.push(BiffRecord {
                 offset: u32::try_from(offset)
                     .map_err(|_| Error::Limit("BIFF record offset exceeds u32".into()))?,
@@ -15879,8 +23551,16 @@ impl BiffStream {
                 )));
             }
         }
+        if rrd_rst_etxp_context.is_some() {
+            return Err(Error::invalid(
+                cursor as u64,
+                "RRDChgCell lacks its declared RRDRstEtxp records",
+            ));
+        }
         if biff8 {
             stitch_continued_records(&mut records, limits)?;
+            validate_pivot_view_extensions(&records)?;
+            validate_function_groups_and_table_styles(&records)?;
         }
         Ok(Self {
             records,
@@ -15889,7 +23569,13 @@ impl BiffStream {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        validate_pivot_view_extensions(&self.records)?;
+        validate_function_groups_and_table_styles(&self.records)?;
         let mut bytes = Vec::new();
+        let mut sx_dbb_context: Option<SxDbbContext> = None;
+        let mut rrd_rst_etxp_context: Option<RrdRstEtxpContext> = None;
+        let mut rrd_info_version = None;
+        let mut mdx_string_count = 0i32;
         for record in &self.records {
             if usize::try_from(record.offset).ok() != Some(bytes.len()) {
                 return Err(Error::invalid(
@@ -15897,6 +23583,43 @@ impl BiffStream {
                     "BIFF record offset changed",
                 ));
             }
+            if matches!(&record.data, BiffRecordData::Bof(_)) {
+                sx_dbb_context = None;
+                rrd_info_version = None;
+            }
+            if rrd_rst_etxp_context.is_some()
+                && !matches!(&record.data, BiffRecordData::RrdRstEtxp(_))
+            {
+                return Err(Error::invalid(
+                    record.offset as u64,
+                    "RRDChgCell RRDRstEtxp records are not contiguous",
+                ));
+            }
+            if matches!(&record.data, BiffRecordData::RrdRstEtxp(_))
+                && rrd_rst_etxp_context.is_none()
+            {
+                return Err(Error::invalid(
+                    record.offset as u64,
+                    "RRDRstEtxp has no preceding RRDChgCell",
+                ));
+            }
+            if let BiffRecordData::SxDbb(value) = &record.data {
+                sx_dbb_context
+                    .as_ref()
+                    .ok_or_else(|| Error::invalid(record.offset as u64, "SXDBB has no SXDB"))?
+                    .validate_record(value)?;
+            }
+            if let BiffRecordData::RrdTqsif(value) = &record.data
+                && !value.matches_revision_version(rrd_info_version)
+            {
+                return Err(Error::invalid(
+                    record.offset as u64,
+                    "RRDTQSIF range does not match RRDInfo wXLVer",
+                ));
+            }
+            record
+                .data
+                .validate_mdx_string_references(mdx_string_count, record.offset as u64)?;
             for encoded in record.data.encode_physical()? {
                 if encoded.payload.len() > MAX_BIFF_RECORD_DATA {
                     return Err(Error::invalid(
@@ -15908,6 +23631,43 @@ impl BiffStream {
                 bytes.extend_from_slice(&(encoded.payload.len() as u16).to_le_bytes());
                 bytes.extend_from_slice(&encoded.payload);
             }
+            match &record.data {
+                BiffRecordData::SxDb(value) => {
+                    sx_dbb_context = Some(SxDbbContext::from_db(value)?);
+                }
+                BiffRecordData::SxFdb(value) => {
+                    if let Some(context) = &mut sx_dbb_context {
+                        context.observe_field(value);
+                    }
+                }
+                BiffRecordData::RrdChgCell(value) => {
+                    rrd_rst_etxp_context = RrdRstEtxpContext::new(value.font_reset_count);
+                }
+                BiffRecordData::RrdRstEtxp(value) => {
+                    let complete = rrd_rst_etxp_context
+                        .as_mut()
+                        .expect("RRDRstEtxp context was checked above")
+                        .observe(value, record.offset as u64)?;
+                    if complete {
+                        rrd_rst_etxp_context = None;
+                    }
+                }
+                BiffRecordData::RrdInfo(value) => {
+                    rrd_info_version = Some(value.biff_version);
+                }
+                BiffRecordData::MdxStr(_) => {
+                    mdx_string_count = mdx_string_count
+                        .checked_add(1)
+                        .ok_or_else(|| Error::Limit("MDXStr record count exceeds i32".into()))?;
+                }
+                _ => {}
+            }
+        }
+        if rrd_rst_etxp_context.is_some() {
+            return Err(Error::invalid(
+                bytes.len() as u64,
+                "RRDChgCell lacks its declared RRDRstEtxp records",
+            ));
         }
         bytes.extend_from_slice(&self.trailing_padding);
         Ok(bytes)
@@ -15934,8 +23694,89 @@ impl BiffStream {
     }
 }
 
+impl RevisionLogStream {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Self::from_bytes_with_limits(bytes, Limits::default())
+    }
+
+    pub fn from_bytes_with_limits(bytes: &[u8], limits: Limits) -> Result<Self> {
+        let stream = BiffStream::from_bytes_with_mode(bytes, limits, Some(true))?;
+        Ok(Self {
+            records: stream.records,
+            trailing_padding: stream.trailing_padding,
+        })
+    }
+
+    pub fn open(compound_file: &CompoundFile) -> Result<Option<Self>> {
+        compound_file
+            .stream(REVISION_LOG_STREAM_PATH)
+            .map(Self::from_bytes)
+            .transpose()
+    }
+
+    pub fn save(&self, compound_file: &mut CompoundFile) -> Result<()> {
+        let bytes = self.to_bytes()?;
+        compound_file.replace_stream(REVISION_LOG_STREAM_PATH, bytes)?;
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        BiffStream {
+            records: self.records.clone(),
+            trailing_padding: self.trailing_padding.clone(),
+        }
+        .to_bytes()
+    }
+}
+
 impl BiffRecordData {
+    fn validate_mdx_string_references(&self, available: i32, position: u64) -> Result<()> {
+        let validate = |value: MdxStringIndex| {
+            if value.index >= available {
+                Err(Error::invalid(
+                    position,
+                    "MDX string index does not reference a preceding MDXStr record",
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        match self {
+            Self::MdxTuple(value) => {
+                validate(value.connection_name)?;
+                for index in &value.strings {
+                    validate(*index)?;
+                }
+            }
+            Self::MdxSet(value) => {
+                validate(value.connection_name)?;
+                validate(value.set_definition)?;
+                for index in &value.strings {
+                    validate(*index)?;
+                }
+            }
+            Self::MdxProp(value) => {
+                validate(value.connection_name)?;
+                validate(value.member_name)?;
+                validate(value.property_name)?;
+            }
+            Self::MdxKpi(value) => {
+                validate(value.connection_name)?;
+                validate(value.kpi_name)?;
+                validate(value.kpi_member)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
+        if let Self::SxTh(value) = self {
+            return value.encode_physical();
+        }
+        if let Self::SxvdTEx(value) = self {
+            return value.encode_physical();
+        }
         if let Self::StringValue(value) = self {
             return value.encode_physical();
         }
@@ -15958,6 +23799,9 @@ impl BiffRecordData {
             return value.encode_physical();
         }
         if let Self::Txo(value) = self {
+            return value.encode_physical();
+        }
+        if let Self::RrdChgCell(value) = self {
             return value.encode_physical();
         }
         if let Self::MsoDrawingGroup(value) = self {
@@ -16005,6 +23849,8 @@ impl BiffRecordData {
                     .ok_or_else(|| Error::invalid(0, "Name has no physical segments"))?;
                 (NAME, first.payload)
             }
+            Self::NameFnGrp12(value) => (NAME_FN_GRP12, encode_sdk(value)?),
+            Self::NamePublish(value) => (NAME_PUBLISH, encode_sdk(value)?),
             Self::Pls(value) => {
                 let first = value
                     .encode_physical()?
@@ -16012,6 +23858,20 @@ impl BiffRecordData {
                     .next()
                     .ok_or_else(|| Error::invalid(0, "Pls has no physical segments"))?;
                 (PLS, first.payload)
+            }
+            Self::FnGroupName(value) => {
+                value.validate()?;
+                (FN_GROUP_NAME, encode_sdk(value)?)
+            }
+            Self::FnGrp12(value) => (FN_GRP12, encode_sdk(value)?),
+            Self::Lpr(value) => (LPR, encode_sdk(value)?),
+            Self::RecipName(value) => {
+                value.validate()?;
+                (RECIP_NAME, encode_sdk(value)?)
+            }
+            Self::Lel(value) => {
+                value.validate()?;
+                (LEL, encode_sdk(value)?)
             }
             Self::MsoDrawingGroup(value) => {
                 let first = value
@@ -16045,13 +23905,18 @@ impl BiffRecordData {
             Self::HorizontalPageBreaks(value) => (HORIZONTAL_PAGE_BREAKS, encode_sdk(value)?),
             Self::DCon(value) => (DCON, encode_sdk(value)?),
             Self::DConRef(value) => (DCON_REF, encode_sdk(value)?),
+            Self::DConName(value) => (DCON_NAME, encode_sdk(value)?),
+            Self::DConBin(value) => (DCON_BIN, encode_sdk(value)?),
             Self::DConn(value) => (DCONN, encode_sdk(value)?),
             Self::TextQuery(value) => (TXT_QRY, encode_sdk(value)?),
             Self::QsiSxTag(value) => (QSI_SX_TAG, encode_sdk(value)?),
             Self::SxViewEx9(value) => (SX_VIEW_EX9, encode_sdk(value)?),
             Self::DbQueryExt(value) => (DB_QUERY_EXT, encode_sdk(value)?),
             Self::HyperlinkTooltip(value) => (HLINK_TOOLTIP, encode_sdk(value)?),
+            Self::ContinueFrt(value) => (CONTINUE_FRT, encode_sdk(value)?),
+            Self::ContinueFrt11(value) => (CONTINUE_FRT11, encode_sdk(value)?),
             Self::ContinueFrt12(value) => (CONTINUE_FRT12, encode_sdk(value)?),
+            Self::CrtMlFrtContinue(value) => (CRT_ML_FRT_CONTINUE, encode_sdk(value)?),
             Self::SxAddl(value) => (SX_ADDL, encode_sdk(value)?),
             Self::EntExU2(value) => (ENT_EX_U2, encode_sdk(value)?),
             Self::BkHim(value) => {
@@ -16086,7 +23951,38 @@ impl BiffRecordData {
             Self::OleObjectSize(value) => (OLE_OBJECT_SIZE, encode_sdk(value)?),
             Self::MsoDrawingSelection(value) => (MSO_DRAWING_SELECTION, encode_sdk(value)?),
             Self::ScenMan(value) => (SCEN_MAN, encode_sdk(value)?),
+            Self::Scenario(value) => (SCENARIO, encode_sdk(value)?),
+            Self::CUsr(value) => (C_USR, encode_sdk(value)?),
+            Self::CbUsr(value) => (CB_USR, encode_sdk(value)?),
+            Self::UsrInfo(value) => (USR_INFO, encode_sdk(value)?),
+            Self::UsrExcl(value) => (USR_EXCL, encode_sdk(value)?),
+            Self::FileLock(value) => (FILE_LOCK, encode_sdk(value)?),
+            Self::BCUsrs(value) => (BC_USRS, encode_sdk(value)?),
+            Self::UsrChk(value) => (USR_CHK, encode_sdk(value)?),
+            Self::RrdHead(value) => (RRD_HEAD, encode_sdk(value)?),
+            Self::RrdInsDel(value) => (RRD_INS_DEL, encode_sdk(value)?),
+            Self::RrdRenSheet(value) => (RRD_REN_SHEET, encode_sdk(value)?),
+            Self::RrSort(value) => (RR_SORT, encode_sdk(value)?),
+            Self::RrdMove(value) => (RRD_MOVE, encode_sdk(value)?),
+            Self::RrdChgCell(value) => (RRD_CHG_CELL, encode_sdk(value.as_ref())?),
+            Self::RrdRstEtxp(value) => (RRD_RST_ETXP, encode_sdk(value)?),
+            Self::RrdTqsif(value) => (RRD_TQSIF, encode_sdk(value)?),
+            Self::RrdDefName(value) => (RRD_DEF_NAME, encode_sdk(value.as_ref())?),
+            Self::RrFormat(value) => (RR_FORMAT, encode_sdk(value)?),
+            Self::RrAutoFmt(value) => (RR_AUTO_FMT, encode_sdk(value)?),
+            Self::RrInsertSh(value) => (RR_INSERT_SH, encode_sdk(value)?),
+            Self::RrdMoveBegin => (RRD_MOVE_BEGIN, Vec::new()),
+            Self::RrdMoveEnd => (RRD_MOVE_END, Vec::new()),
+            Self::RrdInsDelBegin => (RRD_INS_DEL_BEGIN, Vec::new()),
+            Self::RrdInsDelEnd => (RRD_INS_DEL_END, Vec::new()),
+            Self::RrdConflict(value) => (RRD_CONFLICT, encode_sdk(value)?),
+            Self::RrdInfo(value) => (RRD_INFO, encode_sdk(value)?),
+            Self::RrdUserView(value) => (RRD_USER_VIEW, encode_sdk(value)?),
             Self::SxView(value) => (SX_VIEW, encode_sdk(value)?),
+            Self::SxViewEx(value) => (SX_VIEW_EX, encode_sdk(value)?),
+            Self::SxTh(value) => (SX_TH, encode_sdk(value)?),
+            Self::SxPiEx(value) => (SX_PI_EX, encode_sdk(value)?),
+            Self::SxvdTEx(value) => (SXVD_TEX, encode_sdk(value)?),
             Self::CodePage { code_page } => (CODE_PAGE, code_page.to_le_bytes().to_vec()),
             Self::BoundSheet8(value) => (BOUND_SHEET8, value.to_bytes()?),
             Self::BoundSheet8Compatibility { record_type, value } => {
@@ -16103,6 +23999,29 @@ impl BiffRecordData {
             Self::SxPi(value) => (SX_PI, encode_sdk(value)?),
             Self::SxDi(value) => (SX_DI, encode_sdk(value)?),
             Self::SxString(value) => (SX_STRING, encode_sdk(value)?),
+            Self::SxNum(value) => (SX_NUM, encode_sdk(value)?),
+            Self::SxBool(value) => (SX_BOOL, encode_sdk(value)?),
+            Self::SxErr(value) => (SX_ERR, encode_sdk(value)?),
+            Self::SxInt(value) => (SX_INT, encode_sdk(value)?),
+            Self::SxNil => (SX_NIL, Vec::new()),
+            Self::SxDb(value) => (SX_DB, encode_sdk(value)?),
+            Self::SxFdb(value) => {
+                value.validate()?;
+                (SX_FDB, encode_sdk(value)?)
+            }
+            Self::SxDbb(value) => (SX_DBB, value.to_bytes()),
+            Self::SxName(value) => (SX_NAME, encode_sdk(value)?),
+            Self::SxFmla(value) => (SX_FMLA, encode_sdk(value)?),
+            Self::SxFormula(value) => (SX_FORMULA, encode_sdk(value)?),
+            Self::SxDbEx(value) => (SX_DB_EX, encode_sdk(value)?),
+            Self::SxDtr(value) => (SX_DTR, encode_sdk(value)?),
+            Self::SxIsxoper(value) => (SX_ISXOPER, encode_sdk(value)?),
+            Self::SxRng(value) => (SX_RNG, encode_sdk(value)?),
+            Self::SxTbl(value) => (SX_TBL, encode_sdk(value)?),
+            Self::SxTbpg(value) => (SX_TBPG, encode_sdk(value)?),
+            Self::SxTbrgiitm(value) => (SX_TBRGIITM, encode_sdk(value)?),
+            Self::SxPair(value) => (SX_PAIR, encode_sdk(value)?),
+            Self::SxFdbType(value) => (SX_FDB_TYPE, encode_sdk(value)?),
             Self::RrTabId(value) => (RR_TAB_ID, encode_sdk(value)?),
             Self::SxRule(value) => (SX_RULE, encode_sdk(value)?),
             Self::SxEx(value) => (SX_EX, encode_sdk(value)?),
@@ -16114,6 +24033,12 @@ impl BiffRecordData {
             Self::RecalcId(value) => (RECALC_ID, encode_sdk(value)?),
             Self::SxvdEx(value) => (SXVD_EX, encode_sdk(value)?),
             Self::Sxvd(value) => (SXVD, encode_sdk(value)?),
+            Self::MdtInfo(value) => (MDT_INFO, encode_sdk(value)?),
+            Self::MdxStr(value) => (MDX_STR, encode_sdk(value)?),
+            Self::MdxTuple(value) => (MDX_TUPLE, encode_sdk(value)?),
+            Self::MdxSet(value) => (MDX_SET, encode_sdk(value)?),
+            Self::MdxProp(value) => (MDX_PROP, encode_sdk(value)?),
+            Self::MdxKpi(value) => (MDX_KPI, encode_sdk(value)?),
             Self::CodeName(value) => (CODE_NAME, encode_sdk(value)?),
             Self::Array(value) => (ARRAY, encode_sdk(value)?),
             Self::UserSViewBegin(value) => (USER_SVIEW_BEGIN, encode_sdk(value)?),
@@ -16126,6 +24051,7 @@ impl BiffRecordData {
             Self::CellWatch(value) => (CELL_WATCH, encode_sdk(value)?),
             Self::FeatureHeader11(value) => (FEAT_HDR11, encode_sdk(value)?),
             Self::Feature11(value) => (FEATURE11, encode_sdk(value)?),
+            Self::Feature12(value) => (FEATURE12, encode_sdk(value)?),
             Self::List12(value) => (LIST12, encode_sdk(value)?),
             Self::DropDownObjIds(value) => (DROP_DOWN_OBJ_IDS, encode_sdk(value)?),
             Self::DataValidationHeader(value) => (DATA_VALIDATION_HEADER, encode_sdk(value)?),
@@ -16151,6 +24077,8 @@ impl BiffRecordData {
             Self::XfExt(value) => (XF_EXT, encode_sdk(value)?),
             Self::XfCrc(value) => (XF_CRC, encode_sdk(value)?),
             Self::TableStyles(value) => (TABLE_STYLES, encode_sdk(value)?),
+            Self::TableStyle(value) => (TABLE_STYLE, encode_sdk(value)?),
+            Self::TableStyleElement(value) => (TABLE_STYLE_ELEMENT, encode_sdk(value)?),
             Self::StyleExt(value) => (STYLE_EXT, encode_sdk(value)?),
             Self::Dxf(value) => (DXF, encode_sdk(value)?),
             Self::ConditionalFormattingExtension(value) => (CF_EX, encode_sdk(value)?),
@@ -16174,6 +24102,8 @@ impl BiffRecordData {
             Self::CompressPictures(value) => (COMPRESS_PICTURES, encode_sdk(value)?),
             Self::CrtMlFrt(value) => (CRT_ML_FRT, encode_sdk(value)?),
             Self::ChartFrtInfo(value) => (CHART_FRT_INFO, encode_sdk(value)?),
+            Self::PivotChartBits(value) => (PIVOT_CHART_BITS, encode_sdk(value)?),
+            Self::ChartYMult(value) => (CHART_YMULT, encode_sdk(value)?),
             Self::ChartCatLab(value) => (CHART_CAT_LAB, encode_sdk(value)?),
             Self::ChartStartObject(value) => (CHART_START_OBJECT, encode_sdk(value)?),
             Self::ChartEndObject(value) => (CHART_END_OBJECT, encode_sdk(value)?),
@@ -16209,18 +24139,28 @@ impl BiffRecordData {
             Self::ChartFrame(value) => (CHART_FRAME, encode_sdk(value)?),
             Self::Chart3D(value) => (CHART_3D, encode_sdk(value)?),
             Self::ChartDropBar(value) => (CHART_DROP_BAR, encode_sdk(value)?),
+            Self::ChartPicF(value) => (CHART_PIC_F, encode_sdk(value)?),
+            Self::ChartRadar(value) => (CHART_RADAR, encode_sdk(value)?),
+            Self::ChartRadarArea(value) => (CHART_RADAR_AREA, encode_sdk(value)?),
             Self::ChartSurf(value) => (CHART_SURF, encode_sdk(value)?),
             Self::ChartLegendException(value) => (CHART_LEGEND_EXCEPTION, encode_sdk(value)?),
             Self::ChartAxisParent(value) => (CHART_AXIS_PARENT, encode_sdk(value)?),
             Self::ChartSheetProperties(value) => (CHART_SHEET_PROPERTIES, encode_sdk(value)?),
             Self::ChartSeriesGroupIndex(value) => (CHART_SERIES_GROUP_INDEX, encode_sdk(value)?),
             Self::ChartAxisUsed(value) => (CHART_AXIS_USED, encode_sdk(value)?),
+            Self::ChartSBaseRef(value) => (CHART_SBASE_REF, encode_sdk(value)?),
             Self::ChartNumberFormatIndex(value) => (CHART_NUMBER_FORMAT_INDEX, encode_sdk(value)?),
             Self::ChartSeriesParent(value) => (CHART_SERIES_PARENT, encode_sdk(value)?),
             Self::ChartSeriesAuxTrend(value) => (CHART_SERIES_AUX_TREND, encode_sdk(value)?),
             Self::ChartPosition(value) => (CHART_POSITION, encode_sdk(value)?),
             Self::ChartFontBasis(value) => (CHART_FONT_BASIS, encode_sdk(value)?),
             Self::Chart3DBarShape(value) => (CHART_3D_BAR_SHAPE, encode_sdk(value)?),
+            Self::ChartBopPop(value) => (CHART_BOP_POP, encode_sdk(value)?),
+            Self::ChartBopPopCustom(value) => {
+                value.validate()?;
+                (CHART_BOP_POP_CUSTOM, encode_sdk(value)?)
+            }
+            Self::ChartFontBasis2(value) => (CHART_FONT_BASIS2, encode_sdk(value)?),
             Self::ChartSeriesFormat(value) => (CHART_SERIES_FORMAT, encode_sdk(value)?),
             Self::ChartSeriesAuxErrorBar(value) => (CHART_SERIES_AUX_ERROR_BAR, encode_sdk(value)?),
             Self::ChartClrtClient(value) => (CHART_CLRT_CLIENT, encode_sdk(value)?),
@@ -16249,6 +24189,8 @@ impl BiffRecordData {
             Self::WriteAccess(value) => (WRITE_ACCESS, encode_sdk(value)?),
             Self::Window2(value) => (WINDOW2, encode_sdk(value)?),
             Self::Selection(value) => (SELECTION, encode_sdk(value)?),
+            Self::Sync(value) => (SYNC, encode_sdk(value)?),
+            Self::Intl(value) => (INTL, encode_sdk(value)?),
             Self::MergeCells(value) => (MERGE_CELLS, encode_sdk(value)?),
             Self::Mms(value) => (MMS, encode_sdk(value)?),
             Self::PhoneticInfo(value) => (PHONETIC_INFO, encode_sdk(value)?),
@@ -16290,6 +24232,7 @@ impl BiffRecordData {
     }
 }
 
+#[derive(Clone)]
 struct EncodedBiffRecord {
     record_type: u16,
     payload: Vec<u8>,
@@ -16524,6 +24467,14 @@ impl BiffUnicodeString {
 
 impl ObjFormula {
     fn parse(declared_length: u16, bytes: &[u8]) -> Result<Self> {
+        Self::parse_with_embed_info(declared_length, bytes, false)
+    }
+
+    fn parse_with_embed_info(
+        declared_length: u16,
+        bytes: &[u8],
+        allow_embed_info: bool,
+    ) -> Result<Self> {
         let data = if bytes.is_empty() {
             ObjFormulaData::Empty
         } else if bytes.len() >= 6 {
@@ -16533,11 +24484,25 @@ impl ObjFormula {
                 .checked_add(cce)
                 .ok_or_else(|| Error::Limit("ObjFmla rgce length overflow".into()))?;
             if rgce_end <= bytes.len() {
+                let tokens = FormulaTokenStream::from_bytes(&bytes[6..rgce_end])?;
+                let starts_with_table = matches!(
+                    tokens.tokens.first().map(|token| &token.data),
+                    Some(FormulaTokenData::Table { .. })
+                );
+                let (embed_info, padding_offset) = if allow_embed_info && starts_with_table {
+                    match PictFmlaEmbedInfo::parse(&bytes[rgce_end..])? {
+                        Some((value, consumed)) => (Some(value), rgce_end + consumed),
+                        None => (None, rgce_end),
+                    }
+                } else {
+                    (None, rgce_end)
+                };
                 ObjFormulaData::Parsed {
                     cce_and_reserved,
                     unused: u32::from_le_bytes(bytes[2..6].try_into().expect("four bytes")),
-                    tokens: FormulaTokenStream::from_bytes(&bytes[6..rgce_end])?,
-                    padding: bytes[rgce_end..].to_vec(),
+                    tokens,
+                    embed_info,
+                    padding: bytes[padding_offset..].to_vec(),
                 }
             } else {
                 ObjFormulaData::Opaque(bytes.to_vec())
@@ -16558,6 +24523,7 @@ impl ObjFormula {
                 cce_and_reserved,
                 unused,
                 tokens,
+                embed_info,
                 padding,
             } => {
                 let rgce = tokens.to_bytes()?;
@@ -16568,11 +24534,186 @@ impl ObjFormula {
                 bytes.extend_from_slice(&cce_and_reserved.to_le_bytes());
                 bytes.extend_from_slice(&unused.to_le_bytes());
                 bytes.extend_from_slice(&rgce);
+                if let Some(value) = embed_info {
+                    bytes.extend_from_slice(&value.to_bytes()?);
+                }
                 bytes.extend_from_slice(padding);
                 bytes
             }
             ObjFormulaData::Opaque(bytes) => bytes.clone(),
         };
+        Ok(bytes)
+    }
+
+    fn starts_with_table(&self) -> bool {
+        matches!(
+            &self.data,
+            ObjFormulaData::Parsed { tokens, .. }
+                if matches!(
+                    tokens.tokens.first().map(|token| &token.data),
+                    Some(FormulaTokenData::Table { .. })
+                )
+        )
+    }
+
+    fn has_embed_info(&self) -> bool {
+        matches!(
+            &self.data,
+            ObjFormulaData::Parsed {
+                embed_info: Some(_),
+                ..
+            }
+        )
+    }
+
+    fn parse_prefix(bytes: &[u8]) -> Result<(Self, usize)> {
+        let length_bytes = bytes
+            .get(..2)
+            .ok_or_else(|| Error::invalid(0, "ObjFmla length is truncated"))?;
+        let declared_length = u16::from_le_bytes([length_bytes[0], length_bytes[1]]);
+        let end = 2usize
+            .checked_add(usize::from(declared_length))
+            .ok_or_else(|| Error::Limit("ObjFmla length overflow".into()))?;
+        let formula_bytes = bytes
+            .get(2..end)
+            .ok_or_else(|| Error::invalid(0, "ObjFmla is truncated"))?;
+        Ok((Self::parse(declared_length, formula_bytes)?, end))
+    }
+}
+
+impl PictFmlaEmbedInfo {
+    fn parse(bytes: &[u8]) -> Result<Option<(Self, usize)>> {
+        let Some(header) = bytes.get(..3) else {
+            return Ok(None);
+        };
+        if header[0] != 0x03 {
+            return Ok(None);
+        }
+        let class_count = usize::from(header[1]);
+        let class_name = if class_count == 0 {
+            None
+        } else {
+            let Some(flags) = bytes.get(3).copied() else {
+                return Ok(None);
+            };
+            let character_bytes = class_count
+                .checked_mul(if flags & 1 == 0 { 1 } else { 2 })
+                .ok_or_else(|| Error::Limit("PictFmlaEmbedInfo length overflow".into()))?;
+            let encoded_length = 1usize
+                .checked_add(character_bytes)
+                .ok_or_else(|| Error::Limit("PictFmlaEmbedInfo length overflow".into()))?;
+            let Some(class_bytes) = bytes.get(3..3 + encoded_length) else {
+                return Ok(None);
+            };
+            let mut reader = Reader::new(Cursor::new(class_bytes))?;
+            Some(BiffUnicodeString::read(&mut reader, class_count)?)
+        };
+        let end = 3 + class_name.as_ref().map_or(0, |value| {
+            1 + match &value.characters {
+                XlStringCharacters::Compressed(values) => values.len(),
+                XlStringCharacters::Unicode(values) => values.len() * 2,
+            }
+        });
+        Ok(Some((
+            Self {
+                tag: header[0],
+                declared_class_count: header[1],
+                reserved: header[2],
+                class_name,
+            },
+            end,
+        )))
+    }
+
+    fn to_bytes(&self) -> Result<Vec<u8>> {
+        let class_bytes = self
+            .class_name
+            .as_ref()
+            .map(BiffUnicodeString::to_bytes)
+            .transpose()?
+            .unwrap_or_default();
+        if self
+            .class_name
+            .as_ref()
+            .is_some_and(|value| value.character_count() != usize::from(self.declared_class_count))
+        {
+            return Err(Error::invalid(0, "PictFmlaEmbedInfo class count mismatch"));
+        }
+        if self.class_name.is_some() != (self.declared_class_count != 0) {
+            return Err(Error::invalid(
+                0,
+                "PictFmlaEmbedInfo class presence mismatch",
+            ));
+        }
+        let mut bytes = vec![self.tag, self.declared_class_count, self.reserved];
+        bytes.extend_from_slice(&class_bytes);
+        Ok(bytes)
+    }
+}
+
+impl PictFmlaKey {
+    fn parse(bytes: &[u8], limits: Limits) -> Result<(Self, usize)> {
+        let count_bytes = bytes
+            .get(..4)
+            .ok_or_else(|| Error::invalid(0, "PictFmlaKey cbKey is truncated"))?;
+        let declared_key_byte_count =
+            u32::from_le_bytes(count_bytes.try_into().expect("four bytes"));
+        let key_length = usize::try_from(declared_key_byte_count)
+            .map_err(|_| Error::Limit("PictFmlaKey length exceeds usize".into()))?;
+        if key_length > limits.max_allocation {
+            return Err(Error::Limit("PictFmlaKey exceeds allocation limit".into()));
+        }
+        let key_end = 4usize
+            .checked_add(key_length)
+            .ok_or_else(|| Error::Limit("PictFmlaKey length overflow".into()))?;
+        let key = bytes
+            .get(4..key_end)
+            .ok_or_else(|| Error::invalid(0, "PictFmlaKey keyBuf is truncated"))?
+            .to_vec();
+        let (linked_cell, linked_length) = ObjFormula::parse_prefix(
+            bytes
+                .get(key_end..)
+                .ok_or_else(|| Error::invalid(0, "PictFmlaKey linked formula is missing"))?,
+        )?;
+        let fill_offset = key_end
+            .checked_add(linked_length)
+            .ok_or_else(|| Error::Limit("PictFmlaKey formula offset overflow".into()))?;
+        let (list_fill_range, fill_length) = ObjFormula::parse_prefix(
+            bytes
+                .get(fill_offset..)
+                .ok_or_else(|| Error::invalid(0, "PictFmlaKey fill formula is missing"))?,
+        )?;
+        let consumed = fill_offset
+            .checked_add(fill_length)
+            .ok_or_else(|| Error::Limit("PictFmlaKey size overflow".into()))?;
+        Ok((
+            Self {
+                declared_key_byte_count,
+                key,
+                linked_cell,
+                list_fill_range,
+            },
+            consumed,
+        ))
+    }
+
+    fn to_bytes(&self) -> Result<Vec<u8>> {
+        if self.key.len()
+            != usize::try_from(self.declared_key_byte_count)
+                .map_err(|_| Error::Limit("PictFmlaKey length exceeds usize".into()))?
+        {
+            return Err(Error::invalid(0, "PictFmlaKey cbKey mismatch"));
+        }
+        let mut bytes = self.declared_key_byte_count.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&self.key);
+        for formula in [&self.linked_cell, &self.list_fill_range] {
+            let formula_bytes = formula.to_bytes()?;
+            if formula_bytes.len() != usize::from(formula.declared_length) {
+                return Err(Error::invalid(0, "PictFmlaKey ObjFmla length mismatch"));
+            }
+            bytes.extend_from_slice(&formula.declared_length.to_le_bytes());
+            bytes.extend_from_slice(&formula_bytes);
+        }
         Ok(bytes)
     }
 }
@@ -16662,6 +24803,7 @@ impl ObjRecord {
         let mut cursor = 0usize;
         let mut subrecords = Vec::new();
         let mut object_type = None;
+        let mut picture_flags = None;
         while cursor < bytes.len() {
             if bytes.len() - cursor < 4 {
                 break;
@@ -16693,10 +24835,14 @@ impl ObjRecord {
                 declared_length,
                 payload,
                 object_type,
+                picture_flags,
                 limits,
             )?;
             if let ObjSubrecordData::Common(common) = &data {
                 object_type = Some(common.object_type);
+            }
+            if let ObjSubrecordData::PictureFlags(flags) = &data {
+                picture_flags = Some(*flags);
             }
             subrecords.push(ObjSubrecord {
                 subrecord_type,
@@ -16721,8 +24867,9 @@ impl ObjRecord {
 
     fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
+        let mut picture_flags = None;
         for subrecord in &self.subrecords {
-            let payload = subrecord.data.to_bytes()?;
+            let payload = subrecord.data.to_bytes(picture_flags)?;
             if subrecord.subrecord_type != 0x0013
                 && usize::from(subrecord.declared_length) != payload.len()
             {
@@ -16731,6 +24878,9 @@ impl ObjRecord {
             bytes.extend_from_slice(&subrecord.subrecord_type.to_le_bytes());
             bytes.extend_from_slice(&subrecord.declared_length.to_le_bytes());
             bytes.extend_from_slice(&payload);
+            if let ObjSubrecordData::PictureFlags(flags) = &subrecord.data {
+                picture_flags = Some(*flags);
+            }
         }
         bytes.extend_from_slice(&self.trailing);
         Ok(bytes)
@@ -16743,6 +24893,7 @@ impl ObjSubrecordData {
         declared_length: u16,
         bytes: &[u8],
         object_type: Option<u16>,
+        picture_flags: Option<ObjPictureFlags>,
         limits: Limits,
     ) -> Result<Self> {
         let exact = |expected: usize, name: &str| {
@@ -16793,10 +24944,19 @@ impl ObjSubrecordData {
                 let formula_bytes = bytes
                     .get(2..end)
                     .ok_or_else(|| Error::invalid(0, "FtPictFmla formula is truncated"))?;
-                Self::PictureFormula(ObjPictureFormula {
-                    formula: ObjFormula::parse(formula_length, formula_bytes)?,
-                    trailing: bytes[end..].to_vec(),
-                })
+                let value = ObjPictureFormula {
+                    formula: ObjFormula::parse_with_embed_info(
+                        formula_length,
+                        formula_bytes,
+                        true,
+                    )?,
+                    control_stream_position: None,
+                    control_stream_size: None,
+                    key: None,
+                    compatibility_trailing: Vec::new(),
+                }
+                .parse_trailing(&bytes[end..], picture_flags, limits)?;
+                Self::PictureFormula(value)
             }
             0x000a if bytes.len() == 8 => Self::CheckBox(ObjCheckBoxStructure::Legacy {
                 unused1: u32::from_le_bytes(bytes[0..4].try_into().expect("four bytes")),
@@ -16839,7 +24999,7 @@ impl ObjSubrecordData {
         })
     }
 
-    fn to_bytes(&self) -> Result<Vec<u8>> {
+    fn to_bytes(&self, picture_flags: Option<ObjPictureFlags>) -> Result<Vec<u8>> {
         Ok(match self {
             Self::End => Vec::new(),
             Self::Common(value) => value.to_bytes().to_vec(),
@@ -16851,7 +25011,7 @@ impl ObjSubrecordData {
             Self::PictureFlags(flags) => flags.bits().to_le_bytes().to_vec(),
             Self::TruncatedPictureFlags { low_byte } => vec![*low_byte],
             Self::EmptyCompatibilityMarker => Vec::new(),
-            Self::PictureFormula(value) => value.to_bytes()?,
+            Self::PictureFormula(value) => value.to_bytes(picture_flags)?,
             Self::CheckBox(value) => value.to_bytes(),
             Self::RadioButton { unused1, unused2 } => {
                 let mut bytes = unused1.to_le_bytes().to_vec();
@@ -16900,14 +25060,113 @@ impl ObjCommonData {
 }
 
 impl ObjPictureFormula {
-    fn to_bytes(&self) -> Result<Vec<u8>> {
+    fn parse_trailing(
+        mut self,
+        bytes: &[u8],
+        picture_flags: Option<ObjPictureFlags>,
+        limits: Limits,
+    ) -> Result<Self> {
+        let mut cursor = 0usize;
+        if self.formula.starts_with_table() {
+            let Some(value) = bytes.get(cursor..cursor + 4) else {
+                self.compatibility_trailing = bytes.to_vec();
+                return Ok(self);
+            };
+            self.control_stream_position =
+                Some(u32::from_le_bytes(value.try_into().expect("four bytes")));
+            cursor += 4;
+        }
+        if picture_flags.is_some_and(|flags| flags.contains(ObjPictureFlags::CONTROL_STREAM)) {
+            let Some(value) = bytes.get(cursor..cursor + 4) else {
+                self.compatibility_trailing = bytes[cursor..].to_vec();
+                return Ok(self);
+            };
+            self.control_stream_size =
+                Some(u32::from_le_bytes(value.try_into().expect("four bytes")));
+            cursor += 4;
+        }
+        if picture_flags.is_some_and(|flags| flags.contains(ObjPictureFlags::CONTROL)) {
+            match PictFmlaKey::parse(&bytes[cursor..], limits) {
+                Ok((value, consumed)) => {
+                    self.key = Some(value);
+                    cursor = cursor
+                        .checked_add(consumed)
+                        .ok_or_else(|| Error::Limit("FtPictFmla key offset overflow".into()))?;
+                }
+                Err(Error::InvalidData { .. }) => {
+                    self.compatibility_trailing = bytes[cursor..].to_vec();
+                    return Ok(self);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        self.compatibility_trailing = bytes[cursor..].to_vec();
+        Ok(self)
+    }
+
+    fn to_bytes(&self, picture_flags: Option<ObjPictureFlags>) -> Result<Vec<u8>> {
+        let starts_with_table = self.formula.starts_with_table();
+        if self.compatibility_trailing.is_empty() {
+            if starts_with_table != self.formula.has_embed_info() {
+                return Err(Error::invalid(
+                    0,
+                    "FtPictFmla PtgTbl and embed-info presence mismatch",
+                ));
+            }
+            if starts_with_table != self.control_stream_position.is_some() {
+                return Err(Error::invalid(
+                    0,
+                    "FtPictFmla PtgTbl and position presence mismatch",
+                ));
+            }
+            if let Some(flags) = picture_flags {
+                if flags.contains(ObjPictureFlags::CONTROL_STREAM)
+                    != self.control_stream_size.is_some()
+                {
+                    return Err(Error::invalid(
+                        0,
+                        "FtPictFmla fPrstm and stream-size presence mismatch",
+                    ));
+                }
+                if flags.contains(ObjPictureFlags::CONTROL) != self.key.is_some() {
+                    return Err(Error::invalid(
+                        0,
+                        "FtPictFmla fCtl and key presence mismatch",
+                    ));
+                }
+            }
+        }
         let formula = self.formula.to_bytes()?;
         if formula.len() != usize::from(self.formula.declared_length) {
             return Err(Error::invalid(0, "FtPictFmla ObjFmla length mismatch"));
         }
         let mut bytes = self.formula.declared_length.to_le_bytes().to_vec();
         bytes.extend_from_slice(&formula);
-        bytes.extend_from_slice(&self.trailing);
+        if let Some(value) = self.control_stream_position {
+            if !starts_with_table {
+                return Err(Error::invalid(
+                    0,
+                    "FtPictFmla position requires a leading PtgTbl",
+                ));
+            }
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        if let Some(value) = self.control_stream_size {
+            if picture_flags.is_none_or(|flags| !flags.contains(ObjPictureFlags::CONTROL_STREAM)) {
+                return Err(Error::invalid(
+                    0,
+                    "FtPictFmla control stream size lacks fPrstm",
+                ));
+            }
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        if let Some(value) = &self.key {
+            if picture_flags.is_none_or(|flags| !flags.contains(ObjPictureFlags::CONTROL)) {
+                return Err(Error::invalid(0, "FtPictFmla key lacks fCtl"));
+            }
+            bytes.extend_from_slice(&value.to_bytes()?);
+        }
+        bytes.extend_from_slice(&self.compatibility_trailing);
         Ok(bytes)
     }
 }
@@ -17351,7 +25610,35 @@ fn stitch_continued_records(records: &mut Vec<BiffRecord>, limits: Limits) -> Re
             _ => None,
         };
         if let Some((record_type, first_payload)) = unknown {
-            if matches!(record_type, BK_HIM | IM_DATA) {
+            if matches!(record_type, SX_TH | SXVD_TEX) {
+                let continue_count = records[index + 1..]
+                    .iter()
+                    .take_while(|record| matches!(record.data, BiffRecordData::ContinueFrt(_)))
+                    .count();
+                let continues = records[index + 1..index + 1 + continue_count]
+                    .iter()
+                    .map(|record| match &record.data {
+                        BiffRecordData::ContinueFrt(value) => value.clone(),
+                        _ => unreachable!("continue_count only includes ContinueFrt records"),
+                    })
+                    .collect::<Vec<_>>();
+                records[index].data = if record_type == SX_TH {
+                    BiffRecordData::SxTh(SxThRecord::from_sequence(
+                        &first_payload,
+                        &continues,
+                        limits,
+                    )?)
+                } else {
+                    BiffRecordData::SxvdTEx(SxvdTExRecord::from_sequence(
+                        &first_payload,
+                        &continues,
+                        limits,
+                    )?)
+                };
+                if continue_count != 0 {
+                    records.drain(index + 1..index + 1 + continue_count);
+                }
+            } else if matches!(record_type, BK_HIM | IM_DATA) {
                 let (value, consumed) =
                     BkHimRecord::from_sequence(&first_payload, &records[index + 1..], limits)?;
                 records[index].data = if record_type == BK_HIM {
@@ -17579,6 +25866,418 @@ fn stitch_continued_records(records: &mut Vec<BiffRecord>, limits: Limits) -> Re
     Ok(())
 }
 
+fn validate_sxth_context(value: &SxThRecord, fields: &[(i16, SxAxis)], offset: u64) -> Result<()> {
+    let axis = value.axis;
+    if axis.contains(SxAxis::DATA) && axis != SxAxis::DATA
+        || axis.contains(SxAxis::ROW) && axis.intersects(SxAxis::COLUMN | SxAxis::PAGE)
+        || axis.contains(SxAxis::COLUMN) && axis.contains(SxAxis::PAGE)
+    {
+        return Err(Error::invalid(offset, "SXTH axis combination is invalid"));
+    }
+    let on_page_or_data = axis.intersects(SxAxis::PAGE | SxAxis::DATA);
+    let on_row_or_column = axis.intersects(SxAxis::ROW | SxAxis::COLUMN);
+    if on_page_or_data {
+        let field_index = usize::try_from(value.pivot_field_index)
+            .map_err(|_| Error::invalid(offset, "SXTH pivot-field index is negative"))?;
+        let (_, field_axis) = fields
+            .get(field_index)
+            .ok_or_else(|| Error::invalid(offset, "SXTH pivot-field index is out of range"))?;
+        if value.axis_field_count != 1
+            || value.declared_associated_field_count != 0
+            || *field_axis != axis
+        {
+            return Err(Error::invalid(
+                offset,
+                "SXTH page/data-axis field context is invalid",
+            ));
+        }
+    } else if !on_row_or_column && value.axis_field_count != 0 {
+        return Err(Error::invalid(
+            offset,
+            "SXTH off-axis hierarchy has a nonzero field count",
+        ));
+    }
+    if !on_row_or_column && value.declared_associated_field_count != 0 {
+        return Err(Error::invalid(
+            offset,
+            "SXTH non-row/column hierarchy has associated fields",
+        ));
+    }
+    if on_row_or_column {
+        let associated_count = i32::try_from(value.associated_fields.len())
+            .map_err(|_| Error::Limit("SXTH associated-field count exceeds i32".into()))?;
+        let expected_axis_count = if value.all_member.text.character_count() == 0 {
+            associated_count
+        } else {
+            associated_count.checked_sub(1).ok_or_else(|| {
+                Error::invalid(offset, "SXTH ALL member requires an associated field")
+            })?
+        };
+        if value.axis_field_count != expected_axis_count {
+            return Err(Error::invalid(
+                offset,
+                "SXTH axis field count does not match associated fields",
+            ));
+        }
+    }
+    for field_index in &value.associated_fields {
+        if *field_index == -1 {
+            continue;
+        }
+        let field_index = usize::try_from(*field_index)
+            .map_err(|_| Error::invalid(offset, "SXTH associated-field index is invalid"))?;
+        let (_, field_axis) = fields
+            .get(field_index)
+            .ok_or_else(|| Error::invalid(offset, "SXTH associated-field index is out of range"))?;
+        if *field_axis != axis {
+            return Err(Error::invalid(
+                offset,
+                "SXTH associated pivot field uses a different axis",
+            ));
+        }
+    }
+    if value.flags.contains(SxThFlags::NAMED_SET) && axis.intersects(SxAxis::PAGE | SxAxis::DATA) {
+        return Err(Error::invalid(
+            offset,
+            "SXTH named set is on the page or data axis",
+        ));
+    }
+    if value
+        .flags
+        .intersects(SxThFlags::MEASURE | SxThFlags::NAMED_SET | SxThFlags::KPI)
+        && value.associated_fields.len() > 1
+    {
+        return Err(Error::invalid(
+            offset,
+            "SXTH special hierarchy has more than one associated field",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pivot_view_extensions(records: &[BiffRecord]) -> Result<()> {
+    let mut field_count = None::<usize>;
+    let mut fields = Vec::<(i16, SxAxis)>::new();
+    let mut page_item_count = 0usize;
+    let mut index = 0usize;
+    while index < records.len() {
+        match &records[index].data {
+            BiffRecordData::Bof(_) | BiffRecordData::LegacyBof { .. } => {
+                field_count = None;
+                fields.clear();
+                page_item_count = 0;
+            }
+            BiffRecordData::SxView(value) => {
+                field_count = Some(usize::try_from(value.field_count).map_err(|_| {
+                    Error::invalid(
+                        records[index].offset.into(),
+                        "SxView field count is negative",
+                    )
+                })?);
+                fields.clear();
+                page_item_count = 0;
+            }
+            BiffRecordData::Sxvd(value) => fields.push((value.item_count, value.axis)),
+            BiffRecordData::SxPi(value) => page_item_count = value.items.len(),
+            BiffRecordData::SxViewEx(value) => {
+                let expected_fields = field_count.ok_or_else(|| {
+                    Error::invalid(
+                        records[index].offset.into(),
+                        "SXViewEx has no preceding SxView context",
+                    )
+                })?;
+                if fields.len() != expected_fields {
+                    return Err(Error::invalid(
+                        records[index].offset.into(),
+                        "SXViewEx pivot-field context does not match SxView",
+                    ));
+                }
+                let hierarchy_count = usize::try_from(value.hierarchy_count)
+                    .map_err(|_| Error::Limit("SXViewEx hierarchy count exceeds usize".into()))?;
+                let page_count = usize::try_from(value.page_axis_extension_count)
+                    .map_err(|_| Error::Limit("SXViewEx page count exceeds usize".into()))?;
+                let extension_count = usize::try_from(value.field_extension_count)
+                    .map_err(|_| Error::Limit("SXViewEx field count exceeds usize".into()))?;
+                if page_count != page_item_count || extension_count != expected_fields {
+                    return Err(Error::invalid(
+                        records[index].offset.into(),
+                        "SXViewEx counts do not match its PivotTable context",
+                    ));
+                }
+                let hierarchy_start = index + 1;
+                let page_start = hierarchy_start
+                    .checked_add(hierarchy_count)
+                    .ok_or_else(|| Error::Limit("SXViewEx hierarchy range overflow".into()))?;
+                let extension_start = page_start
+                    .checked_add(page_count)
+                    .ok_or_else(|| Error::Limit("SXViewEx page range overflow".into()))?;
+                let end = extension_start
+                    .checked_add(extension_count)
+                    .ok_or_else(|| Error::Limit("SXViewEx field range overflow".into()))?;
+                if end > records.len() {
+                    return Err(Error::invalid(
+                        records[index].offset.into(),
+                        "SXViewEx collection is truncated",
+                    ));
+                }
+                for record in &records[hierarchy_start..page_start] {
+                    let BiffRecordData::SxTh(hierarchy) = &record.data else {
+                        return Err(Error::invalid(
+                            record.offset.into(),
+                            "SXViewEx hierarchy collection is out of order",
+                        ));
+                    };
+                    validate_sxth_context(hierarchy, &fields, record.offset.into())?;
+                }
+                for record in &records[page_start..extension_start] {
+                    let BiffRecordData::SxPiEx(page) = &record.data else {
+                        return Err(Error::invalid(
+                            record.offset.into(),
+                            "SXViewEx page collection is out of order",
+                        ));
+                    };
+                    let hierarchy_index = usize::try_from(page.hierarchy_index)
+                        .map_err(|_| Error::Limit("SXPIEx hierarchy index exceeds usize".into()))?;
+                    let hierarchy = records
+                        .get(hierarchy_start + hierarchy_index)
+                        .and_then(|record| match &record.data {
+                            BiffRecordData::SxTh(value) if hierarchy_index < hierarchy_count => {
+                                Some(value)
+                            }
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            Error::invalid(record.offset.into(), "SXPIEx hierarchy is out of range")
+                        })?;
+                    if !hierarchy.axis.contains(SxAxis::PAGE) {
+                        return Err(Error::invalid(
+                            record.offset.into(),
+                            "SXPIEx hierarchy is not on the page axis",
+                        ));
+                    }
+                }
+                for (field_index, record) in records[extension_start..end].iter().enumerate() {
+                    let BiffRecordData::SxvdTEx(extension) = &record.data else {
+                        return Err(Error::invalid(
+                            record.offset.into(),
+                            "SXViewEx field collection is out of order",
+                        ));
+                    };
+                    if extension.hierarchy_index >= 0
+                        && usize::try_from(extension.hierarchy_index)
+                            .ok()
+                            .is_none_or(|value| value >= hierarchy_count)
+                    {
+                        return Err(Error::invalid(
+                            record.offset.into(),
+                            "SXVDTEx hierarchy is out of range",
+                        ));
+                    }
+                    if i32::from(fields[field_index].0) != extension.declared_item_count {
+                        return Err(Error::invalid(
+                            record.offset.into(),
+                            "SXVDTEx item count does not match its pivot field",
+                        ));
+                    }
+                }
+                index = end;
+                continue;
+            }
+            BiffRecordData::SxTh(_) | BiffRecordData::SxPiEx(_) | BiffRecordData::SxvdTEx(_) => {
+                return Err(Error::invalid(
+                    records[index].offset.into(),
+                    "pivot extension record is outside an SXViewEx collection",
+                ));
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn normalized_xl_string(value: &XlUnicodeString) -> String {
+    let text = match &value.text.characters {
+        XlStringCharacters::Compressed(bytes) => {
+            bytes.iter().map(|byte| char::from(*byte)).collect()
+        }
+        XlStringCharacters::Unicode(words) => String::from_utf16_lossy(words),
+    };
+    text.to_lowercase()
+}
+
+fn validate_function_groups_and_table_styles(records: &[BiffRecord]) -> Result<()> {
+    let mut function_groups_started = false;
+    let mut function_category_count = 0usize;
+    let mut fn_grp12_count = 0usize;
+    let mut function_category_names = BTreeSet::<String>::new();
+    let mut active_name_is_function = None::<bool>;
+    let mut dxf_count = 0usize;
+    let mut index = 0usize;
+    while index < records.len() {
+        match &records[index].data {
+            BiffRecordData::Bof(_) | BiffRecordData::LegacyBof { .. } => {
+                function_groups_started = false;
+                function_category_count = 0;
+                fn_grp12_count = 0;
+                function_category_names.clear();
+                active_name_is_function = None;
+                dxf_count = 0;
+            }
+            BiffRecordData::FixedU16 {
+                kind: FixedU16RecordKind::FnGroupCount,
+                value,
+            } => {
+                // MS-XLS specifies 14. Existing Excel/third-party producers also emit
+                // other counts, which remain an explicit FixedU16 compatibility value.
+                if usize::from(*value) > 256 {
+                    return Err(Error::invalid(
+                        records[index].offset.into(),
+                        "BuiltInFnGroupCount exceeds the category limit",
+                    ));
+                }
+                function_groups_started = true;
+                function_category_count = usize::from(*value);
+                active_name_is_function = None;
+            }
+            BiffRecordData::FnGroupName(value) => {
+                if !function_groups_started
+                    || function_category_count >= 256
+                    || !function_category_names.insert(normalized_xl_string(&value.name))
+                {
+                    return Err(Error::invalid(
+                        records[index].offset.into(),
+                        "FnGroupName has invalid workbook context or duplicate name",
+                    ));
+                }
+                function_category_count += 1;
+                active_name_is_function = None;
+            }
+            BiffRecordData::FnGrp12(value) => {
+                if !function_groups_started
+                    || function_category_count >= 256
+                    || !function_category_names.insert(normalized_xl_string(&value.name))
+                {
+                    return Err(Error::invalid(
+                        records[index].offset.into(),
+                        "FnGrp12 has invalid workbook context or duplicate name",
+                    ));
+                }
+                function_category_count += 1;
+                fn_grp12_count += 1;
+                active_name_is_function = None;
+            }
+            BiffRecordData::Name(value) => {
+                active_name_is_function = Some(value.flags.contains(NameFlags::FUNCTION));
+            }
+            BiffRecordData::NameComment(_) => {
+                // Some producers place NameComment outside the strict optional LBL tail.
+                // Preserve that established compatibility without granting context to
+                // NameFnGrp12 or NamePublish.
+            }
+            BiffRecordData::NameFnGrp12(value) => {
+                let category_index = usize::from(value.function_category_index - 32);
+                if active_name_is_function != Some(true) || category_index >= fn_grp12_count {
+                    return Err(Error::invalid(
+                        records[index].offset.into(),
+                        "NameFnGrp12 has no function Name or its category is out of range",
+                    ));
+                }
+            }
+            BiffRecordData::NamePublish(_) => {
+                if active_name_is_function.is_none() {
+                    return Err(Error::invalid(
+                        records[index].offset.into(),
+                        "NamePublish has no preceding Name record",
+                    ));
+                }
+            }
+            BiffRecordData::Dxf(_) => {
+                dxf_count = dxf_count
+                    .checked_add(1)
+                    .ok_or_else(|| Error::Limit("DXF record count overflow".into()))?;
+                active_name_is_function = None;
+            }
+            BiffRecordData::TableStyles(value) => {
+                if value.header.record_type != TABLE_STYLES
+                    || value.total_style_count < 144
+                    || usize::from(value.default_table_style_character_count)
+                        != value.default_table_style.len()
+                    || usize::from(value.default_pivot_style_character_count)
+                        != value.default_pivot_style.len()
+                {
+                    return Err(Error::invalid(
+                        records[index].offset.into(),
+                        "TableStyles fields are invalid",
+                    ));
+                }
+                let custom_count = usize::try_from(value.total_style_count - 144)
+                    .map_err(|_| Error::Limit("custom table-style count exceeds usize".into()))?;
+                let mut cursor = index + 1;
+                for _ in 0..custom_count {
+                    let style_record = records.get(cursor).ok_or_else(|| {
+                        Error::invalid(
+                            records[index].offset.into(),
+                            "TableStyles custom-style collection is truncated",
+                        )
+                    })?;
+                    let BiffRecordData::TableStyle(style) = &style_record.data else {
+                        return Err(Error::invalid(
+                            style_record.offset.into(),
+                            "TableStyles custom-style collection is out of order",
+                        ));
+                    };
+                    let element_count = usize::try_from(style.element_count).map_err(|_| {
+                        Error::Limit("TableStyle element count exceeds usize".into())
+                    })?;
+                    let element_end = cursor
+                        .checked_add(1 + element_count)
+                        .ok_or_else(|| Error::Limit("TableStyle element range overflow".into()))?;
+                    if element_end > records.len() {
+                        return Err(Error::invalid(
+                            style_record.offset.into(),
+                            "TableStyle element collection is truncated",
+                        ));
+                    }
+                    let mut element_types = BTreeSet::new();
+                    for element_record in &records[cursor + 1..element_end] {
+                        let BiffRecordData::TableStyleElement(element) = &element_record.data
+                        else {
+                            return Err(Error::invalid(
+                                element_record.offset.into(),
+                                "TableStyle element collection is out of order",
+                            ));
+                        };
+                        if usize::try_from(element.dxf_index)
+                            .ok()
+                            .is_none_or(|dxf_index| dxf_index >= dxf_count)
+                            || !element_types.insert(element.element_type as u32)
+                        {
+                            return Err(Error::invalid(
+                                element_record.offset.into(),
+                                "TableStyleElement has an invalid DXF index or duplicate type",
+                            ));
+                        }
+                    }
+                    cursor = element_end;
+                }
+                index = cursor;
+                active_name_is_function = None;
+                continue;
+            }
+            BiffRecordData::TableStyle(_) | BiffRecordData::TableStyleElement(_) => {
+                return Err(Error::invalid(
+                    records[index].offset.into(),
+                    "table-style record is outside a TableStyles collection",
+                ));
+            }
+            _ => active_name_is_function = None,
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
 impl BoundSheet8Record {
     fn from_bytes(bytes: &[u8], offset: usize) -> Result<Self> {
         let mut cursor = 0usize;
@@ -17752,12 +26451,57 @@ fn decode_record(
                     offset,
                     record_type,
                 )?)),
+                FN_GROUP_NAME => {
+                    let value: FnGroupNameRecord = parse_sdk(payload, offset, record_type)?;
+                    value.validate()?;
+                    Some(BiffRecordData::FnGroupName(value))
+                }
+                FN_GRP12 => Some(BiffRecordData::FnGrp12(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                NAME_FN_GRP12 => Some(BiffRecordData::NameFnGrp12(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                NAME_PUBLISH => Some(BiffRecordData::NamePublish(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                LPR => Some(BiffRecordData::Lpr(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                RECIP_NAME => {
+                    let value: RecipNameRecord = parse_sdk(payload, offset, record_type)?;
+                    value.validate()?;
+                    Some(BiffRecordData::RecipName(value))
+                }
+                LEL => {
+                    let value: LelRecord = parse_sdk(payload, offset, record_type)?;
+                    value.validate()?;
+                    Some(BiffRecordData::Lel(value))
+                }
                 DCON => Some(BiffRecordData::DCon(parse_sdk(
                     payload,
                     offset,
                     record_type,
                 )?)),
                 DCON_REF => Some(BiffRecordData::DConRef(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                DCON_NAME => Some(BiffRecordData::DConName(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                DCON_BIN => Some(BiffRecordData::DConBin(parse_sdk(
                     payload,
                     offset,
                     record_type,
@@ -17782,6 +26526,16 @@ fn decode_record(
                     offset,
                     record_type,
                 )?)),
+                SX_VIEW_EX => Some(BiffRecordData::SxViewEx(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_PI_EX => Some(BiffRecordData::SxPiEx(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
                 DB_QUERY_EXT => Some(BiffRecordData::DbQueryExt(parse_sdk(
                     payload,
                     offset,
@@ -17792,7 +26546,22 @@ fn decode_record(
                     offset,
                     record_type,
                 )?)),
+                CONTINUE_FRT => Some(BiffRecordData::ContinueFrt(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                CONTINUE_FRT11 => Some(BiffRecordData::ContinueFrt11(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
                 CONTINUE_FRT12 => Some(BiffRecordData::ContinueFrt12(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                CRT_ML_FRT_CONTINUE => Some(BiffRecordData::CrtMlFrtContinue(parse_sdk(
                     payload,
                     offset,
                     record_type,
@@ -17887,6 +26656,131 @@ fn decode_record(
                     offset,
                     record_type,
                 )?)),
+                SCENARIO => Some(BiffRecordData::Scenario(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                C_USR => Some(BiffRecordData::CUsr(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                CB_USR => Some(BiffRecordData::CbUsr(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                USR_INFO => Some(BiffRecordData::UsrInfo(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                USR_EXCL => Some(BiffRecordData::UsrExcl(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                FILE_LOCK => Some(BiffRecordData::FileLock(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                BC_USRS => Some(BiffRecordData::BCUsrs(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                USR_CHK => Some(BiffRecordData::UsrChk(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                RRD_HEAD => Some(BiffRecordData::RrdHead(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                RRD_INS_DEL => Some(BiffRecordData::RrdInsDel(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                RRD_REN_SHEET => Some(BiffRecordData::RrdRenSheet(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                RR_SORT => Some(BiffRecordData::RrSort(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                RRD_MOVE => Some(BiffRecordData::RrdMove(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                RRD_CHG_CELL => Some(BiffRecordData::RrdChgCell(Box::new(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?))),
+                RRD_RST_ETXP => Some(BiffRecordData::RrdRstEtxp(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                RRD_TQSIF => Some(BiffRecordData::RrdTqsif(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                RRD_DEF_NAME => Some(BiffRecordData::RrdDefName(Box::new(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?))),
+                RR_FORMAT => Some(BiffRecordData::RrFormat(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                RR_AUTO_FMT => Some(BiffRecordData::RrAutoFmt(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                RR_INSERT_SH => Some(BiffRecordData::RrInsertSh(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                RRD_MOVE_BEGIN if payload.is_empty() => Some(BiffRecordData::RrdMoveBegin),
+                RRD_MOVE_END if payload.is_empty() => Some(BiffRecordData::RrdMoveEnd),
+                RRD_INS_DEL_BEGIN if payload.is_empty() => Some(BiffRecordData::RrdInsDelBegin),
+                RRD_INS_DEL_END if payload.is_empty() => Some(BiffRecordData::RrdInsDelEnd),
+                RRD_MOVE_BEGIN | RRD_MOVE_END | RRD_INS_DEL_BEGIN | RRD_INS_DEL_END => {
+                    return Err(Error::invalid(
+                        offset as u64,
+                        format!("revision boundary marker 0x{record_type:04x} must have no data"),
+                    ));
+                }
+                RRD_CONFLICT => Some(BiffRecordData::RrdConflict(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                RRD_INFO => Some(BiffRecordData::RrdInfo(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                RRD_USER_VIEW => Some(BiffRecordData::RrdUserView(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
                 SX_VIEW => Some(BiffRecordData::SxView(parse_sdk(
                     payload,
                     offset,
@@ -17933,6 +26827,103 @@ fn decode_record(
                     record_type,
                 )?)),
                 SX_STRING => Some(BiffRecordData::SxString(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_NUM => Some(BiffRecordData::SxNum(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_BOOL => Some(BiffRecordData::SxBool(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_ERR => Some(BiffRecordData::SxErr(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_INT => Some(BiffRecordData::SxInt(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_NIL if payload.is_empty() => Some(BiffRecordData::SxNil),
+                SX_NIL => {
+                    return Err(Error::invalid(
+                        offset as u64,
+                        "SxNil record must have no data",
+                    ));
+                }
+                SX_DB => Some(BiffRecordData::SxDb(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_FDB => {
+                    let value: SxFdbRecord = parse_sdk(payload, offset, record_type)?;
+                    value.validate()?;
+                    Some(BiffRecordData::SxFdb(value))
+                }
+                SX_NAME => Some(BiffRecordData::SxName(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_FMLA => Some(BiffRecordData::SxFmla(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_FORMULA => Some(BiffRecordData::SxFormula(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_DB_EX => Some(BiffRecordData::SxDbEx(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_DTR => Some(BiffRecordData::SxDtr(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_ISXOPER => Some(BiffRecordData::SxIsxoper(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_RNG => Some(BiffRecordData::SxRng(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_TBL => Some(BiffRecordData::SxTbl(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_TBPG => Some(BiffRecordData::SxTbpg(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_TBRGIITM => Some(BiffRecordData::SxTbrgiitm(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_PAIR => Some(BiffRecordData::SxPair(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_FDB_TYPE => Some(BiffRecordData::SxFdbType(parse_sdk(
                     payload,
                     offset,
                     record_type,
@@ -17992,6 +26983,36 @@ fn decode_record(
                     offset,
                     record_type,
                 )?)),
+                MDT_INFO => Some(BiffRecordData::MdtInfo(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                MDX_STR => Some(BiffRecordData::MdxStr(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                MDX_TUPLE => Some(BiffRecordData::MdxTuple(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                MDX_SET => Some(BiffRecordData::MdxSet(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                MDX_PROP => Some(BiffRecordData::MdxProp(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                MDX_KPI => Some(BiffRecordData::MdxKpi(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
                 CODE_NAME => Some(BiffRecordData::CodeName(parse_sdk(
                     payload,
                     offset,
@@ -18036,6 +27057,11 @@ fn decode_record(
                     record_type,
                 )?)),
                 FEATURE11 => Some(BiffRecordData::Feature11(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                FEATURE12 => Some(BiffRecordData::Feature12(parse_sdk(
                     payload,
                     offset,
                     record_type,
@@ -18163,6 +27189,16 @@ fn decode_record(
                     offset,
                     record_type,
                 )?)),
+                TABLE_STYLE => Some(BiffRecordData::TableStyle(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                TABLE_STYLE_ELEMENT => Some(BiffRecordData::TableStyleElement(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
                 STYLE_EXT => Some(BiffRecordData::StyleExt(parse_sdk(
                     payload,
                     offset,
@@ -18274,6 +27310,16 @@ fn decode_record(
                     record_type,
                 )?)),
                 CHART_FRT_INFO => Some(BiffRecordData::ChartFrtInfo(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                PIVOT_CHART_BITS => Some(BiffRecordData::PivotChartBits(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                CHART_YMULT => Some(BiffRecordData::ChartYMult(parse_sdk(
                     payload,
                     offset,
                     record_type,
@@ -18451,6 +27497,21 @@ fn decode_record(
                     offset,
                     record_type,
                 )?)),
+                CHART_PIC_F => Some(BiffRecordData::ChartPicF(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                CHART_RADAR => Some(BiffRecordData::ChartRadar(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                CHART_RADAR_AREA => Some(BiffRecordData::ChartRadarArea(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
                 CHART_SURF => Some(BiffRecordData::ChartSurf(parse_sdk(
                     payload,
                     offset,
@@ -18481,6 +27542,11 @@ fn decode_record(
                     offset,
                     record_type,
                 )?)),
+                CHART_SBASE_REF => Some(BiffRecordData::ChartSBaseRef(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
                 CHART_NUMBER_FORMAT_INDEX => Some(BiffRecordData::ChartNumberFormatIndex(
                     parse_sdk(payload, offset, record_type)?,
                 )),
@@ -18505,6 +27571,21 @@ fn decode_record(
                     record_type,
                 )?)),
                 CHART_3D_BAR_SHAPE => Some(BiffRecordData::Chart3DBarShape(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                CHART_BOP_POP => Some(BiffRecordData::ChartBopPop(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                CHART_BOP_POP_CUSTOM => {
+                    let value: ChartBopPopCustomRecord = parse_sdk(payload, offset, record_type)?;
+                    value.validate()?;
+                    Some(BiffRecordData::ChartBopPopCustom(value))
+                }
+                CHART_FONT_BASIS2 => Some(BiffRecordData::ChartFontBasis2(parse_sdk(
                     payload,
                     offset,
                     record_type,
@@ -18631,6 +27712,16 @@ fn decode_record(
                     record_type,
                 )?)),
                 SELECTION => Some(BiffRecordData::Selection(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SYNC => Some(BiffRecordData::Sync(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                INTL => Some(BiffRecordData::Intl(parse_sdk(
                     payload,
                     offset,
                     record_type,
@@ -18985,6 +28076,2403 @@ fn take_bytes<'a>(
 mod tests {
     use super::*;
 
+    fn xl_ascii(value: &[u8]) -> XlUnicodeString {
+        XlUnicodeString {
+            text: BiffUnicodeString {
+                flags: 0,
+                characters: XlStringCharacters::Compressed(value.to_vec()),
+                trailing_byte: None,
+            },
+        }
+    }
+
+    fn fixed_ascii(byte_size: usize, prefix: &[u8]) -> BiffUnicodeString {
+        let mut characters = vec![0; byte_size - 1];
+        characters[..prefix.len()].copy_from_slice(prefix);
+        BiffUnicodeString {
+            flags: 0,
+            characters: XlStringCharacters::Compressed(characters),
+            trailing_byte: None,
+        }
+    }
+
+    fn fixed_unicode(byte_size: usize, prefix: &[u16]) -> BiffUnicodeString {
+        let character_count = (byte_size - 1) / 2;
+        let mut characters = vec![0; character_count];
+        characters[..prefix.len()].copy_from_slice(prefix);
+        BiffUnicodeString {
+            flags: 1,
+            characters: XlStringCharacters::Unicode(characters),
+            trailing_byte: (!(byte_size - 1).is_multiple_of(2)).then_some(0),
+        }
+    }
+
+    fn feature11_field(
+        flags: Feature11FieldFlags,
+        total_aggregation: u32,
+    ) -> Feature11FieldDataItem {
+        Feature11FieldDataItem {
+            field_id: 1,
+            web_data_type: 0,
+            xml_data_type: 0,
+            total_aggregation,
+            aggregate_format_size: 0,
+            aggregate_style_index: u32::MAX,
+            flags,
+            insert_row_format_size: 0,
+            insert_row_style_index: u32::MAX,
+            field_name: xl_ascii(b"Field"),
+            caption: Some(xl_ascii(b"Caption")),
+            aggregate_format: None,
+            insert_row_format: None,
+            auto_filter: None,
+            xml_map: None,
+            formula: None,
+            total_formula: None,
+            total_text: None,
+            wss_info: None,
+            query_field_id: None,
+            cached_header: None,
+        }
+    }
+
+    fn empty_dxf_n12_list() -> DxfN12List {
+        DxfN12List {
+            format: Box::new(DxfN {
+                flags: DxfFlags::empty(),
+                number_format: None,
+                font: None,
+                alignment: None,
+                border: None,
+                pattern: None,
+                protection: None,
+            }),
+            extension: None,
+        }
+    }
+
+    #[test]
+    fn additional_short_spec_records_are_static_and_exact() {
+        let cases = [
+            (
+                INTL,
+                vec![0x34, 0x12],
+                BiffRecordData::Intl(IntlRecord { reserved: 0x1234 }),
+            ),
+            (
+                SYNC,
+                vec![2, 0, 3, 0],
+                BiffRecordData::Sync(SyncRecord { row: 2, column: 3 }),
+            ),
+            (
+                SX_NUM,
+                3.5f64.to_bits().to_le_bytes().to_vec(),
+                BiffRecordData::SxNum(SxNumRecord {
+                    value_bits: 3.5f64.to_bits(),
+                }),
+            ),
+            (
+                SX_BOOL,
+                vec![1, 0],
+                BiffRecordData::SxBool(SxBoolRecord { value: 1 }),
+            ),
+            (
+                SX_ERR,
+                vec![0x2a, 0],
+                BiffRecordData::SxErr(SxErrRecord { error_code: 0x2a }),
+            ),
+            (
+                SX_INT,
+                (-123i16).to_le_bytes().to_vec(),
+                BiffRecordData::SxInt(SxIntRecord { value: -123 }),
+            ),
+            (SX_NIL, Vec::new(), BiffRecordData::SxNil),
+            (
+                CHART_PIC_F,
+                [
+                    3u16.to_le_bytes().as_slice(),
+                    0x5678u16.to_le_bytes().as_slice(),
+                    2.0f64.to_bits().to_le_bytes().as_slice(),
+                ]
+                .concat(),
+                BiffRecordData::ChartPicF(ChartPicFRecord {
+                    picture_type: 3,
+                    unused: 0x5678,
+                    scale_bits: 2.0f64.to_bits(),
+                }),
+            ),
+            (
+                CHART_RADAR,
+                vec![0x03, 0x80, 0x34, 0x12],
+                BiffRecordData::ChartRadar(ChartRadarRecord {
+                    flags: ChartRadarFlags::from_bits_retain(0x8003),
+                    unused: 0x1234,
+                }),
+            ),
+            (
+                CHART_RADAR_AREA,
+                vec![0x02, 0x40, 0x78, 0x56],
+                BiffRecordData::ChartRadarArea(ChartRadarRecord {
+                    flags: ChartRadarFlags::from_bits_retain(0x4002),
+                    unused: 0x5678,
+                }),
+            ),
+            (
+                CHART_SBASE_REF,
+                vec![1, 0, 2, 0, 3, 0, 4, 0],
+                BiffRecordData::ChartSBaseRef(ChartSBaseRefRecord {
+                    range: CellRange {
+                        first_row: 1,
+                        last_row: 2,
+                        first_column: 3,
+                        last_column: 4,
+                    },
+                }),
+            ),
+        ];
+
+        for (record_type, payload, expected) in cases {
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        assert!(decode_record(SX_NIL, &[0], false, true, 0).is_err());
+    }
+
+    #[test]
+    fn pivot_cache_and_bop_pop_records_are_static_and_exact() {
+        let records = [
+            BiffRecordData::SxDtr(SxDtrRecord {
+                year: 2026,
+                month: 7,
+                day: 14,
+                hour: 12,
+                minute: 34,
+                second: 56,
+            }),
+            BiffRecordData::SxIsxoper(SxIsxoperRecord {
+                item_indices: vec![1, 0x1234, u16::MAX],
+            }),
+            BiffRecordData::SxRng(SxRngRecord {
+                flags: SxRngFlags::from_bits_retain(0x8027),
+            }),
+            BiffRecordData::SxTbl(SxTblRecord {
+                source_range_count: 2,
+                page_group_count: 2,
+                page_count_flags: 0x8003,
+            }),
+            BiffRecordData::SxTbpg(SxTbpgRecord {
+                item_indices: vec![-1, 0, 7],
+            }),
+            BiffRecordData::SxTbrgiitm(SxTbrgiitmRecord { item_count: 12 }),
+            BiffRecordData::SxPair(SxPairRecord {
+                cache_field_index: 4,
+                cache_item_index: -2,
+                reserved: 0x5678,
+                flags: SxPairFlags::from_bits_retain(0x8019),
+            }),
+            BiffRecordData::SxFdbType(SxFdbTypeRecord { odbc_type: 93 }),
+            BiffRecordData::ChartBopPop(ChartBopPopRecord {
+                pie_kind: 1,
+                automatic_split: 0,
+                split_kind: 3,
+                split_position: 4,
+                split_percent: 5,
+                secondary_size_percent: 75,
+                gap_percent: 150,
+                split_value_bits: 42.5f64.to_bits(),
+                flags: ChartBopPopFlags::from_bits_retain(0x8001),
+            }),
+            BiffRecordData::ChartBopPopCustom(ChartBopPopCustomRecord {
+                data_point_count_plus_one: 8,
+                membership_bits: vec![0x80, 0x01],
+            }),
+            BiffRecordData::ChartFontBasis2(ChartFontBasis2Record {
+                width_basis: 100,
+                height_basis: 200,
+                default_font_height: 240,
+                scale: 1,
+                font_index: 300,
+            }),
+            BiffRecordData::PivotChartBits(PivotChartBitsRecord {
+                header: FrtHeaderOld {
+                    record_type: PIVOT_CHART_BITS,
+                    flags: FrtFlags::from_bits_retain(0x8000),
+                },
+                reserved: vec![0, 0x1234, 0],
+            }),
+            BiffRecordData::ChartYMult(ChartYMultRecord {
+                header: FrtHeaderOld {
+                    record_type: CHART_YMULT,
+                    flags: FrtFlags::from_bits_retain(0x4000),
+                },
+                multiplier_kind: -1,
+                multiplier_bits: 1_000.0f64.to_bits(),
+                flags: ChartYMultFlags::from_bits_retain(0x8007),
+            }),
+        ];
+
+        for expected in records {
+            let (record_type, payload) = expected.encode().unwrap();
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        assert_eq!(
+            BiffRecordData::SxTbl(SxTblRecord {
+                source_range_count: 2,
+                page_group_count: 2,
+                page_count_flags: 0x8003,
+            })
+            .encode()
+            .unwrap()
+            .1,
+            [2, 0, 2, 0, 3, 0x80]
+        );
+        assert!(decode_record(SX_ISXOPER, &[1], false, true, 0).is_err());
+        assert!(decode_record(SX_TBPG, &[1], false, true, 0).is_err());
+        assert!(decode_record(CHART_BOP_POP_CUSTOM, &[8, 0, 0], false, true, 0).is_err());
+        assert!(
+            BiffRecordData::PivotChartBits(PivotChartBitsRecord {
+                header: FrtHeaderOld {
+                    record_type: PIVOT_CHART_BITS,
+                    flags: FrtFlags::empty(),
+                },
+                reserved: vec![0; 4],
+            })
+            .encode()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn pivot_cache_core_records_and_formula_are_static_and_exact() {
+        let formula_bytes = [0x1e, 7, 0, 0x18, 0x1d, 2, 0, 0, 0];
+        let records = [
+            BiffRecordData::SxDb(SxDbRecord {
+                cache_record_count: 42,
+                stream_id: 3,
+                flags: SxDbFlags::from_bits_retain(0x8045),
+                unused: 0x1234,
+                source_field_count: 2,
+                total_field_count: 3,
+                used_record_count: 40,
+                source_type: 1,
+                declared_last_refresh_user_count: 2,
+                last_refresh_user: Some(BiffUnicodeString {
+                    flags: 0,
+                    characters: XlStringCharacters::Compressed(b"AB".to_vec()),
+                    trailing_byte: None,
+                }),
+            }),
+            BiffRecordData::SxFdb(SxFdbRecord {
+                flags: SxFdbFlags::from_bits_retain(0xa5a5),
+                parent_field_index: 1,
+                base_field_index: 2,
+                unique_item_count: 3,
+                grouped_item_count: 4,
+                grouped_base_item_count: 5,
+                cache_item_count: 6,
+                field_name: xl_ascii(b"Field"),
+            }),
+            BiffRecordData::SxName(SxNameRecord {
+                flags: SxNameFlags::from_bits_retain(0x8002),
+                cache_field_index: -1,
+                function_index: -1,
+                pair_count: 1,
+            }),
+            BiffRecordData::SxFmla(SxFmlaRecord {
+                formula: PivotParsedFormula {
+                    declared_token_size: formula_bytes.len() as u16,
+                    sx_name_count: 1,
+                    tokens: FormulaTokenStream::from_bytes(&formula_bytes).unwrap(),
+                },
+            }),
+            BiffRecordData::SxFormula(SxFormulaRecord {
+                reserved: 0x5678,
+                cache_field_index: -1,
+            }),
+            BiffRecordData::SxDbEx(SxDbExRecord {
+                refresh_date_bits: 45_000.25f64.to_bits(),
+                formula_count: 3,
+            }),
+        ];
+
+        for expected in records {
+            let (record_type, payload) = expected.encode().unwrap();
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        let absent_user = BiffRecordData::SxDb(SxDbRecord {
+            cache_record_count: 0,
+            stream_id: 1,
+            flags: SxDbFlags::empty(),
+            unused: 0,
+            source_field_count: 0,
+            total_field_count: 0,
+            used_record_count: 0,
+            source_type: 1,
+            declared_last_refresh_user_count: 0xffff,
+            last_refresh_user: None,
+        });
+        let (_, absent_payload) = absent_user.encode().unwrap();
+        assert_eq!(absent_payload.len(), 20);
+        assert_eq!(
+            decode_record(SX_DB, &absent_payload, false, true, 0).unwrap(),
+            absent_user
+        );
+
+        let mut bad_formula = BiffRecordData::SxFmla(SxFmlaRecord {
+            formula: PivotParsedFormula {
+                declared_token_size: 1,
+                sx_name_count: 0,
+                tokens: FormulaTokenStream::from_bytes(&[0x1e, 1, 0]).unwrap(),
+            },
+        });
+        assert!(bad_formula.encode().is_err());
+        if let BiffRecordData::SxFmla(value) = &mut bad_formula {
+            value.formula.declared_token_size = 3;
+        }
+        assert!(bad_formula.encode().is_ok());
+
+        assert!(decode_record(SX_DB, &[0; 20], false, true, 0).is_err());
+        assert!(
+            BiffRecordData::SxFdb(SxFdbRecord {
+                flags: SxFdbFlags::empty(),
+                parent_field_index: 0,
+                base_field_index: 0,
+                unique_item_count: 0,
+                grouped_item_count: 0,
+                grouped_base_item_count: 0,
+                cache_item_count: 0,
+                field_name: xl_ascii(&vec![b'x'; 256]),
+            })
+            .encode()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sxdbb_uses_preceding_cache_field_index_widths() {
+        let cache = SxDbRecord {
+            cache_record_count: 1,
+            stream_id: 1,
+            flags: SxDbFlags::SAVE_DATA,
+            unused: 0,
+            source_field_count: 2,
+            total_field_count: 2,
+            used_record_count: 1,
+            source_type: 1,
+            declared_last_refresh_user_count: 0xffff,
+            last_refresh_user: None,
+        };
+        let field = |flags, name: u8| SxFdbRecord {
+            flags,
+            parent_field_index: 0,
+            base_field_index: 0,
+            unique_item_count: 0,
+            grouped_item_count: 0,
+            grouped_base_item_count: 0,
+            cache_item_count: 1,
+            field_name: xl_ascii(&[name]),
+        };
+        let stream = BiffStream {
+            records: vec![
+                BiffRecord {
+                    offset: 0,
+                    data: BiffRecordData::Bof(BofRecord {
+                        version: 0x0600,
+                        document_type: 0x0020,
+                        build_identifier: 0,
+                        build_year: 0,
+                        history_flags: 0,
+                        lowest_version: 6,
+                    }),
+                },
+                BiffRecord {
+                    offset: 20,
+                    data: BiffRecordData::SxDb(cache),
+                },
+                BiffRecord {
+                    offset: 44,
+                    data: BiffRecordData::SxFdb(field(SxFdbFlags::ALL_ATOMS, b'A')),
+                },
+                BiffRecord {
+                    offset: 66,
+                    data: BiffRecordData::SxFdb(field(
+                        SxFdbFlags::ALL_ATOMS | SxFdbFlags::SHORT_ITEM_INDEXES,
+                        b'B',
+                    )),
+                },
+                BiffRecord {
+                    offset: 88,
+                    data: BiffRecordData::SxDbb(SxDbbRecord {
+                        indexes: vec![SxDbbIndex::Byte(7), SxDbbIndex::Word(0x1234)],
+                    }),
+                },
+                BiffRecord {
+                    offset: 95,
+                    data: BiffRecordData::Eof,
+                },
+            ],
+            trailing_padding: Vec::new(),
+        };
+
+        let bytes = stream.to_bytes().unwrap();
+        assert_eq!(&bytes[92..95], &[7, 0x34, 0x12]);
+        assert_eq!(BiffStream::from_bytes(&bytes).unwrap(), stream);
+
+        let mut invalid = stream.clone();
+        invalid.records[4].data = BiffRecordData::SxDbb(SxDbbRecord {
+            indexes: vec![SxDbbIndex::Word(7), SxDbbIndex::Word(0x1234)],
+        });
+        assert!(invalid.to_bytes().is_err());
+    }
+
+    #[test]
+    fn legacy_name_and_recipient_records_are_static_and_exact() {
+        let records = [
+            BiffRecordData::FnGroupName(FnGroupNameRecord {
+                name: xl_ascii(b"Engineering"),
+            }),
+            BiffRecordData::Lel(LelRecord {
+                formula_name: xl_ascii(b"DeletedLabel"),
+            }),
+            BiffRecordData::Lpr(LprRecord {
+                flags: 0x0007,
+                unused4: 1,
+                unused5: 2,
+                unused6: 3,
+                unused7: 4,
+                unused8: 5,
+                unused9: vec![6, 7, 8],
+            }),
+            BiffRecordData::RecipName(RecipNameRecord {
+                declared_friendly_name_length: 4,
+                declared_address_length: 5,
+                friendly_name: b"Bob\0".to_vec(),
+                address: b"ID123".to_vec(),
+            }),
+            BiffRecordData::DConName(DConNameRecord {
+                name: xl_ascii(b"SalesData"),
+                file_reference: DConFileReference {
+                    declared_character_count: 0,
+                    file: None,
+                    self_reference_unused: None,
+                },
+            }),
+            BiffRecordData::DConBin(DConBinRecord {
+                built_in_name: DConBuiltInName::PrintArea,
+                reserved1: 0,
+                reserved2: 0,
+                file_reference: DConFileReference {
+                    declared_character_count: 2,
+                    file: Some(BiffUnicodeString {
+                        flags: 0,
+                        characters: XlStringCharacters::Compressed(vec![0x02, b'X']),
+                        trailing_byte: None,
+                    }),
+                    self_reference_unused: Some(DConSelfReferenceUnused::Compressed(0xaa)),
+                },
+            }),
+        ];
+
+        for expected in records {
+            let (record_type, payload) = expected.encode().unwrap();
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        assert!(
+            BiffRecordData::FnGroupName(FnGroupNameRecord {
+                name: xl_ascii(&[b'x'; 33]),
+            })
+            .encode()
+            .is_err()
+        );
+        assert!(
+            BiffRecordData::RecipName(RecipNameRecord {
+                declared_friendly_name_length: 3,
+                declared_address_length: 0,
+                friendly_name: b"Bob".to_vec(),
+                address: Vec::new(),
+            })
+            .encode()
+            .is_err()
+        );
+        assert!(
+            BiffRecordData::DConBin(DConBinRecord {
+                built_in_name: DConBuiltInName::Database,
+                reserved1: 0,
+                reserved2: 0,
+                file_reference: DConFileReference {
+                    declared_character_count: 1,
+                    file: Some(BiffUnicodeString {
+                        flags: 0,
+                        characters: XlStringCharacters::Compressed(vec![b'x']),
+                        trailing_byte: None,
+                    }),
+                    self_reference_unused: None,
+                },
+            })
+            .encode()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn scenario_record_is_static_and_exact() {
+        let expected = BiffRecordData::Scenario(ScenarioRecord {
+            declared_cell_count: 2,
+            locked: true,
+            hidden: false,
+            declared_name_count: 4,
+            declared_comment_count: 4,
+            declared_user_name_count: 5,
+            name: xl_ascii(b"Test").text,
+            user_name: Some(xl_ascii(b"Alice")),
+            comment: Some(xl_ascii(b"Memo")),
+            cells: vec![
+                ScenarioCellReference {
+                    row: 1,
+                    column: 2,
+                    deleted: true,
+                    unused: false,
+                },
+                ScenarioCellReference {
+                    row: u16::MAX,
+                    column: 0x00ff,
+                    deleted: false,
+                    unused: true,
+                },
+            ],
+            values: vec![xl_ascii(b"1"), xl_ascii(b"two")],
+            unused: vec![0xaaaa, 0xbbbb],
+        });
+
+        let (record_type, payload) = expected.encode().unwrap();
+        assert_eq!(record_type, SCENARIO);
+        assert_eq!(&payload[..7], &[2, 0, 1, 0, 4, 4, 5]);
+        assert_eq!(&payload[29..31], &0x4002u16.to_le_bytes());
+        assert_eq!(&payload[33..35], &0x80ffu16.to_le_bytes());
+        let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.encode().unwrap(), (record_type, payload.clone()));
+
+        let mut invalid_count = match expected.clone() {
+            BiffRecordData::Scenario(value) => value,
+            _ => unreachable!(),
+        };
+        invalid_count.declared_cell_count = 1;
+        assert!(BiffRecordData::Scenario(invalid_count).encode().is_err());
+
+        let mut invalid_column = match expected {
+            BiffRecordData::Scenario(value) => value,
+            _ => unreachable!(),
+        };
+        invalid_column.cells[0].column = 0x0100;
+        assert!(BiffRecordData::Scenario(invalid_column).encode().is_err());
+
+        let mut invalid_boolean = payload;
+        invalid_boolean[2] = 2;
+        assert!(decode_record(SCENARIO, &invalid_boolean, false, true, 0).is_err());
+    }
+
+    #[test]
+    fn shared_workbook_user_records_are_static_and_exact() {
+        let timestamp = ShortDtr {
+            year: 2024,
+            month: 2,
+            day: 29,
+            hour: 23,
+            minute: 58,
+            second: 57,
+            weekday: 4,
+        };
+        let mut user_record_sizes = [0; 256];
+        user_record_sizes[0] = 32;
+        user_record_sizes[1] = 48;
+        let records = vec![
+            BiffRecordData::CUsr(CUsrRecord { user_count: 2 }),
+            BiffRecordData::CbUsr(CbUsrRecord { user_record_sizes }),
+            BiffRecordData::UsrInfo(UsrInfoRecord {
+                user_id: -7,
+                last_revision_guid: [0x5a; 16],
+                opened_at: timestamp,
+                user_name: xl_ascii(b"Alice"),
+                unused: 0xcc,
+            }),
+            BiffRecordData::UsrExcl(UsrExclRecord {
+                exclusive: true,
+                changed_at: timestamp,
+                used_user_name_characters: 5,
+                user_name: BiffUnicodeString {
+                    flags: 0,
+                    characters: XlStringCharacters::Compressed({
+                        let mut value = vec![0; 147];
+                        value[..5].copy_from_slice(b"Alice");
+                        value
+                    }),
+                    trailing_byte: None,
+                },
+            }),
+            BiffRecordData::FileLock(FileLockRecord {
+                purpose: FileLockPurpose::MakeExclusive,
+                user_name: xl_ascii(b"Alice"),
+                unused: vec![0xdd; 150],
+            }),
+            BiffRecordData::BCUsrs(BCUsrsRecord { user_count: 2 }),
+            BiffRecordData::UsrChk(UsrChkRecord {
+                version: UsrChkVersion::Biff8,
+                reserved: 0,
+            }),
+        ];
+
+        for expected in records {
+            let (record_type, payload) = expected.encode().unwrap();
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        assert_eq!(
+            BiffRecordData::CbUsr(CbUsrRecord { user_record_sizes })
+                .encode()
+                .unwrap()
+                .1
+                .len(),
+            512
+        );
+        assert_eq!(
+            BiffRecordData::FileLock(FileLockRecord {
+                purpose: FileLockPurpose::Unlocked,
+                user_name: xl_ascii(b"Alice"),
+                unused: vec![0; 150],
+            })
+            .encode()
+            .unwrap()
+            .1
+            .len(),
+            162
+        );
+        assert!(
+            BiffRecordData::CUsr(CUsrRecord { user_count: 256 })
+                .encode()
+                .is_err()
+        );
+        assert!(
+            BiffRecordData::UsrInfo(UsrInfoRecord {
+                user_id: 1,
+                last_revision_guid: [0; 16],
+                opened_at: ShortDtr {
+                    year: 2023,
+                    month: 2,
+                    day: 29,
+                    ..timestamp
+                },
+                user_name: xl_ascii(b"A"),
+                unused: 0,
+            })
+            .encode()
+            .is_err()
+        );
+        assert!(
+            BiffRecordData::FileLock(FileLockRecord {
+                purpose: FileLockPurpose::Unlocked,
+                user_name: xl_ascii(b"A"),
+                unused: vec![0; 153],
+            })
+            .encode()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn future_record_continuations_are_static_and_exact() {
+        let records = [
+            BiffRecordData::ContinueFrt(ContinueFrtRecord {
+                header: FrtHeaderOld {
+                    record_type: CONTINUE_FRT,
+                    flags: FrtFlags::HAS_CELL_RANGE,
+                },
+                continuation: vec![1, 2, 3],
+            }),
+            BiffRecordData::ContinueFrt11(ContinueFrt11Record {
+                header: FrtHeader {
+                    record_type: CONTINUE_FRT11,
+                    flags: FrtFlags::empty(),
+                    reserved: 0x1122_3344_5566_7788,
+                },
+                continuation: vec![4, 5, 6],
+            }),
+            BiffRecordData::CrtMlFrtContinue(CrtMlFrtContinueRecord {
+                header: FrtHeader {
+                    record_type: CRT_ML_FRT_CONTINUE,
+                    flags: FrtFlags::empty(),
+                    reserved: 0,
+                },
+                xml_token_chain: vec![7, 8, 9],
+            }),
+        ];
+
+        for expected in records {
+            let (record_type, payload) = expected.encode().unwrap();
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        assert!(
+            BiffRecordData::ContinueFrt(ContinueFrtRecord {
+                header: FrtHeaderOld {
+                    record_type: 0,
+                    flags: FrtFlags::empty(),
+                },
+                continuation: Vec::new(),
+            })
+            .encode()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn revision_metadata_and_sheet_records_are_static_and_exact() {
+        let timestamp = ShortDtr {
+            year: 2024,
+            month: 7,
+            day: 14,
+            hour: 10,
+            minute: 30,
+            second: 45,
+            weekday: 7,
+        };
+        let revision = |revision_id, revision_type, sheet_id| Rrd {
+            memory_size: 64,
+            revision_id,
+            revision_type,
+            flags: RrdFlags::ACCEPTED,
+            sheet_id,
+        };
+        let records = vec![
+            BiffRecordData::RrdHead(RrdHeadRecord {
+                revision: Rrd {
+                    memory_size: u32::MAX,
+                    revision_id: 0,
+                    revision_type: RevisionType::Header,
+                    flags: RrdFlags::UNUSED,
+                    sheet_id: u16::MAX,
+                },
+                revision_set_guid: [0x11; 16],
+                file_code_page: 1200,
+                used_user_name_characters: 5,
+                user_name: fixed_ascii(114, b"Alice"),
+                saved_at: timestamp,
+                next_sheet_id: -1,
+            }),
+            BiffRecordData::RrdRenSheet(RrdRenSheetRecord {
+                revision: revision(1, RevisionType::RenameSheet, 1),
+                used_old_name_characters: 3,
+                old_name: fixed_ascii(255, b"Old"),
+                used_new_name_characters: 3,
+                new_name: fixed_unicode(255, &[b'N' as u16, b'e' as u16, b'w' as u16]),
+            }),
+            BiffRecordData::RrSort(RrSortRecord {
+                revision: revision(4, RevisionType::Sort, 1),
+                range: Ref8U {
+                    first_row: 10,
+                    last_row: 12,
+                    first_column: 1,
+                    last_column: 2,
+                },
+                sort_columns: false,
+                declared_sort_map_size: 16,
+                sort_map: vec![
+                    SortItem {
+                        new_index: 10,
+                        old_index: 12,
+                    },
+                    SortItem {
+                        new_index: 12,
+                        old_index: 10,
+                    },
+                ],
+            }),
+            BiffRecordData::RrInsertSh(RrInsertShRecord {
+                revision: revision(2, RevisionType::InsertSheet, 2),
+                sheet_position: 1,
+                reserved: 0,
+                used_name_characters: 3,
+                name: fixed_unicode(256, &[b'N' as u16, b'e' as u16, b'w' as u16]),
+            }),
+            BiffRecordData::RrdMoveBegin,
+            BiffRecordData::RrdMoveEnd,
+            BiffRecordData::RrdInsDelBegin,
+            BiffRecordData::RrdInsDelEnd,
+            BiffRecordData::RrdConflict(RrdConflictRecord {
+                revision: revision(3, RevisionType::Conflict, u16::MAX),
+            }),
+            BiffRecordData::RrdInfo(RrdInfoRecord {
+                biff_version: 8,
+                reserved1: 0,
+                sharing_flags: RrdInfoSharingFlags::SHARED
+                    | RrdInfoSharingFlags::TRACK_REVISIONS
+                    | RrdInfoSharingFlags::DISK_HAS_REVISIONS,
+                last_revision_guid: [0x22; 16],
+                root_revision_guid: [0x33; 16],
+                revision_id: 3,
+                version: 4,
+                history_flags: RrdInfoHistoryFlags::PROTECT_REVISION_HISTORY,
+                revision_history_days: 30,
+            }),
+            BiffRecordData::RrdUserView(RrdUserViewRecord {
+                revision: revision(0, RevisionType::AddView, u16::MAX),
+                view_guid: [0x44; 16],
+            }),
+        ];
+
+        for expected in records {
+            let (record_type, payload) = expected.encode().unwrap();
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        assert!(decode_record(RRD_MOVE_BEGIN, &[0], false, true, 0).is_err());
+        assert!(
+            BiffRecordData::RrdConflict(RrdConflictRecord {
+                revision: Rrd {
+                    flags: RrdFlags::RESERVED,
+                    ..revision(3, RevisionType::Conflict, u16::MAX)
+                },
+            })
+            .encode()
+            .is_err()
+        );
+        assert!(
+            BiffRecordData::RrInsertSh(RrInsertShRecord {
+                revision: revision(2, RevisionType::InsertSheet, 2),
+                sheet_position: 0,
+                reserved: 0,
+                used_name_characters: 3,
+                name: fixed_ascii(255, b"Bad"),
+            })
+            .encode()
+            .is_err()
+        );
+        assert!(
+            BiffRecordData::RrSort(RrSortRecord {
+                revision: revision(4, RevisionType::Sort, 1),
+                range: Ref8U {
+                    first_row: 10,
+                    last_row: 12,
+                    first_column: 1,
+                    last_column: 2,
+                },
+                sort_columns: false,
+                declared_sort_map_size: 8,
+                sort_map: vec![SortItem {
+                    new_index: 13,
+                    old_index: 10,
+                }],
+            })
+            .encode()
+            .is_err()
+        );
+        assert!(
+            BiffRecordData::RrdInfo(RrdInfoRecord {
+                biff_version: 8,
+                reserved1: 0,
+                sharing_flags: RrdInfoSharingFlags::TRACK_REVISIONS,
+                last_revision_guid: [0; 16],
+                root_revision_guid: [0; 16],
+                revision_id: 0,
+                version: 0,
+                history_flags: RrdInfoHistoryFlags::empty(),
+                revision_history_days: 1,
+            })
+            .encode()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn revision_format_records_are_static_and_exact() {
+        let revision = |revision_type| Rrd {
+            memory_size: 64,
+            revision_id: 0,
+            revision_type,
+            flags: RrdFlags::ACCEPTED,
+            sheet_id: 2,
+        };
+        let range = Ref8U {
+            first_row: 3,
+            last_row: 7,
+            first_column: 1,
+            last_column: 4,
+        };
+        let auto_format_styles = [
+            AutoFmt8::Simple,
+            AutoFmt8::Classic1,
+            AutoFmt8::Classic2,
+            AutoFmt8::Classic3,
+            AutoFmt8::Accounting1,
+            AutoFmt8::Accounting2,
+            AutoFmt8::Accounting3,
+            AutoFmt8::Accounting4,
+            AutoFmt8::Colorful1,
+            AutoFmt8::Colorful2,
+            AutoFmt8::Colorful3,
+            AutoFmt8::List1,
+            AutoFmt8::List2,
+            AutoFmt8::List3,
+            AutoFmt8::ThreeDEffects1,
+            AutoFmt8::ThreeDEffects2,
+            AutoFmt8::NoneGeneral,
+            AutoFmt8::Japan2,
+            AutoFmt8::Japan3,
+            AutoFmt8::Japan4,
+            AutoFmt8::NoneJapan,
+            AutoFmt8::Report1,
+            AutoFmt8::Report2,
+            AutoFmt8::Report3,
+            AutoFmt8::Report4,
+            AutoFmt8::Report5,
+            AutoFmt8::Report6,
+            AutoFmt8::Report7,
+            AutoFmt8::Report8,
+            AutoFmt8::Report9,
+            AutoFmt8::Report10,
+            AutoFmt8::Table1,
+            AutoFmt8::Table2,
+            AutoFmt8::Table3,
+            AutoFmt8::Table4,
+            AutoFmt8::Table5,
+            AutoFmt8::Table6,
+            AutoFmt8::Table7,
+            AutoFmt8::Table8,
+            AutoFmt8::Table9,
+            AutoFmt8::Table10,
+            AutoFmt8::PivotTableClassic,
+            AutoFmt8::PivotTableNone,
+        ];
+        for style in auto_format_styles {
+            let expected = BiffRecordData::RrAutoFmt(RrAutoFmtRecord {
+                revision: revision(RevisionType::AutoFormat),
+                range,
+                style,
+                flags: RrAutoFmtFlags::APPLY_NUMBER_FORMATS | RrAutoFmtFlags::APPLY_BORDER_FORMATS,
+            });
+            let (record_type, payload) = expected.encode().unwrap();
+            assert_eq!(record_type, RR_AUTO_FMT);
+            assert_eq!(payload.len(), 26);
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        let format = DxfN {
+            flags: DxfFlags::empty(),
+            number_format: None,
+            font: None,
+            alignment: None,
+            border: None,
+            pattern: None,
+            protection: None,
+        };
+        let ranges = SqRefU {
+            declared_range_count: 2,
+            ranges: vec![
+                range,
+                Ref8U {
+                    first_row: 10,
+                    last_row: 12,
+                    first_column: 6,
+                    last_column: 8,
+                },
+            ],
+        };
+        let records = [
+            BiffRecordData::RrFormat(RrFormatRecord {
+                revision: revision(RevisionType::Format),
+                flags: RrFormatFlags::RESET_TO_STYLE,
+                ranges: ranges.clone(),
+                format: Some(format),
+            }),
+            BiffRecordData::RrFormat(RrFormatRecord {
+                revision: revision(RevisionType::Format),
+                flags: RrFormatFlags::FORMAT_NULL | RrFormatFlags::CLEAR_FORMAT,
+                ranges: SqRefU {
+                    declared_range_count: 1,
+                    ranges: vec![range],
+                },
+                format: None,
+            }),
+        ];
+        for expected in records {
+            let (record_type, payload) = expected.encode().unwrap();
+            assert_eq!(record_type, RR_FORMAT);
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        assert!(
+            BiffRecordData::RrAutoFmt(RrAutoFmtRecord {
+                revision: revision(RevisionType::AutoFormat),
+                range,
+                style: AutoFmt8::Simple,
+                flags: RrAutoFmtFlags::RESERVED,
+            })
+            .encode()
+            .is_err()
+        );
+        assert!(
+            BiffRecordData::RrFormat(RrFormatRecord {
+                revision: revision(RevisionType::Format),
+                flags: RrFormatFlags::FORMAT_NULL,
+                ranges: ranges.clone(),
+                format: Some(DxfN {
+                    flags: DxfFlags::empty(),
+                    number_format: None,
+                    font: None,
+                    alignment: None,
+                    border: None,
+                    pattern: None,
+                    protection: None,
+                }),
+            })
+            .encode()
+            .is_err()
+        );
+        assert!(
+            BiffRecordData::RrFormat(RrFormatRecord {
+                revision: revision(RevisionType::Format),
+                flags: RrFormatFlags::FORMAT_NULL,
+                ranges: SqRefU {
+                    declared_range_count: 1,
+                    ranges: vec![range, range],
+                },
+                format: None,
+            })
+            .encode()
+            .is_err()
+        );
+
+        let (_, mut auto_format_payload) = BiffRecordData::RrAutoFmt(RrAutoFmtRecord {
+            revision: revision(RevisionType::AutoFormat),
+            range,
+            style: AutoFmt8::Simple,
+            flags: RrAutoFmtFlags::empty(),
+        })
+        .encode()
+        .unwrap();
+        auto_format_payload[24..26].copy_from_slice(&0x0040u16.to_le_bytes());
+        assert!(decode_record(RR_AUTO_FMT, &auto_format_payload, false, true, 0).is_err());
+
+        let (_, mut format_payload) = BiffRecordData::RrFormat(RrFormatRecord {
+            revision: revision(RevisionType::Format),
+            flags: RrFormatFlags::FORMAT_NULL,
+            ranges: SqRefU {
+                declared_range_count: 1,
+                ranges: vec![range],
+            },
+            format: None,
+        })
+        .encode()
+        .unwrap();
+        format_payload[16..18].copy_from_slice(&0x2001u16.to_le_bytes());
+        assert!(decode_record(RR_FORMAT, &format_payload, false, true, 0).is_err());
+    }
+
+    #[test]
+    fn revision_cell_values_and_font_resets_are_static_and_exact() {
+        let revision = Rrd {
+            memory_size: 96,
+            revision_id: 7,
+            revision_type: RevisionType::ChangeCell,
+            flags: RrdFlags::ACCEPTED,
+            sheet_id: 1,
+        };
+        let formula = |bytes: &[u8]| CellParsedFormula {
+            declared_token_size: u16::try_from(bytes.len()).unwrap(),
+            formula: FormulaTokenStream::from_bytes(bytes).unwrap(),
+        };
+        let compressed_string = XlUnicodeRichExtendedString {
+            declared_character_count: 3,
+            flags: SstStringFlags::empty(),
+            declared_format_run_count: None,
+            declared_extension_length: None,
+            character_chunks: vec![SstCharacterChunk {
+                flags: 0,
+                characters: XlStringCharacters::Compressed(b"abc".to_vec()),
+            }],
+            format_runs: Vec::new(),
+            extension: None,
+        };
+        let rich_string = XlUnicodeRichExtendedString {
+            declared_character_count: 3,
+            flags: SstStringFlags::HIGH_BYTE | SstStringFlags::RICH_TEXT | SstStringFlags::EXTENDED,
+            declared_format_run_count: Some(2),
+            declared_extension_length: Some(4),
+            character_chunks: vec![SstCharacterChunk {
+                flags: 1,
+                characters: XlStringCharacters::Unicode(vec![
+                    b'A' as u16,
+                    b'B' as u16,
+                    b'C' as u16,
+                ]),
+            }],
+            format_runs: vec![
+                FormatRun {
+                    character_index: 0,
+                    font_index: 1,
+                },
+                FormatRun {
+                    character_index: 2,
+                    font_index: 2,
+                },
+            ],
+            extension: Some(ExtRst {
+                reserved: u16::MAX,
+                body: ExtRstBody::OldStyle {
+                    payload: vec![0xaa, 0xbb],
+                },
+            }),
+        };
+        let old_formula_bytes = (0u16..8)
+            .flat_map(|value| {
+                let bytes = value.to_le_bytes();
+                [0x1e, bytes[0], bytes[1]]
+            })
+            .collect::<Vec<_>>();
+        let old_values = vec![
+            (RrdCellValue::Blank, 0),
+            (
+                RrdCellValue::Rk(RkNumber {
+                    divided_by_100: true,
+                    value: RkValue::Integer(-23),
+                }),
+                4,
+            ),
+            (
+                RrdCellValue::Number(Xnum {
+                    bits: (-12.5f64).to_bits(),
+                }),
+                8,
+            ),
+            (RrdCellValue::String(compressed_string.clone()), 9),
+            (
+                RrdCellValue::BooleanError(Bes::Error(CellErrorCode::Reference)),
+                2,
+            ),
+            (RrdCellValue::Formula(formula(&old_formula_bytes)), 26),
+        ];
+        let new_values = vec![
+            RrdCellValue::Blank,
+            RrdCellValue::Rk(RkNumber {
+                divided_by_100: false,
+                value: RkValue::FloatingPointHigh30(0x1234_5678),
+            }),
+            RrdCellValue::Number(Xnum {
+                bits: 123.25f64.to_bits(),
+            }),
+            RrdCellValue::String(rich_string),
+            RrdCellValue::BooleanError(Bes::Boolean(true)),
+            RrdCellValue::Formula(formula(&[0x1e, 42, 0])),
+        ];
+        let make_record =
+            |old_value, declared_old_value_size, new_value, font_reset_count| RrdChgCellRecord {
+                revision,
+                flags: RrdChgCellFlags::PREFIX,
+                display_number_format: RevisionDisplayNumberFormat::NumberTwoDecimals,
+                secondary_flags: RrdChgCellSecondaryFlags::END_OF_LIST_FORMULA_UPDATE,
+                location: RgceLocation {
+                    row: 5,
+                    column: RgceColumn {
+                        column: 3,
+                        row_relative: false,
+                        column_relative: false,
+                    },
+                },
+                declared_old_value_size,
+                font_reset_count,
+                old_format: None,
+                new_format: None,
+                old_value,
+                new_value,
+                physical_segments: None,
+            };
+
+        for (old_value, size) in old_values {
+            let expected = BiffRecordData::RrdChgCell(Box::new(make_record(
+                old_value,
+                size,
+                RrdCellValue::Blank,
+                0,
+            )));
+            let (record_type, payload) = expected.encode().unwrap();
+            assert_eq!(record_type, RRD_CHG_CELL);
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+        for new_value in new_values {
+            let expected = BiffRecordData::RrdChgCell(Box::new(make_record(
+                RrdCellValue::Blank,
+                0,
+                new_value,
+                0,
+            )));
+            let (record_type, payload) = expected.encode().unwrap();
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        let empty_format = || DxfN {
+            flags: DxfFlags::empty(),
+            number_format: None,
+            font: None,
+            alignment: None,
+            border: None,
+            pattern: None,
+            protection: None,
+        };
+        let formatted = BiffRecordData::RrdChgCell(Box::new(RrdChgCellRecord {
+            flags: RrdChgCellFlags::OLD_FORMAT
+                | RrdChgCellFlags::NEW_FORMAT
+                | RrdChgCellFlags::CLEAR_FORMAT,
+            old_format: Some(empty_format()),
+            new_format: Some(empty_format()),
+            ..make_record(
+                RrdCellValue::BooleanError(Bes::Boolean(false)),
+                2,
+                RrdCellValue::String(compressed_string),
+                0,
+            )
+        }));
+        let (record_type, payload) = formatted.encode().unwrap();
+        assert_eq!(
+            decode_record(record_type, &payload, false, true, 0).unwrap(),
+            formatted
+        );
+
+        let font = Stxp {
+            height_twips: 220,
+            text_style: Ts {
+                unused1: true,
+                italic: true,
+                unused2: 0x1f,
+                strikeout: false,
+                unused3: 0x00ab_cdef,
+            },
+            weight: StxpFontWeight::Bold,
+            script_style: StxpScriptStyle::Normal,
+            underline: StxpUnderline::Single,
+            font_family: 2,
+            character_set: 1,
+            unused: 0xcc,
+        };
+        let mut font_name = [0; 31];
+        for (slot, value) in font_name.iter_mut().zip("Calibri".encode_utf16()) {
+            *slot = value;
+        }
+        let reset = |font_index| RrdRstEtxpRecord {
+            font_index,
+            used_font_name_characters: 7,
+            full_string: 1,
+            font_name,
+            font,
+            foreground_color: Icv { value: 0x004d },
+            reserved1: 0,
+            reserved2: 0,
+        };
+        for expected in [reset(0), reset(1)] {
+            let data = BiffRecordData::RrdRstEtxp(expected);
+            let (record_type, payload) = data.encode().unwrap();
+            assert_eq!(record_type, RRD_RST_ETXP);
+            assert_eq!(payload.len(), 90);
+            assert_eq!(
+                decode_record(record_type, &payload, false, true, 0).unwrap(),
+                data
+            );
+        }
+
+        let bof = BiffRecordData::Bof(BofRecord {
+            version: 0x0600,
+            document_type: 5,
+            build_identifier: 0x1234,
+            build_year: 0x07cc,
+            history_flags: 0,
+            lowest_version: 6,
+        });
+        let change = BiffRecordData::RrdChgCell(Box::new(make_record(
+            RrdCellValue::Blank,
+            0,
+            RrdCellValue::Blank,
+            2,
+        )));
+        let bof_size = bof.encode().unwrap().1.len() + 4;
+        let change_size = change.encode().unwrap().1.len() + 4;
+        let reset_size = BiffRecordData::RrdRstEtxp(reset(1))
+            .encode()
+            .unwrap()
+            .1
+            .len()
+            + 4;
+        let stream = BiffStream {
+            records: vec![
+                BiffRecord {
+                    offset: 0,
+                    data: bof,
+                },
+                BiffRecord {
+                    offset: u32::try_from(bof_size).unwrap(),
+                    data: change,
+                },
+                BiffRecord {
+                    offset: u32::try_from(bof_size + change_size).unwrap(),
+                    data: BiffRecordData::RrdRstEtxp(reset(1)),
+                },
+                BiffRecord {
+                    offset: u32::try_from(bof_size + change_size + reset_size).unwrap(),
+                    data: BiffRecordData::RrdRstEtxp(reset(0)),
+                },
+                BiffRecord {
+                    offset: u32::try_from(bof_size + change_size + reset_size * 2).unwrap(),
+                    data: BiffRecordData::Eof,
+                },
+            ],
+            trailing_padding: Vec::new(),
+        };
+        let stream_bytes = stream.to_bytes().unwrap();
+        assert_eq!(BiffStream::from_bytes(&stream_bytes).unwrap(), stream);
+
+        let mut missing_reset = stream.clone();
+        missing_reset.records.remove(3);
+        missing_reset.records[3].offset -= u32::try_from(reset_size).unwrap();
+        assert!(missing_reset.to_bytes().is_err());
+
+        let mut duplicate_reset = stream.clone();
+        let BiffRecordData::RrdRstEtxp(value) = &mut duplicate_reset.records[3].data else {
+            unreachable!()
+        };
+        value.font_index = 1;
+        assert!(duplicate_reset.to_bytes().is_err());
+
+        let mut interrupted = stream;
+        interrupted.records[2].data = BiffRecordData::Eof;
+        assert!(interrupted.to_bytes().is_err());
+
+        let mut invalid_size = make_record(
+            RrdCellValue::Rk(RkNumber {
+                divided_by_100: false,
+                value: RkValue::Integer(1),
+            }),
+            8,
+            RrdCellValue::Blank,
+            0,
+        );
+        assert!(
+            BiffRecordData::RrdChgCell(Box::new(invalid_size.clone()))
+                .encode()
+                .is_err()
+        );
+        invalid_size.declared_old_value_size = 4;
+        invalid_size.new_value = RrdCellValue::Number(Xnum {
+            bits: f64::NAN.to_bits(),
+        });
+        assert!(
+            BiffRecordData::RrdChgCell(Box::new(invalid_size))
+                .encode()
+                .is_err()
+        );
+        assert!(
+            BiffRecordData::RrdRstEtxp(RrdRstEtxpRecord {
+                foreground_color: Icv { value: 0x0042 },
+                ..reset(0)
+            })
+            .encode()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn mdx_metadata_records_are_static_and_reference_preceding_strings() {
+        let header = |record_type| FrtHeader {
+            record_type,
+            flags: FrtFlags::empty(),
+            reserved: 0,
+        };
+        let wide = |value: &str| LpWideString {
+            character_count: u16::try_from(value.encode_utf16().count()).unwrap(),
+            characters: value.encode_utf16().collect(),
+        };
+        let index = |index| MdxStringIndex { index };
+        let records = vec![
+            BiffRecordData::MdtInfo(MdtInfoRecord {
+                header: header(MDT_INFO),
+                flags: MdtInfoFlags::COPY | MdtInfoFlags::PASTE_VALUES | MdtInfoFlags::ADJUST,
+                name: wide("value metadata"),
+            }),
+            BiffRecordData::MdxStr(MdxStrRecord {
+                header: header(MDX_STR),
+                value: wide("connection"),
+            }),
+            BiffRecordData::MdxTuple(MdxTupleRecord {
+                header: header(MDX_TUPLE),
+                connection_name: index(0),
+                source_function: MdxFunction::CubeMember,
+                declared_string_count: 2,
+                strings: vec![index(0), index(1)],
+            }),
+            BiffRecordData::MdxSet(MdxSetRecord {
+                header: header(MDX_SET),
+                connection_name: index(0),
+                source_function: MdxFunction::CubeSet,
+                sort_order: MdxSetSortOrder::NaturalAscending,
+                set_definition: index(1),
+                declared_string_count: 2,
+                strings: vec![index(1), index(2)],
+            }),
+            BiffRecordData::MdxProp(MdxPropRecord {
+                header: header(MDX_PROP),
+                connection_name: index(0),
+                source_function: MdxFunction::CubeMemberProperty,
+                member_name: index(1),
+                property_name: index(2),
+            }),
+            BiffRecordData::MdxKpi(MdxKpiRecord {
+                header: header(MDX_KPI),
+                connection_name: index(0),
+                source_function: MdxFunction::CubeKpiProperty,
+                property: MdxKpiProperty::CurrentTimeMember,
+                kpi_name: index(1),
+                kpi_member: index(2),
+            }),
+        ];
+        for expected in records {
+            let (record_type, payload) = expected.encode().unwrap();
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        let strings = ["connection", "definition", "member"]
+            .into_iter()
+            .map(|value| {
+                BiffRecordData::MdxStr(MdxStrRecord {
+                    header: header(MDX_STR),
+                    value: wide(value),
+                })
+            })
+            .collect::<Vec<_>>();
+        let tuple = BiffRecordData::MdxTuple(MdxTupleRecord {
+            header: header(MDX_TUPLE),
+            connection_name: index(0),
+            source_function: MdxFunction::CubeValue,
+            declared_string_count: 2,
+            strings: vec![index(1), index(2)],
+        });
+        let bof = BiffRecordData::Bof(BofRecord {
+            version: 0x0600,
+            document_type: 0x0005,
+            build_identifier: 0x1234,
+            build_year: 0x07cc,
+            history_flags: 0,
+            lowest_version: 6,
+        });
+        let raw = |values: &[BiffRecordData]| {
+            let mut bytes = Vec::new();
+            for value in values {
+                let (record_type, payload) = value.encode().unwrap();
+                bytes.extend_from_slice(&record_type.to_le_bytes());
+                bytes.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+                bytes.extend_from_slice(&payload);
+            }
+            bytes
+        };
+        let mut ordered = vec![bof.clone()];
+        ordered.extend(strings.clone());
+        ordered.push(tuple.clone());
+        ordered.push(BiffRecordData::Eof);
+        let bytes = raw(&ordered);
+        assert_eq!(
+            BiffStream::from_bytes(&bytes).unwrap().to_bytes().unwrap(),
+            bytes
+        );
+
+        let out_of_order = raw(&[bof, tuple, BiffRecordData::Eof]);
+        assert!(BiffStream::from_bytes(&out_of_order).is_err());
+
+        let invalid_mdt = BiffRecordData::MdtInfo(MdtInfoRecord {
+            header: header(MDT_INFO),
+            flags: MdtInfoFlags::PASTE_VALUES,
+            name: wide("invalid"),
+        });
+        assert!(invalid_mdt.encode().is_err());
+        let invalid_tuple = BiffRecordData::MdxTuple(MdxTupleRecord {
+            header: header(MDX_TUPLE),
+            connection_name: index(0),
+            source_function: MdxFunction::CubeSet,
+            declared_string_count: 1,
+            strings: Vec::new(),
+        });
+        assert!(invalid_tuple.encode().is_err());
+    }
+
+    #[test]
+    fn revision_cell_rich_string_continue_preserves_encoding_switches() {
+        fn change_with_chunks(
+            chunks: Vec<SstCharacterChunk>,
+            character_count: u16,
+            font_reset_count: u16,
+        ) -> RrdChgCellRecord {
+            let initial_flags = if chunks.first().is_some_and(|chunk| chunk.flags == 1) {
+                SstStringFlags::HIGH_BYTE
+            } else {
+                SstStringFlags::empty()
+            };
+            RrdChgCellRecord {
+                revision: Rrd {
+                    memory_size: 96,
+                    revision_id: 9,
+                    revision_type: RevisionType::ChangeCell,
+                    flags: RrdFlags::ACCEPTED,
+                    sheet_id: 1,
+                },
+                flags: RrdChgCellFlags::empty(),
+                display_number_format: RevisionDisplayNumberFormat::Automatic,
+                secondary_flags: RrdChgCellSecondaryFlags::empty(),
+                location: RgceLocation {
+                    row: 4,
+                    column: RgceColumn {
+                        column: 2,
+                        row_relative: false,
+                        column_relative: false,
+                    },
+                },
+                declared_old_value_size: 0,
+                font_reset_count,
+                old_format: None,
+                new_format: None,
+                old_value: RrdCellValue::Blank,
+                new_value: RrdCellValue::String(XlUnicodeRichExtendedString {
+                    declared_character_count: character_count,
+                    flags: initial_flags,
+                    declared_format_run_count: None,
+                    declared_extension_length: None,
+                    character_chunks: chunks,
+                    format_runs: Vec::new(),
+                    extension: None,
+                }),
+                physical_segments: None,
+            }
+        }
+
+        fn raw_records(records: &[EncodedBiffRecord]) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            for record in records {
+                bytes.extend_from_slice(&record.record_type.to_le_bytes());
+                bytes.extend_from_slice(&(record.payload.len() as u16).to_le_bytes());
+                bytes.extend_from_slice(&record.payload);
+            }
+            bytes
+        }
+
+        let mut switched = change_with_chunks(
+            vec![
+                SstCharacterChunk {
+                    flags: 0,
+                    characters: XlStringCharacters::Compressed(b"ab".to_vec()),
+                },
+                SstCharacterChunk {
+                    flags: 1,
+                    characters: XlStringCharacters::Unicode(vec![0x4e2d, 0x6587]),
+                },
+            ],
+            4,
+            1,
+        );
+        let logical = encode_sdk(&switched).unwrap();
+        switched.physical_segments = Some(vec![
+            RrdChgCellSegmentLayout {
+                logical_byte_count: u16::try_from(logical.len() - 4).unwrap(),
+                continuation_encoding: None,
+            },
+            RrdChgCellSegmentLayout {
+                logical_byte_count: 4,
+                continuation_encoding: Some(1),
+            },
+        ]);
+        let change_records = switched.encode_physical().unwrap();
+        assert_eq!(change_records.len(), 2);
+        assert_eq!(change_records[1].payload[0], 1);
+
+        let mut font_name = [0; 31];
+        font_name[0] = b'A' as u16;
+        let reset = RrdRstEtxpRecord {
+            font_index: 0,
+            used_font_name_characters: 1,
+            full_string: 1,
+            font_name,
+            font: Stxp {
+                height_twips: 200,
+                text_style: Ts {
+                    unused1: false,
+                    italic: false,
+                    unused2: 0,
+                    strikeout: false,
+                    unused3: 0,
+                },
+                weight: StxpFontWeight::Normal,
+                script_style: StxpScriptStyle::Normal,
+                underline: StxpUnderline::None,
+                font_family: 0,
+                character_set: 0,
+                unused: 0,
+            },
+            foreground_color: Icv { value: 0x0040 },
+            reserved1: 0,
+            reserved2: 0,
+        };
+        let reset_record = EncodedBiffRecord {
+            record_type: RRD_RST_ETXP,
+            payload: encode_sdk(&reset).unwrap(),
+        };
+        let eof_record = EncodedBiffRecord {
+            record_type: EOF,
+            payload: Vec::new(),
+        };
+        let mut physical = change_records.clone();
+        physical.push(reset_record);
+        physical.push(eof_record);
+        let bytes = raw_records(&physical);
+        let stream = RevisionLogStream::from_bytes(&bytes).unwrap();
+        assert_eq!(stream.to_bytes().unwrap(), bytes);
+        assert_eq!(
+            stream.records[0].data,
+            BiffRecordData::RrdChgCell(Box::new(switched.clone()))
+        );
+        assert!(matches!(
+            stream.records[1].data,
+            BiffRecordData::RrdRstEtxp(_)
+        ));
+
+        let mut same_encoding = change_with_chunks(
+            vec![
+                SstCharacterChunk {
+                    flags: 0,
+                    characters: XlStringCharacters::Compressed(b"ab".to_vec()),
+                },
+                SstCharacterChunk {
+                    flags: 0,
+                    characters: XlStringCharacters::Compressed(b"cd".to_vec()),
+                },
+            ],
+            4,
+            0,
+        );
+        let same_logical = encode_sdk(&same_encoding).unwrap();
+        same_encoding.physical_segments = Some(vec![
+            RrdChgCellSegmentLayout {
+                logical_byte_count: u16::try_from(same_logical.len() - 2).unwrap(),
+                continuation_encoding: None,
+            },
+            RrdChgCellSegmentLayout {
+                logical_byte_count: 2,
+                continuation_encoding: Some(0),
+            },
+        ]);
+        let same_physical = same_encoding.encode_physical().unwrap();
+        let same_bytes = raw_records(&same_physical);
+        let same_parsed = RevisionLogStream::from_bytes(&same_bytes).unwrap();
+        assert_eq!(same_parsed.to_bytes().unwrap(), same_bytes);
+        assert_eq!(
+            same_parsed.records[0].data,
+            BiffRecordData::RrdChgCell(Box::new(same_encoding))
+        );
+
+        let mut invalid_encoding = bytes.clone();
+        let marker_offset = 4 + change_records[0].payload.len() + 4;
+        invalid_encoding[marker_offset] = 2;
+        assert!(RevisionLogStream::from_bytes(&invalid_encoding).is_err());
+
+        let unicode = change_with_chunks(
+            vec![SstCharacterChunk {
+                flags: 1,
+                characters: XlStringCharacters::Unicode(vec![0x4e2d, 0x6587]),
+            }],
+            2,
+            0,
+        );
+        let unicode_logical = encode_sdk(&unicode).unwrap();
+        let first_len = unicode_logical.len() - 3;
+        let odd_split = vec![
+            EncodedBiffRecord {
+                record_type: RRD_CHG_CELL,
+                payload: unicode_logical[..first_len].to_vec(),
+            },
+            EncodedBiffRecord {
+                record_type: CONTINUE,
+                payload: std::iter::once(1)
+                    .chain(unicode_logical[first_len..].iter().copied())
+                    .collect(),
+            },
+        ];
+        assert!(RevisionLogStream::from_bytes(&raw_records(&odd_split)).is_err());
+    }
+
+    #[test]
+    fn revision_query_field_range_tracks_rrdinfo_version() {
+        let revision = Rrd {
+            memory_size: 64,
+            revision_id: 0,
+            revision_type: RevisionType::TrashQueryTableField,
+            flags: RrdFlags::empty(),
+            sheet_id: 3,
+        };
+        let legacy = BiffRecordData::RrdTqsif(RrdTqsifRecord {
+            record_type: RRD_TQSIF,
+            future_flags: 1,
+            range: RrdQueryRange::Legacy(Ref8U {
+                first_row: 1,
+                last_row: 4,
+                first_column: 2,
+                last_column: 5,
+            }),
+            revision,
+            field_id: 7,
+        });
+        let excel2007 = BiffRecordData::RrdTqsif(RrdTqsifRecord {
+            record_type: RRD_TQSIF,
+            future_flags: 1,
+            range: RrdQueryRange::Excel2007(Ref8U2007 {
+                first_row: 10,
+                last_row: 20,
+                first_column: 3,
+                last_column: 8,
+            }),
+            revision,
+            field_id: 8,
+        });
+        for expected in [legacy.clone(), excel2007.clone()] {
+            let (record_type, payload) = expected.encode().unwrap();
+            assert_eq!(record_type, RRD_TQSIF);
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        let bof = || {
+            BiffRecordData::Bof(BofRecord {
+                version: 0x0600,
+                document_type: 5,
+                build_identifier: 0x1234,
+                build_year: 0x07cc,
+                history_flags: 0,
+                lowest_version: 6,
+            })
+        };
+        let info = |biff_version| {
+            BiffRecordData::RrdInfo(RrdInfoRecord {
+                biff_version,
+                reserved1: 0,
+                sharing_flags: RrdInfoSharingFlags::empty(),
+                last_revision_guid: [0; 16],
+                root_revision_guid: [0; 16],
+                revision_id: 0,
+                version: 0,
+                history_flags: RrdInfoHistoryFlags::empty(),
+                revision_history_days: 1,
+            })
+        };
+        let make_stream = |data: Vec<BiffRecordData>| {
+            let mut offset = 0usize;
+            let mut records = Vec::with_capacity(data.len());
+            for data in data {
+                let payload_size = data.encode().unwrap().1.len();
+                records.push(BiffRecord {
+                    offset: u32::try_from(offset).unwrap(),
+                    data,
+                });
+                offset += payload_size + 4;
+            }
+            BiffStream {
+                records,
+                trailing_padding: Vec::new(),
+            }
+        };
+        let legacy_stream = make_stream(vec![bof(), info(8), legacy.clone(), BiffRecordData::Eof]);
+        let legacy_bytes = legacy_stream.to_bytes().unwrap();
+        assert_eq!(
+            BiffStream::from_bytes(&legacy_bytes).unwrap(),
+            legacy_stream
+        );
+        let excel2007_stream = make_stream(vec![
+            bof(),
+            info(12),
+            excel2007.clone(),
+            BiffRecordData::Eof,
+        ]);
+        let excel2007_bytes = excel2007_stream.to_bytes().unwrap();
+        assert_eq!(
+            BiffStream::from_bytes(&excel2007_bytes).unwrap(),
+            excel2007_stream
+        );
+
+        assert!(
+            make_stream(vec![bof(), info(12), legacy, BiffRecordData::Eof])
+                .to_bytes()
+                .is_err()
+        );
+        assert!(
+            make_stream(vec![bof(), info(8), excel2007, BiffRecordData::Eof])
+                .to_bytes()
+                .is_err()
+        );
+        assert!(
+            BiffRecordData::RrdTqsif(RrdTqsifRecord {
+                record_type: RRD_TQSIF,
+                future_flags: 1,
+                range: RrdQueryRange::Legacy(Ref8U {
+                    first_row: 0,
+                    last_row: 0,
+                    first_column: 0,
+                    last_column: 0,
+                }),
+                revision,
+                field_id: 0xffff,
+            })
+            .encode()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn revision_defined_names_split_formula_extra_from_text_fields() {
+        let empty_text = || RrdDefNameText {
+            custom_menu: xl_ascii(b""),
+            description: xl_ascii(b""),
+            help_topic: xl_ascii(b""),
+            status_text: xl_ascii(b""),
+        };
+        let rgce = [
+            0x60, 0, 0, 0, 0, 0, 0, 0, // Array
+            0x26, 0, 0, 0, 0, 0, 0, // MemArea
+            0x1e, 42, 0,    // integer constant
+            0x03, // add
+        ];
+        let rgcb = [
+            0, 0, 0, // one-column, one-row array
+            1, 0, 0, 0, 0, 0, 0, 0, 0, // numeric array value
+            1, 0, 1, 0, 2, 0, 3, 0, 4, 0, // one MemArea range
+        ];
+        let mut new_formula = FormulaTokenStream::from_bytes(&rgce).unwrap();
+        assert!(new_formula.parse_extra_data(&rgcb).unwrap().is_empty());
+        let old_formula = FormulaTokenStream::from_bytes(&[0x1e, 7, 0]).unwrap();
+        let revision = |revision_type| Rrd {
+            memory_size: 128,
+            revision_id: 9,
+            revision_type,
+            flags: RrdFlags::ACCEPTED,
+            sheet_id: u16::MAX,
+        };
+        let custom = BiffRecordData::RrdDefName(Box::new(RrdDefNameRecord {
+            revision: revision(RevisionType::DefinedName),
+            local_sheet_id: 2,
+            view_name: false,
+            reserved: 0,
+            new_flags: RrdDefNameFlags {
+                declared_formula_size: u16::try_from(rgce.len()).unwrap(),
+                options: RrdDefNameOptions::PROCEDURE_INFO | RrdDefNameOptions::DESCRIPTION,
+                function_group: 14,
+                shortcut_key: b'K',
+            },
+            old_flags: RrdDefNameFlags {
+                declared_formula_size: 3,
+                options: RrdDefNameOptions::STATUS_TEXT,
+                function_group: 0,
+                shortcut_key: 0,
+            },
+            name: RrdDefinedName::Custom(xl_ascii(b"_StaticName")),
+            new_formula,
+            new_text: RrdDefNameText {
+                description: xl_ascii(b"new description"),
+                ..empty_text()
+            },
+            old_formula,
+            old_text: RrdDefNameText {
+                status_text: xl_ascii(b"old status"),
+                ..empty_text()
+            },
+        }));
+        let built_in = BiffRecordData::RrdDefName(Box::new(RrdDefNameRecord {
+            revision: revision(RevisionType::DeleteDefinedName),
+            local_sheet_id: u16::MAX,
+            view_name: true,
+            reserved: 0,
+            new_flags: RrdDefNameFlags {
+                declared_formula_size: 0,
+                options: RrdDefNameOptions::empty(),
+                function_group: 0,
+                shortcut_key: 0,
+            },
+            old_flags: RrdDefNameFlags {
+                declared_formula_size: 0,
+                options: RrdDefNameOptions::empty(),
+                function_group: 0,
+                shortcut_key: 0,
+            },
+            name: RrdDefinedName::BuiltIn {
+                name: RrdBuiltInName::AutoOpen,
+                unused: [0xaa, 0xbb, 0xcc],
+            },
+            new_formula: FormulaTokenStream::from_bytes(&[]).unwrap(),
+            new_text: empty_text(),
+            old_formula: FormulaTokenStream::from_bytes(&[]).unwrap(),
+            old_text: empty_text(),
+        }));
+
+        for expected in [custom.clone(), built_in] {
+            let (record_type, payload) = expected.encode().unwrap();
+            assert_eq!(record_type, RRD_DEF_NAME);
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        let mut invalid_text_flag = match custom.clone() {
+            BiffRecordData::RrdDefName(value) => value,
+            _ => unreachable!(),
+        };
+        invalid_text_flag
+            .new_flags
+            .options
+            .remove(RrdDefNameOptions::DESCRIPTION);
+        assert!(
+            BiffRecordData::RrdDefName(invalid_text_flag)
+                .encode()
+                .is_err()
+        );
+
+        let mut invalid_name = match custom.clone() {
+            BiffRecordData::RrdDefName(value) => value,
+            _ => unreachable!(),
+        };
+        invalid_name.name = RrdDefinedName::Custom(xl_ascii(b"1bad"));
+        assert!(BiffRecordData::RrdDefName(invalid_name).encode().is_err());
+
+        let mut invalid_formula = match custom {
+            BiffRecordData::RrdDefName(value) => value,
+            _ => unreachable!(),
+        };
+        invalid_formula.new_formula = FormulaTokenStream::from_bytes(&[0x24, 0, 0, 0, 0]).unwrap();
+        invalid_formula.new_flags.declared_formula_size = 5;
+        assert!(
+            BiffRecordData::RrdDefName(invalid_formula)
+                .encode()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn standalone_revision_log_opens_edits_and_saves_through_cfb() {
+        let info = BiffRecordData::RrdInfo(RrdInfoRecord {
+            biff_version: 12,
+            reserved1: 0,
+            sharing_flags: RrdInfoSharingFlags::empty(),
+            last_revision_guid: [0x11; 16],
+            root_revision_guid: [0x22; 16],
+            revision_id: 0,
+            version: 1,
+            history_flags: RrdInfoHistoryFlags::empty(),
+            revision_history_days: 1,
+        });
+        let head = BiffRecordData::RrdHead(RrdHeadRecord {
+            revision: Rrd {
+                memory_size: u32::MAX,
+                revision_id: 0,
+                revision_type: RevisionType::Header,
+                flags: RrdFlags::UNUSED,
+                sheet_id: u16::MAX,
+            },
+            revision_set_guid: [0x33; 16],
+            file_code_page: 1200,
+            used_user_name_characters: 5,
+            user_name: fixed_ascii(114, b"Alice"),
+            saved_at: ShortDtr {
+                year: 2026,
+                month: 7,
+                day: 14,
+                hour: 9,
+                minute: 30,
+                second: 0,
+                weekday: 2,
+            },
+            next_sheet_id: 2,
+        });
+        let tab_ids = BiffRecordData::RrTabId(RrTabIdRecord { sheet_ids: vec![1] });
+        let removed_field = BiffRecordData::RrdTqsif(RrdTqsifRecord {
+            record_type: RRD_TQSIF,
+            future_flags: 1,
+            range: RrdQueryRange::Excel2007(Ref8U2007 {
+                first_row: 1,
+                last_row: 5,
+                first_column: 2,
+                last_column: 4,
+            }),
+            revision: Rrd {
+                memory_size: 64,
+                revision_id: 0,
+                revision_type: RevisionType::TrashQueryTableField,
+                flags: RrdFlags::empty(),
+                sheet_id: 1,
+            },
+            field_id: 7,
+        });
+        let mut offset = 0usize;
+        let records = [info, head, tab_ids, removed_field, BiffRecordData::Eof]
+            .into_iter()
+            .map(|data| {
+                let record = BiffRecord {
+                    offset: u32::try_from(offset).unwrap(),
+                    data,
+                };
+                offset += record.data.encode().unwrap().1.len() + 4;
+                record
+            })
+            .collect::<Vec<_>>();
+        let expected = RevisionLogStream {
+            records,
+            trailing_padding: vec![0; 8],
+        };
+        let bytes = expected.to_bytes().unwrap();
+        assert_eq!(RevisionLogStream::from_bytes(&bytes).unwrap(), expected);
+        assert!(matches!(
+            BiffStream::from_bytes(&bytes).unwrap().records[0].data,
+            BiffRecordData::Unknown {
+                record_type: RRD_INFO,
+                ..
+            }
+        ));
+
+        let mut compound = CompoundFile::new(crate::cfb::Version::V3).unwrap();
+        compound
+            .create_stream(REVISION_LOG_STREAM_PATH, bytes)
+            .unwrap();
+        let mut opened = RevisionLogStream::open(&compound).unwrap().unwrap();
+        let BiffRecordData::RrdTqsif(value) = &mut opened.records[3].data else {
+            unreachable!()
+        };
+        value.field_id = 8;
+        opened.save(&mut compound).unwrap();
+
+        let reopened_compound = CompoundFile::from_bytes(&compound.to_bytes().unwrap()).unwrap();
+        let reopened = RevisionLogStream::open(&reopened_compound)
+            .unwrap()
+            .unwrap();
+        let BiffRecordData::RrdTqsif(value) = &reopened.records[3].data else {
+            unreachable!()
+        };
+        assert_eq!(value.field_id, 8);
+        assert_eq!(reopened.to_bytes().unwrap(), opened.to_bytes().unwrap());
+    }
+
+    #[test]
+    fn revision_undo_records_cover_every_static_ducr_branch() {
+        let location = Ducr {
+            reserved1: 0,
+            token_index: 1,
+            original_token: 0x24,
+            uses_second_sheet: false,
+            radical: DucrRadical::Location(RgceLocation8 {
+                location: RgceLocation {
+                    row: 7,
+                    column: RgceColumn {
+                        column: 3,
+                        row_relative: true,
+                        column_relative: false,
+                    },
+                },
+                reserved: 0,
+            }),
+            conditional: DucrConditional::Location {
+                sheet_id: 1,
+                location: RrLocation {
+                    row: 8,
+                    column: 4,
+                    quoted_label: true,
+                    relative: false,
+                },
+            },
+        };
+        let area = Ducr {
+            reserved1: 0,
+            token_index: 2,
+            original_token: 0x45,
+            uses_second_sheet: false,
+            radical: DucrRadical::Area(RgceArea {
+                first_row: 1,
+                last_row: 3,
+                first_column: RgceColumn {
+                    column: 2,
+                    row_relative: false,
+                    column_relative: false,
+                },
+                last_column: RgceColumn {
+                    column: 5,
+                    row_relative: true,
+                    column_relative: true,
+                },
+            }),
+            conditional: DucrConditional::DefinedName {
+                sheet_id: u16::MAX,
+                name: DucrDefinedName::BuiltIn {
+                    name: RevisionBuiltInName::PrintArea,
+                    unused: [0xaa, 0xbb, 0xcc],
+                },
+            },
+        };
+        let unused = Ducr {
+            reserved1: 0,
+            token_index: 3,
+            original_token: 0x1e,
+            uses_second_sheet: false,
+            radical: DucrRadical::Unused([0; 8]),
+            conditional: DucrConditional::DefinedName {
+                sheet_id: 2,
+                name: DucrDefinedName::Custom(xl_ascii(b"Named")),
+            },
+        };
+        let natural = Ducr {
+            reserved1: 0,
+            token_index: 4,
+            original_token: 0x18,
+            uses_second_sheet: false,
+            radical: DucrRadical::NaturalLanguage(Duce {
+                stacked: DuceStacked::Flags {
+                    location_count: 2,
+                    relative: true,
+                },
+                radical: DuceRadical::Area {
+                    reference: Ref8U {
+                        first_row: 2,
+                        last_row: 4,
+                        first_column: 1,
+                        last_column: 3,
+                    },
+                    token: 0x25,
+                },
+                formula_type: NaturalFormulaType::StackedRadical,
+                stacked_locations: vec![
+                    RrLocation {
+                        row: 2,
+                        column: 1,
+                        quoted_label: false,
+                        relative: true,
+                    },
+                    RrLocation {
+                        row: 4,
+                        column: 3,
+                        quoted_label: true,
+                        relative: false,
+                    },
+                ],
+            }),
+            conditional: DucrConditional::Location {
+                sheet_id: 2,
+                location: RrLocation {
+                    row: 9,
+                    column: 6,
+                    quoted_label: false,
+                    relative: false,
+                },
+            },
+        };
+        let natural_neither = Ducr {
+            reserved1: 0,
+            token_index: 5,
+            original_token: 0x18,
+            uses_second_sheet: false,
+            radical: DucrRadical::NaturalLanguage(Duce {
+                stacked: DuceStacked::Location(RrLocation {
+                    row: 3,
+                    column: 2,
+                    quoted_label: false,
+                    relative: true,
+                }),
+                radical: DuceRadical::Undefined([0xee; 9]),
+                formula_type: NaturalFormulaType::Neither02,
+                stacked_locations: Vec::new(),
+            }),
+            conditional: DucrConditional::Location {
+                sheet_id: 1,
+                location: RrLocation {
+                    row: 3,
+                    column: 2,
+                    quoted_label: false,
+                    relative: false,
+                },
+            },
+        };
+        let natural_radical_error = Ducr {
+            reserved1: 0,
+            token_index: 6,
+            original_token: 0x18,
+            uses_second_sheet: false,
+            radical: DucrRadical::NaturalLanguage(Duce {
+                stacked: DuceStacked::Location(RrLocation {
+                    row: 4,
+                    column: 3,
+                    quoted_label: true,
+                    relative: false,
+                }),
+                radical: DuceRadical::AreaError {
+                    unused: [0xdd; 8],
+                    token: 0x2b,
+                },
+                formula_type: NaturalFormulaType::Radical,
+                stacked_locations: Vec::new(),
+            }),
+            conditional: DucrConditional::Location {
+                sheet_id: 1,
+                location: RrLocation {
+                    row: 4,
+                    column: 3,
+                    quoted_label: false,
+                    relative: false,
+                },
+            },
+        };
+        let revision = |revision_id, revision_type| Rrd {
+            memory_size: 128,
+            revision_id,
+            revision_type,
+            flags: RrdFlags::empty(),
+            sheet_id: 1,
+        };
+        let ins_del = BiffRecordData::RrdInsDel(RrdInsDelRecord {
+            revision: revision(5, RevisionType::InsertRow),
+            end_of_list: true,
+            range: Ref8U {
+                first_row: 10,
+                last_row: 12,
+                first_column: 0,
+                last_column: 5,
+            },
+            declared_undo_count: 6,
+            undo: vec![
+                location.clone(),
+                area.clone(),
+                unused,
+                natural.clone(),
+                natural_neither,
+                natural_radical_error,
+            ],
+        });
+        let mut cross_sheet = area;
+        cross_sheet.uses_second_sheet = true;
+        let moved = BiffRecordData::RrdMove(RrdMoveRecord {
+            revision: revision(6, RevisionType::Move),
+            source_range: Ref8U {
+                first_row: 1,
+                last_row: 2,
+                first_column: 3,
+                last_column: 4,
+            },
+            destination_range: Ref8U {
+                first_row: 5,
+                last_row: 6,
+                first_column: 7,
+                last_column: 8,
+            },
+            source_sheet_id: 2,
+            declared_undo_count: 2,
+            undo: vec![cross_sheet, natural],
+        });
+
+        for expected in [ins_del.clone(), moved] {
+            let (record_type, payload) = expected.encode().unwrap();
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        let mut invalid_second_sheet = match ins_del.clone() {
+            BiffRecordData::RrdInsDel(value) => value,
+            _ => unreachable!(),
+        };
+        invalid_second_sheet.undo[0].uses_second_sheet = true;
+        assert!(
+            BiffRecordData::RrdInsDel(invalid_second_sheet)
+                .encode()
+                .is_err()
+        );
+
+        let mut invalid_count = match ins_del {
+            BiffRecordData::RrdInsDel(value) => value,
+            _ => unreachable!(),
+        };
+        invalid_count.declared_undo_count = 3;
+        assert!(BiffRecordData::RrdInsDel(invalid_count).encode().is_err());
+
+        let mut invalid_natural = location;
+        invalid_natural.original_token = 0x18;
+        assert!(
+            BiffRecordData::RrdMove(RrdMoveRecord {
+                revision: revision(6, RevisionType::Move),
+                source_range: Ref8U {
+                    first_row: 0,
+                    last_row: 0,
+                    first_column: 0,
+                    last_column: 0,
+                },
+                destination_range: Ref8U {
+                    first_row: 1,
+                    last_row: 1,
+                    first_column: 1,
+                    last_column: 1,
+                },
+                source_sheet_id: 1,
+                declared_undo_count: 1,
+                undo: vec![invalid_natural],
+            })
+            .encode()
+            .is_err()
+        );
+
+        let (_, mut payload) = ins_del_with_no_undo().encode().unwrap();
+        payload[14] = 2;
+        assert!(decode_record(RRD_INS_DEL, &payload, false, true, 0).is_err());
+    }
+
+    fn ins_del_with_no_undo() -> BiffRecordData {
+        BiffRecordData::RrdInsDel(RrdInsDelRecord {
+            revision: Rrd {
+                memory_size: 64,
+                revision_id: 1,
+                revision_type: RevisionType::DeleteColumn,
+                flags: RrdFlags::empty(),
+                sheet_id: 1,
+            },
+            end_of_list: false,
+            range: Ref8U {
+                first_row: 0,
+                last_row: 10,
+                first_column: 2,
+                last_column: 2,
+            },
+            declared_undo_count: 0,
+            undo: Vec::new(),
+        })
+    }
+
     #[test]
     fn initial_biff8_records_round_trip() {
         let stream = BiffStream {
@@ -19329,6 +30817,50 @@ mod tests {
     }
 
     #[test]
+    fn active_x_picture_formula_is_fully_typed_and_exact() {
+        // FtPictFmla from an Excel ActiveX CommandButton. cbClass counts the 21
+        // characters, while the XLUnicodeStringNoCch also carries its flag byte.
+        let bytes = [
+            0x24, 0x00, 0x05, 0x00, 0x40, 0x42, 0x3e, 0x03, 0x02, 0x80, 0xcd, 0xb4, 0x04, 0x03,
+            0x15, 0x00, 0x00, b'F', b'o', b'r', b'm', b's', b'.', b'C', b'o', b'm', b'm', b'a',
+            b'n', b'd', b'B', b'u', b't', b't', b'o', b'n', b'.', b'1', 0x00, 0x00, 0x00, 0x00,
+            0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let flags = ObjPictureFlags::CONTROL | ObjPictureFlags::CONTROL_STREAM;
+        let value = ObjSubrecordData::parse(
+            0x0009,
+            bytes.len() as u16,
+            &bytes,
+            Some(0x0008),
+            Some(flags),
+            Limits::default(),
+        )
+        .unwrap();
+        let ObjSubrecordData::PictureFormula(picture) = &value else {
+            panic!("expected typed FtPictFmla");
+        };
+        let ObjFormulaData::Parsed {
+            embed_info: Some(embed),
+            padding,
+            ..
+        } = &picture.formula.data
+        else {
+            panic!("expected typed PictFmlaEmbedInfo");
+        };
+        assert_eq!(embed.declared_class_count, 21);
+        assert_eq!(embed.class_name.as_ref().unwrap().character_count(), 21);
+        assert!(padding.is_empty());
+        assert_eq!(picture.control_stream_position, Some(0));
+        assert_eq!(picture.control_stream_size, Some(84));
+        let key = picture.key.as_ref().unwrap();
+        assert!(key.key.is_empty());
+        assert!(matches!(key.linked_cell.data, ObjFormulaData::Empty));
+        assert!(matches!(key.list_fill_range.data, ObjFormulaData::Empty));
+        assert!(picture.compatibility_trailing.is_empty());
+        assert_eq!(value.to_bytes(Some(flags)).unwrap(), bytes);
+    }
+
+    #[test]
     fn self_relative_security_descriptor_is_fully_typed_and_exact() {
         let bytes = [
             0x01, 0x00, 0x04, 0x80, 0x40, 0x00, 0x00, 0x00, 0x4c, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -19554,6 +31086,983 @@ mod tests {
         let decoded: AutoFilterRecord = parse_sdk(&bytes, 0, AUTO_FILTER).unwrap();
         assert_eq!(decoded, value);
         assert_eq!(encode_sdk(&decoded).unwrap(), bytes);
+    }
+
+    #[test]
+    fn feature11_embedded_auto_filter_reuses_the_static_biff_shape() {
+        let filter = AutoFilterRecord {
+            entry_index: 2,
+            options: AutoFilterOptions {
+                join_or: false,
+                simple: [true, true],
+                top_n: false,
+                top: false,
+                percent: false,
+                top_count: 0,
+            },
+            operands: [
+                AutoFilterOperand {
+                    comparison: 3,
+                    value: AutoFilterOperandValue::Rk {
+                        value: 0x0000_002a,
+                        unused: 0,
+                    },
+                    string: None,
+                },
+                AutoFilterOperand {
+                    comparison: 5,
+                    value: AutoFilterOperandValue::BooleanOrError {
+                        value: 1,
+                        unused1: 0,
+                        unused2: 0,
+                    },
+                    string: None,
+                },
+            ],
+        };
+        let declared_size = u32::try_from(encode_sdk(&filter).unwrap().len()).unwrap();
+        let value = Feature11AutoFilter {
+            declared_size,
+            unused: 0xa55a,
+            filter: Some(Box::new(filter)),
+        };
+        let bytes = encode_sdk(&value).unwrap();
+        assert_eq!(bytes.len(), usize::try_from(declared_size).unwrap() + 6);
+        assert_eq!(
+            parse_sdk::<Feature11AutoFilter>(&bytes, 0, FEATURE11).unwrap(),
+            value
+        );
+
+        let empty = Feature11AutoFilter {
+            declared_size: 0,
+            unused: 7,
+            filter: None,
+        };
+        assert_eq!(encode_sdk(&empty).unwrap(), [0, 0, 0, 0, 7, 0]);
+    }
+
+    #[test]
+    fn feature11_embedded_auto_filter_size_is_checked() {
+        let value = Feature11AutoFilter {
+            declared_size: 1,
+            unused: 0,
+            filter: None,
+        };
+        assert!(encode_sdk(&value).is_err());
+
+        let oversized = [0x21, 0x08, 0, 0, 0, 0];
+        assert!(parse_sdk::<Feature11AutoFilter>(&oversized, 0, FEATURE11).is_err());
+    }
+
+    #[test]
+    fn feature11_column_formula_is_sized_and_static() {
+        let formula = ListParsedFormula {
+            declared_token_size: 3,
+            formula: FormulaTokenStream::from_bytes(&[0x1e, 42, 0]).unwrap(),
+        };
+        let value = Feat11Fmla {
+            declared_size: 5,
+            formula,
+        };
+        let bytes = encode_sdk(&value).unwrap();
+        assert_eq!(bytes, [5, 0, 3, 0, 0x1e, 42, 0]);
+        assert_eq!(
+            parse_sdk::<Feat11Fmla>(&bytes, 0, FEATURE11).unwrap(),
+            value
+        );
+
+        let mut invalid = value;
+        invalid.declared_size = 4;
+        assert!(encode_sdk(&invalid).is_err());
+    }
+
+    #[test]
+    fn list_parsed_array_formula_consumes_only_its_rgb_extra_prefix() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&8u16.to_le_bytes());
+        bytes.extend_from_slice(&[0x60, 0, 0, 0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&[
+            0, 0, 0, // one-column, one-row array
+            1, 0, 0, 0, 0, 0, 0, 0, 0, // one numeric value
+        ]);
+        bytes.extend_from_slice(&0xbbaa_u16.to_le_bytes());
+
+        let mut reader = Reader::new(Cursor::new(bytes.as_slice())).unwrap();
+        let value = ListParsedArrayFormula::read_from(&mut reader).unwrap();
+        assert_eq!(reader.remaining().unwrap(), 2);
+        assert_eq!(reader.read_u16().unwrap(), 0xbbaa);
+        assert_eq!(encode_sdk(&value).unwrap(), bytes[..22]);
+        assert_eq!(value.formula.missing_extra_count(), 0);
+
+        let mut field = feature11_field(
+            Feature11FieldFlags::LOAD_TOTAL_FORMULA | Feature11FieldFlags::LOAD_TOTAL_ARRAY,
+            9,
+        );
+        field.total_formula = Some(Feat11TotalFmla::ArrayFormula(value));
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        field
+            .write(&mut writer, 0, TableFeatureFlags::empty(), 1)
+            .unwrap();
+        let field_bytes = writer.into_inner().into_inner();
+        let mut reader = Reader::new(Cursor::new(field_bytes.as_slice())).unwrap();
+        assert_eq!(
+            Feature11FieldDataItem::read(&mut reader, 0, TableFeatureFlags::empty(), 1).unwrap(),
+            field
+        );
+        assert_eq!(reader.remaining().unwrap(), 0);
+    }
+
+    #[test]
+    fn feature11_total_formula_and_text_round_trip_in_field_order() {
+        let mut formula_field = feature11_field(Feature11FieldFlags::LOAD_TOTAL_FORMULA, 9);
+        formula_field.total_formula = Some(Feat11TotalFmla::Formula(ListParsedFormula {
+            declared_token_size: 3,
+            formula: FormulaTokenStream::from_bytes(&[0x1e, 7, 0]).unwrap(),
+        }));
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        formula_field
+            .write(&mut writer, 0, TableFeatureFlags::empty(), 1)
+            .unwrap();
+        let bytes = writer.into_inner().into_inner();
+        let mut reader = Reader::new(Cursor::new(bytes.as_slice())).unwrap();
+        assert_eq!(
+            Feature11FieldDataItem::read(&mut reader, 0, TableFeatureFlags::empty(), 1).unwrap(),
+            formula_field
+        );
+        assert_eq!(reader.remaining().unwrap(), 0);
+
+        let mut text_field = feature11_field(Feature11FieldFlags::LOAD_TOTAL_STRING, 0);
+        text_field.total_text = Some(xl_ascii(b"Total"));
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        text_field
+            .write(&mut writer, 0, TableFeatureFlags::empty(), 1)
+            .unwrap();
+        let bytes = writer.into_inner().into_inner();
+        let mut reader = Reader::new(Cursor::new(bytes.as_slice())).unwrap();
+        assert_eq!(
+            Feature11FieldDataItem::read(&mut reader, 0, TableFeatureFlags::empty(), 1).unwrap(),
+            text_field
+        );
+        assert_eq!(reader.remaining().unwrap(), 0);
+    }
+
+    #[test]
+    fn feature11_total_formula_flags_and_variants_are_checked() {
+        let invalid = feature11_field(Feature11FieldFlags::LOAD_TOTAL_ARRAY, 9);
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        assert!(
+            invalid
+                .write(&mut writer, 0, TableFeatureFlags::empty(), 1)
+                .is_err()
+        );
+
+        let mut wrong_variant = feature11_field(
+            Feature11FieldFlags::LOAD_TOTAL_FORMULA | Feature11FieldFlags::LOAD_TOTAL_ARRAY,
+            9,
+        );
+        wrong_variant.total_formula = Some(Feat11TotalFmla::Formula(ListParsedFormula {
+            declared_token_size: 3,
+            formula: FormulaTokenStream::from_bytes(&[0x1e, 7, 0]).unwrap(),
+        }));
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        assert!(
+            wrong_variant
+                .write(&mut writer, 0, TableFeatureFlags::empty(), 1)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn feature11_xml_map_types_only_the_binary_mapping_metadata() {
+        let map = Feat11XMap {
+            declared_entry_count: 1,
+            entries: vec![Feat11XMapEntry {
+                flags: Feat11XMapEntryFlags::LOAD_XMAP
+                    | Feat11XMapEntryFlags::CAN_BE_SINGLE
+                    | Feat11XMapEntryFlags::RESERVED3,
+                details: Feat11XMapEntry2 {
+                    map_id: 17,
+                    xpath: xl_ascii(b"/root/item/value"),
+                },
+            }],
+        };
+        let bytes = encode_sdk(&map).unwrap();
+        assert_eq!(parse_sdk::<Feat11XMap>(&bytes, 0, FEATURE11).unwrap(), map);
+
+        let mut field = feature11_field(Feature11FieldFlags::LOAD_XML_MAP, 0);
+        field.xml_data_type = 0x0000_2125;
+        field.xml_map = Some(map);
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        field
+            .write(&mut writer, 2, TableFeatureFlags::empty(), 1)
+            .unwrap();
+        let bytes = writer.into_inner().into_inner();
+        let mut reader = Reader::new(Cursor::new(bytes.as_slice())).unwrap();
+        assert_eq!(
+            Feature11FieldDataItem::read(&mut reader, 2, TableFeatureFlags::empty(), 1).unwrap(),
+            field
+        );
+        assert_eq!(reader.remaining().unwrap(), 0);
+    }
+
+    #[test]
+    fn feature11_xml_map_count_and_source_are_checked() {
+        let invalid_count = Feat11XMap {
+            declared_entry_count: 2,
+            entries: Vec::new(),
+        };
+        assert!(encode_sdk(&invalid_count).is_err());
+
+        let mut field = feature11_field(Feature11FieldFlags::LOAD_XML_MAP, 0);
+        field.xml_map = Some(Feat11XMap {
+            declared_entry_count: 0,
+            entries: Vec::new(),
+        });
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        assert!(
+            field
+                .write(&mut writer, 0, TableFeatureFlags::empty(), 1)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn feature11_web_source_round_trips_wss_defaults_and_formulas() {
+        let mut field = feature11_field(Feature11FieldFlags::LOAD_FORMULA, 0);
+        field.web_data_type = 1;
+        field.formula = Some(Feat11Fmla {
+            declared_size: 5,
+            formula: ListParsedFormula {
+                declared_token_size: 3,
+                formula: FormulaTokenStream::from_bytes(&[0x1e, 9, 0]).unwrap(),
+            },
+        });
+        field.wss_info = Some(Feat11WssListInfo {
+            locale_id: 0x0409,
+            decimal_places: 2,
+            display_flags: Feat11WssDisplayFlags::DECIMAL_SET
+                | Feat11WssDisplayFlags::from_bits_retain(1 << 3)
+                | Feat11WssDisplayFlags::UNUSED,
+            validation_flags: Feat11WssValidationFlags::DEFAULT_SET
+                | Feat11WssValidationFlags::LOAD_FORMULA
+                | Feat11WssValidationFlags::from_bits_retain(1 << 8)
+                | Feat11WssValidationFlags::UNUSED,
+            default_value: Some(Feat11WssDefaultValue::Text(xl_ascii(b"default"))),
+            validation_formula: Some(xl_ascii(b"=[Value]<>\"\"")),
+            reserved: 0xa5a5_5a5a,
+        });
+
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        field
+            .write(&mut writer, 1, TableFeatureFlags::empty(), 1)
+            .unwrap();
+        let bytes = writer.into_inner().into_inner();
+        let mut reader = Reader::new(Cursor::new(bytes.as_slice())).unwrap();
+        assert_eq!(
+            Feature11FieldDataItem::read(&mut reader, 1, TableFeatureFlags::empty(), 1).unwrap(),
+            field
+        );
+        assert_eq!(reader.remaining().unwrap(), 0);
+    }
+
+    #[test]
+    fn feature11_wss_default_union_covers_every_lfdt_shape() {
+        let values = [
+            (1, Some(Feat11WssDefaultValue::Text(xl_ascii(b"text")))),
+            (2, Some(Feat11WssDefaultValue::NumberBits(1.5f64.to_bits()))),
+            (3, Some(Feat11WssDefaultValue::Boolean(1))),
+            (
+                4,
+                Some(Feat11WssDefaultValue::DateBits(45_000f64.to_bits())),
+            ),
+            (5, None),
+            (
+                6,
+                Some(Feat11WssDefaultValue::CurrencyBits(12.5f64.to_bits())),
+            ),
+            (7, None),
+            (8, Some(Feat11WssDefaultValue::Choice(xl_ascii(b"choice")))),
+            (9, None),
+            (10, None),
+            (
+                11,
+                Some(Feat11WssDefaultValue::MultiChoice(xl_ascii(b"a;#b"))),
+            ),
+        ];
+        for (web_data_type, default_value) in values {
+            let value = Feat11WssListInfo {
+                locale_id: 0,
+                decimal_places: 0,
+                display_flags: Feat11WssDisplayFlags::empty(),
+                validation_flags: Feat11WssValidationFlags::empty(),
+                default_value,
+                validation_formula: None,
+                reserved: 0,
+            };
+            let mut writer = Writer::new(Cursor::new(Vec::new()));
+            value.write(&mut writer, web_data_type).unwrap();
+            let bytes = writer.into_inner().into_inner();
+            let mut reader = Reader::new(Cursor::new(bytes.as_slice())).unwrap();
+            assert_eq!(
+                Feat11WssListInfo::read(&mut reader, web_data_type).unwrap(),
+                value
+            );
+            assert_eq!(reader.remaining().unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn feature11_external_query_and_cached_header_round_trip() {
+        let mut query = feature11_field(Feature11FieldFlags::empty(), 0);
+        query.query_field_id = Some(19);
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        query
+            .write(&mut writer, 3, TableFeatureFlags::empty(), 1)
+            .unwrap();
+        let bytes = writer.into_inner().into_inner();
+        let mut reader = Reader::new(Cursor::new(bytes.as_slice())).unwrap();
+        assert_eq!(
+            Feature11FieldDataItem::read(&mut reader, 3, TableFeatureFlags::empty(), 1).unwrap(),
+            query
+        );
+
+        let format = empty_dxf_n12_list();
+        let format_size = u32::try_from(format.to_bytes().unwrap().len()).unwrap();
+        let mut cached = feature11_field(Feature11FieldFlags::SAVE_STYLE_NAME, 0);
+        cached.cached_header = Some(CachedDiskHeader {
+            declared_format_size: format_size,
+            format,
+            style_name: Some(xl_ascii(b"Heading")),
+        });
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        cached
+            .write(&mut writer, 0, TableFeatureFlags::empty(), 0)
+            .unwrap();
+        let bytes = writer.into_inner().into_inner();
+        let mut reader = Reader::new(Cursor::new(bytes.as_slice())).unwrap();
+        assert_eq!(
+            Feature11FieldDataItem::read(&mut reader, 0, TableFeatureFlags::empty(), 0).unwrap(),
+            cached
+        );
+        assert_eq!(reader.remaining().unwrap(), 0);
+    }
+
+    #[test]
+    fn feature11_wss_query_and_cached_header_conditions_are_checked() {
+        let mut missing_wss = feature11_field(Feature11FieldFlags::empty(), 0);
+        missing_wss.web_data_type = 1;
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        assert!(
+            missing_wss
+                .write(&mut writer, 1, TableFeatureFlags::empty(), 1)
+                .is_err()
+        );
+
+        let mut zero_query = feature11_field(Feature11FieldFlags::empty(), 0);
+        zero_query.query_field_id = Some(0);
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        assert!(
+            zero_query
+                .write(&mut writer, 3, TableFeatureFlags::empty(), 1)
+                .is_err()
+        );
+
+        let cached = feature11_field(Feature11FieldFlags::SAVE_STYLE_NAME, 0);
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        assert!(
+            cached
+                .write(&mut writer, 0, TableFeatureFlags::empty(), 1)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn feature11_sharepoint_trailing_arrays_are_static_and_exact() {
+        let deleted = Feat11RgSharepointIdDel {
+            declared_id_count: 2,
+            row_ids: vec![7, 11],
+        };
+        let deleted_bytes = encode_sdk(&deleted).unwrap();
+        assert_eq!(deleted_bytes, [2, 0, 7, 0, 0, 0, 11, 0, 0, 0]);
+        assert_eq!(
+            parse_sdk::<Feat11RgSharepointIdDel>(&deleted_bytes, 0, FEATURE11).unwrap(),
+            deleted
+        );
+
+        let changed = Feat11RgSharepointIdChange {
+            declared_id_count: 1,
+            row_ids: vec![13],
+        };
+        let changed_bytes = encode_sdk(&changed).unwrap();
+        assert_eq!(changed_bytes, [1, 0, 13, 0, 0, 0]);
+        assert_eq!(
+            parse_sdk::<Feat11RgSharepointIdChange>(&changed_bytes, 0, FEATURE11).unwrap(),
+            changed
+        );
+
+        let invalid = Feat11RgInvalidCells {
+            declared_cell_count: 2,
+            cells: vec![
+                Feat11CellStruct {
+                    row_id: 7,
+                    field_id: 3,
+                },
+                Feat11CellStruct {
+                    row_id: 11,
+                    field_id: 5,
+                },
+            ],
+        };
+        let invalid_bytes = encode_sdk(&invalid).unwrap();
+        assert_eq!(invalid_bytes.len(), 18);
+        assert_eq!(
+            parse_sdk::<Feat11RgInvalidCells>(&invalid_bytes, 0, FEATURE11).unwrap(),
+            invalid
+        );
+    }
+
+    #[test]
+    fn feature11_sharepoint_array_counts_are_checked_on_write() {
+        let deleted = Feat11RgSharepointIdDel {
+            declared_id_count: 2,
+            row_ids: vec![7],
+        };
+        assert!(encode_sdk(&deleted).is_err());
+
+        let invalid = Feat11RgInvalidCells {
+            declared_cell_count: 0,
+            cells: vec![Feat11CellStruct {
+                row_id: 7,
+                field_id: 3,
+            }],
+        };
+        assert!(encode_sdk(&invalid).is_err());
+    }
+
+    #[test]
+    fn feature11_web_table_reaches_all_sharepoint_trailing_arrays() {
+        let mut field = feature11_field(Feature11FieldFlags::empty(), 0);
+        field.web_data_type = 5;
+        field.wss_info = Some(Feat11WssListInfo {
+            locale_id: 0x0409,
+            decimal_places: 0,
+            display_flags: Feat11WssDisplayFlags::empty(),
+            validation_flags: Feat11WssValidationFlags::empty(),
+            default_value: None,
+            validation_formula: None,
+            reserved: 0,
+        });
+        let value = TableFeatureType {
+            source_type: 1,
+            list_id: 7,
+            header_row_count: 1,
+            total_row_count: 0,
+            next_field_id: 2,
+            fixed_data_size: 64,
+            writer_build: 1234,
+            unused1: 0,
+            flags: TableFeatureFlags::LOAD_DELETED_IDS
+                | TableFeatureFlags::LOAD_CHANGED_IDS
+                | TableFeatureFlags::LOAD_INVALID_CELLS
+                | TableFeatureFlags::from_bits_retain(0x000b_0000),
+            cache_stream_offset: 0,
+            cache_stream_size: 0,
+            cache_character_count: 0,
+            edit_mode: 0,
+            hash_parameters: [0; 16],
+            name: xl_ascii(b"WebTable"),
+            field_count: 1,
+            csp_name: None,
+            entry_id: None,
+            fields: vec![field],
+            deleted_row_ids: Some(Feat11RgSharepointIdDel {
+                declared_id_count: 1,
+                row_ids: vec![10],
+            }),
+            changed_row_ids: Some(Feat11RgSharepointIdChange {
+                declared_id_count: 1,
+                row_ids: vec![11],
+            }),
+            invalid_cells: Some(Feat11RgInvalidCells {
+                declared_cell_count: 1,
+                cells: vec![Feat11CellStruct {
+                    row_id: 11,
+                    field_id: 1,
+                }],
+            }),
+        };
+        let bytes = encode_sdk(&value).unwrap();
+        assert_eq!(
+            parse_sdk::<TableFeatureType>(&bytes, 0, FEATURE11).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn feature12_requires_an_extended_table_property_and_round_trips() {
+        let mut field = feature11_field(Feature11FieldFlags::empty(), 0);
+        field.query_field_id = Some(7);
+        let table = TableFeatureType {
+            source_type: 3,
+            list_id: 1,
+            header_row_count: 1,
+            total_row_count: 0,
+            next_field_id: 2,
+            fixed_data_size: 64,
+            writer_build: 0,
+            unused1: 0,
+            flags: TableFeatureFlags::empty(),
+            cache_stream_offset: 0,
+            cache_stream_size: 0,
+            cache_character_count: 0,
+            edit_mode: 0,
+            hash_parameters: [0; 16],
+            name: xl_ascii(b"QueryTable"),
+            field_count: 1,
+            csp_name: None,
+            entry_id: None,
+            fields: vec![field],
+            deleted_row_ids: None,
+            changed_row_ids: None,
+            invalid_cells: None,
+        };
+        let value = Feature12Record {
+            feature: Feature11Record {
+                header: FrtRefHeaderU {
+                    record_type: FEATURE12,
+                    flags: FrtFlags::from_bits_retain(0x4000),
+                    range: CellRange {
+                        first_row: 0,
+                        last_row: 3,
+                        first_column: 0,
+                        last_column: 1,
+                    },
+                },
+                shared_feature_type: 5,
+                reserved1: 0,
+                reserved2: 0,
+                reference_count: 0,
+                declared_feature_size: 0,
+                reserved3: 0,
+                references: Vec::new(),
+                feature: table,
+            },
+        };
+        let payload = encode_sdk(&value).unwrap();
+        assert_eq!(
+            decode_record(FEATURE12, &payload, false, true, 0).unwrap(),
+            BiffRecordData::Feature12(value.clone())
+        );
+        assert_eq!(
+            encode_sdk(&parse_sdk::<Feature12Record>(&payload, 0, FEATURE12).unwrap()).unwrap(),
+            payload
+        );
+
+        let mut ordinary = value;
+        ordinary.feature.feature.source_type = 0;
+        ordinary.feature.feature.fields[0].query_field_id = None;
+        assert!(encode_sdk(&ordinary).is_err());
+        ordinary.feature.header.record_type = FEATURE11;
+        assert!(encode_sdk(&ordinary).is_err());
+    }
+
+    #[test]
+    fn pivot_view_extensions_preserve_continue_frt_layout_and_context() {
+        fn push_record(bytes: &mut Vec<u8>, record_type: u16, payload: &[u8]) {
+            bytes.extend_from_slice(&record_type.to_le_bytes());
+            bytes.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+            bytes.extend_from_slice(payload);
+        }
+
+        let bof = BiffRecordData::Bof(BofRecord {
+            version: 0x0600,
+            document_type: 0x0010,
+            build_identifier: 0,
+            build_year: 0,
+            history_flags: 0,
+            lowest_version: 6,
+        });
+        let view = SxViewRecord {
+            report_body: CellRange {
+                first_row: 0,
+                last_row: 10,
+                first_column: 0,
+                last_column: 4,
+            },
+            first_header_row: 0,
+            first_data_row: 1,
+            first_data_column: 1,
+            cache_index: 0,
+            reserved: 0,
+            data_axis: SxAxis::ROW,
+            data_position: 0,
+            field_count: 1,
+            row_field_count: 0,
+            column_field_count: 0,
+            page_field_count: 1,
+            data_field_count: 0,
+            row_line_count: 0,
+            column_line_count: 0,
+            flags: SxViewFlags::empty(),
+            auto_format_index: 0,
+            declared_table_name_length: 5,
+            declared_data_name_length: 4,
+            table_name: xl_ascii(b"Pivot").text,
+            data_name: xl_ascii(b"Data").text,
+        };
+        let field = SxvdRecord {
+            axis: SxAxis::PAGE,
+            subtotal_count: 0,
+            subtotal_flags: SxvdSubtotalFlags::empty(),
+            item_count: 1,
+            declared_name_length: u16::MAX,
+            name: None,
+        };
+        let page = SxPiRecord {
+            items: vec![SxPiItem {
+                field_index: 0,
+                item_index: 0,
+                object_id: 0,
+            }],
+        };
+        let view_extension = SxViewExRecord {
+            header: FrtHeaderOld {
+                record_type: SX_VIEW_EX,
+                flags: FrtFlags::from_bits_retain(0x1000),
+            },
+            hierarchy_count: 1,
+            page_axis_extension_count: 1,
+            field_extension_count: 1,
+            declared_future_size: 0,
+            future: Vec::new(),
+        };
+        let hierarchy = SxThRecord {
+            header: FrtHeaderOld {
+                record_type: SX_TH,
+                flags: FrtFlags::from_bits_retain(0x2000),
+            },
+            flags: SxThFlags::empty(),
+            axis: SxAxis::PAGE,
+            reserved: 0,
+            pivot_field_index: 0,
+            axis_field_count: 1,
+            drag_flags: SxThDragFlags::PAGE,
+            unique_name: xl_ascii(b"[H]"),
+            display_name: xl_ascii(b"Hierarchy"),
+            default_member: xl_ascii(b""),
+            all_member: xl_ascii(b""),
+            dimension_name: xl_ascii(b"[D]"),
+            declared_associated_field_count: 0,
+            associated_fields: Vec::new(),
+            declared_hidden_member_set_count: 0,
+            hidden_member_sets: Vec::new(),
+            physical_segments: None,
+        };
+        let page_extension = SxPiExRecord {
+            header: FrtHeaderOld {
+                record_type: SX_PI_EX,
+                flags: FrtFlags::from_bits_retain(0x3000),
+            },
+            hierarchy_index: 0,
+            unique_name: xl_ascii(b"[M]"),
+            display_name: xl_ascii(b"Member"),
+        };
+        let field_extension = SxvdTExRecord {
+            header: FrtHeaderOld {
+                record_type: SXVD_TEX,
+                flags: FrtFlags::from_bits_retain(0x4000),
+            },
+            flags: SxvdTExFlags::DRILLED_LEVEL,
+            hierarchy_index: 0,
+            level_index: 0,
+            declared_item_count: 1,
+            item_flags: vec![SxviExFlags::DRILLED_MEMBER],
+            physical_segments: None,
+        };
+
+        let mut bytes = Vec::new();
+        let (record_type, payload) = bof.encode().unwrap();
+        push_record(&mut bytes, record_type, &payload);
+        push_record(&mut bytes, SX_VIEW, &encode_sdk(&view).unwrap());
+        push_record(&mut bytes, SXVD, &encode_sdk(&field).unwrap());
+        push_record(&mut bytes, SX_PI, &encode_sdk(&page).unwrap());
+        push_record(
+            &mut bytes,
+            SX_VIEW_EX,
+            &encode_sdk(&view_extension).unwrap(),
+        );
+        let hierarchy_payload = encode_sdk(&hierarchy).unwrap();
+        let hierarchy_split = 11;
+        push_record(&mut bytes, SX_TH, &hierarchy_payload[..hierarchy_split]);
+        push_record(
+            &mut bytes,
+            CONTINUE_FRT,
+            &encode_sdk(&ContinueFrtRecord {
+                header: FrtHeaderOld {
+                    record_type: CONTINUE_FRT,
+                    flags: FrtFlags::from_bits_retain(0x5000),
+                },
+                continuation: hierarchy_payload[hierarchy_split..].to_vec(),
+            })
+            .unwrap(),
+        );
+        push_record(&mut bytes, SX_PI_EX, &encode_sdk(&page_extension).unwrap());
+        let field_payload = encode_sdk(&field_extension).unwrap();
+        let field_split = 7;
+        push_record(&mut bytes, SXVD_TEX, &field_payload[..field_split]);
+        push_record(
+            &mut bytes,
+            CONTINUE_FRT,
+            &encode_sdk(&ContinueFrtRecord {
+                header: FrtHeaderOld {
+                    record_type: CONTINUE_FRT,
+                    flags: FrtFlags::from_bits_retain(0x6000),
+                },
+                continuation: field_payload[field_split..].to_vec(),
+            })
+            .unwrap(),
+        );
+        push_record(&mut bytes, EOF, &[]);
+
+        let mut parsed = BiffStream::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+        let parsed_hierarchy = parsed
+            .records
+            .iter()
+            .find_map(|record| match &record.data {
+                BiffRecordData::SxTh(value) => Some(value),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            parsed_hierarchy.physical_segments.as_ref().unwrap(),
+            &vec![
+                FrtContinuedSegmentLayout {
+                    logical_byte_count: hierarchy_split as u16,
+                    continuation_header: None,
+                },
+                FrtContinuedSegmentLayout {
+                    logical_byte_count: (hierarchy_payload.len() - hierarchy_split) as u16,
+                    continuation_header: Some(FrtHeaderOld {
+                        record_type: CONTINUE_FRT,
+                        flags: FrtFlags::from_bits_retain(0x5000),
+                    }),
+                },
+            ]
+        );
+
+        let BiffRecordData::SxTh(value) = &mut parsed
+            .records
+            .iter_mut()
+            .find(|record| matches!(record.data, BiffRecordData::SxTh(_)))
+            .unwrap()
+            .data
+        else {
+            unreachable!()
+        };
+        value.display_name = xl_ascii(b"Different");
+        let edited = parsed.to_bytes().unwrap();
+        assert_ne!(edited, bytes);
+        assert_eq!(
+            BiffStream::from_bytes(&edited).unwrap().to_bytes().unwrap(),
+            edited
+        );
+
+        let mut wrong_count = BiffStream::from_bytes(&bytes).unwrap();
+        let BiffRecordData::SxViewEx(value) = &mut wrong_count
+            .records
+            .iter_mut()
+            .find(|record| matches!(record.data, BiffRecordData::SxViewEx(_)))
+            .unwrap()
+            .data
+        else {
+            unreachable!()
+        };
+        value.page_axis_extension_count = 0;
+        assert!(wrong_count.to_bytes().is_err());
+
+        let mut reserved = field_extension;
+        reserved.flags |= SxvdTExFlags::RESERVED;
+        assert!(encode_sdk(&reserved).is_err());
+    }
+
+    #[test]
+    fn function_groups_and_table_styles_are_static_and_context_checked() {
+        let header = |record_type| FrtHeader {
+            record_type,
+            flags: FrtFlags::from_bits_retain(0x4000),
+            reserved: 0x1122_3344_5566_7788,
+        };
+        let fn_group = FnGrp12Record {
+            header: header(FN_GRP12),
+            name: xl_ascii(b"Engineering"),
+        };
+        let name_fn_group = NameFnGrp12Record {
+            header: header(NAME_FN_GRP12),
+            declared_name_character_count: 3,
+            function_category_index: 32,
+            name: xl_ascii(b"Fun"),
+        };
+        let name_publish = NamePublishRecord {
+            header: header(NAME_PUBLISH),
+            flags: NamePublishFlags::PUBLISHED
+                | NamePublishFlags::WORKBOOK_PARAMETER
+                | NamePublishFlags::from_bits_retain(0x8000),
+            name: xl_ascii(b"Fun"),
+        };
+        let style = TableStyleRecord {
+            header: header(TABLE_STYLE),
+            flags: TableStyleFlags::TABLE,
+            element_count: 1,
+            declared_name_character_count: 6,
+            name: "Custom".encode_utf16().collect(),
+        };
+        let style_element = TableStyleElementRecord {
+            header: header(TABLE_STYLE_ELEMENT),
+            element_type: TableStyleElementType::WholeTable,
+            stripe_size: 1,
+            dxf_index: 0,
+        };
+        for (record_type, expected) in [
+            (FN_GRP12, BiffRecordData::FnGrp12(fn_group.clone())),
+            (
+                NAME_FN_GRP12,
+                BiffRecordData::NameFnGrp12(name_fn_group.clone()),
+            ),
+            (
+                NAME_PUBLISH,
+                BiffRecordData::NamePublish(name_publish.clone()),
+            ),
+            (TABLE_STYLE, BiffRecordData::TableStyle(style.clone())),
+            (
+                TABLE_STYLE_ELEMENT,
+                BiffRecordData::TableStyleElement(style_element),
+            ),
+        ] {
+            let payload = expected.encode().unwrap().1;
+            assert_eq!(
+                decode_record(record_type, &payload, false, true, 0).unwrap(),
+                expected
+            );
+        }
+
+        let name = NameRecord {
+            flags: NameFlags::FUNCTION,
+            keyboard_shortcut: 0,
+            declared_name_character_count: 3,
+            declared_formula_byte_count: 3,
+            reserved3: 0,
+            sheet_index: 0,
+            custom_menu: NameTrailingText {
+                declared_character_count: 0,
+                characters: Vec::new(),
+            },
+            description: NameTrailingText {
+                declared_character_count: 0,
+                characters: Vec::new(),
+            },
+            help_topic: NameTrailingText {
+                declared_character_count: 0,
+                characters: Vec::new(),
+            },
+            status_bar: NameTrailingText {
+                declared_character_count: 0,
+                characters: Vec::new(),
+            },
+            name_flags: NameStringFlags::empty(),
+            name: NameValue::User(XlStringCharacters::Compressed(b"Fun".to_vec())),
+            formula: FormulaTokenStream::from_bytes(&[0x1e, 1, 0]).unwrap(),
+            formula_extra_tail: Vec::new(),
+            physical_segment_lengths: Vec::new(),
+        };
+        let records = vec![
+            BiffRecord {
+                offset: 0,
+                data: BiffRecordData::FixedU16 {
+                    kind: FixedU16RecordKind::FnGroupCount,
+                    value: 14,
+                },
+            },
+            BiffRecord {
+                offset: 1,
+                data: BiffRecordData::FnGrp12(fn_group.clone()),
+            },
+            BiffRecord {
+                offset: 2,
+                data: BiffRecordData::Name(name),
+            },
+            BiffRecord {
+                offset: 3,
+                data: BiffRecordData::NameFnGrp12(name_fn_group.clone()),
+            },
+            BiffRecord {
+                offset: 4,
+                data: BiffRecordData::NamePublish(name_publish),
+            },
+            BiffRecord {
+                offset: 5,
+                data: BiffRecordData::Dxf(DxfRecord {
+                    header: header(DXF),
+                    flags: DxfRecordFlags::empty(),
+                    xf_properties_reserved: 0,
+                    property_count: 0,
+                    properties: Vec::new(),
+                }),
+            },
+            BiffRecord {
+                offset: 6,
+                data: BiffRecordData::TableStyles(TableStylesRecord {
+                    header: header(TABLE_STYLES),
+                    total_style_count: 145,
+                    default_table_style_character_count: 0,
+                    default_pivot_style_character_count: 0,
+                    default_table_style: Vec::new(),
+                    default_pivot_style: Vec::new(),
+                }),
+            },
+            BiffRecord {
+                offset: 7,
+                data: BiffRecordData::TableStyle(style),
+            },
+            BiffRecord {
+                offset: 8,
+                data: BiffRecordData::TableStyleElement(style_element),
+            },
+        ];
+        validate_function_groups_and_table_styles(&records).unwrap();
+
+        let mut invalid_category = records.clone();
+        let BiffRecordData::NameFnGrp12(value) = &mut invalid_category[3].data else {
+            unreachable!()
+        };
+        value.function_category_index = 33;
+        assert!(validate_function_groups_and_table_styles(&invalid_category).is_err());
+
+        let mut duplicate_category = records.clone();
+        duplicate_category.insert(
+            2,
+            BiffRecord {
+                offset: 2,
+                data: BiffRecordData::FnGroupName(FnGroupNameRecord {
+                    name: xl_ascii(b"ENGINEERING"),
+                }),
+            },
+        );
+        assert!(validate_function_groups_and_table_styles(&duplicate_category).is_err());
+
+        let mut wrong_style_count = records.clone();
+        let BiffRecordData::TableStyle(value) = &mut wrong_style_count[7].data else {
+            unreachable!()
+        };
+        value.element_count = 2;
+        assert!(validate_function_groups_and_table_styles(&wrong_style_count).is_err());
+
+        let mut bad_dxf = records;
+        let BiffRecordData::TableStyleElement(value) = &mut bad_dxf[8].data else {
+            unreachable!()
+        };
+        value.dxf_index = 1;
+        assert!(validate_function_groups_and_table_styles(&bad_dxf).is_err());
     }
 
     #[test]

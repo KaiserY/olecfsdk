@@ -3287,6 +3287,49 @@ pub struct ToolbarCustomization {
     pub toolbar_id: i32,
     pub reserved: u16,
     pub deltas: Vec<ToolbarDelta>,
+    pub custom_toolbar: Option<CustomToolbar>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustomToolbar {
+    pub name: Vec<u16>,
+    pub declared_toolbar_data_size: i32,
+    pub toolbar: ToolbarData,
+    pub visual_data: [ToolbarVisualData; 5],
+    pub customization_index: i32,
+    pub reserved: u16,
+    pub unused: u16,
+    pub controls: Vec<ToolbarControl>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolbarData {
+    pub signature: i8,
+    pub version: i8,
+    pub declared_control_count: i16,
+    pub toolbar_id: i32,
+    pub type_restrictions: u32,
+    pub default_rows: u16,
+    pub flags: u16,
+    pub name: Vec<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ToolbarVisualData {
+    pub dock_state: i8,
+    pub visibility: i8,
+    pub last_dock_state: i8,
+    pub row: i8,
+    pub docked: ToolbarRectangle,
+    pub floating: ToolbarRectangle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ToolbarRectangle {
+    pub left: i16,
+    pub top: i16,
+    pub right: i16,
+    pub bottom: i16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3451,6 +3494,18 @@ pub enum StyleFormatting {
     Character {
         character: StyleGrpPrl,
     },
+    RevisionParagraph {
+        paragraph: StylePapx,
+        character: StyleGrpPrl,
+        revision: StyleRevision,
+        original_paragraph: StylePapx,
+        original_character: StyleGrpPrl,
+    },
+    RevisionCharacter {
+        character: StyleGrpPrl,
+        revision: StyleRevision,
+        original_character: StyleGrpPrl,
+    },
     Table {
         table: StyleGrpPrl,
         paragraph: StylePapx,
@@ -3459,6 +3514,12 @@ pub enum StyleFormatting {
     Numbering {
         paragraph: StylePapx,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StyleRevision {
+    pub modified: Dttm,
+    pub author_index: i16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -12627,10 +12688,19 @@ impl ToolbarWrapper {
             let reserved = input.u16()?;
             let delta_count = usize::from(input.u16()?);
             if toolbar_id == 0 {
-                return Err(Error::invalid(
-                    input.offset as u64 - 8,
-                    "custom CTB toolbar data is not implemented",
-                ));
+                if delta_count != 0 {
+                    return Err(Error::invalid(
+                        input.offset as u64 - 2,
+                        "custom CTB has nonzero ctbds",
+                    ));
+                }
+                customizations.push(ToolbarCustomization {
+                    toolbar_id,
+                    reserved,
+                    deltas: Vec::new(),
+                    custom_toolbar: Some(CustomToolbar::read(input)?),
+                });
+                continue;
             }
             let mut deltas = Vec::with_capacity(delta_count);
             for _ in 0..delta_count {
@@ -12651,6 +12721,7 @@ impl ToolbarWrapper {
                 toolbar_id,
                 reserved,
                 deltas,
+                custom_toolbar: None,
             });
         }
         let mut controls = Vec::new();
@@ -12728,6 +12799,24 @@ impl ToolbarWrapper {
         for customization in &self.customizations {
             push_i32(bytes, customization.toolbar_id);
             push_u16(bytes, customization.reserved);
+            if customization.toolbar_id == 0 {
+                if !customization.deltas.is_empty() {
+                    return Err(Error::invalid(0, "custom CTB contains toolbar deltas"));
+                }
+                push_u16(bytes, 0);
+                customization
+                    .custom_toolbar
+                    .as_ref()
+                    .ok_or_else(|| Error::invalid(0, "custom CTB data is missing"))?
+                    .write(bytes)?;
+                continue;
+            }
+            if customization.custom_toolbar.is_some() {
+                return Err(Error::invalid(
+                    0,
+                    "toolbar delta customization contains CTB data",
+                ));
+            }
             push_u16(
                 bytes,
                 u16::try_from(customization.deltas.len())
@@ -12751,9 +12840,181 @@ impl ToolbarWrapper {
     }
 }
 
+impl CustomToolbar {
+    fn read(input: &mut SliceReader<'_>) -> Result<Self> {
+        let name_length = usize::from(input.u16()?);
+        let mut name = Vec::with_capacity(name_length);
+        for _ in 0..name_length {
+            name.push(input.u16()?);
+        }
+        let declared_toolbar_data_size = input.i32()?;
+        let toolbar = ToolbarData::read(input)?;
+        let mut visuals = Vec::with_capacity(5);
+        for _ in 0..5 {
+            visuals.push(ToolbarVisualData::read(input)?);
+        }
+        let visual_data: [ToolbarVisualData; 5] = visuals
+            .try_into()
+            .expect("exactly five toolbar visual records");
+        let customization_index = input.i32()?;
+        let reserved = input.u16()?;
+        let unused = input.u16()?;
+        let control_count = read_nonnegative_i32_count(input, "CTB.cCtls")?;
+        let mut controls = Vec::with_capacity(control_count);
+        for _ in 0..control_count {
+            controls.push(ToolbarControl::read(input)?);
+        }
+        let value = Self {
+            name,
+            declared_toolbar_data_size,
+            toolbar,
+            visual_data,
+            customization_index,
+            reserved,
+            unused,
+            controls,
+        };
+        value.validate_declared_size()?;
+        Ok(value)
+    }
+
+    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        self.validate_declared_size()?;
+        push_u16(
+            bytes,
+            u16::try_from(self.name.len())
+                .map_err(|_| Error::Limit("CTB name exceeds u16".into()))?,
+        );
+        write_u16_array(bytes, &self.name);
+        push_i32(bytes, self.declared_toolbar_data_size);
+        self.toolbar.write(bytes)?;
+        for visual in self.visual_data {
+            visual.write(bytes);
+        }
+        push_i32(bytes, self.customization_index);
+        push_u16(bytes, self.reserved);
+        push_u16(bytes, self.unused);
+        push_i32(
+            bytes,
+            i32::try_from(self.controls.len())
+                .map_err(|_| Error::Limit("CTB controls exceed i32".into()))?,
+        );
+        for control in &self.controls {
+            bytes.extend_from_slice(&control.to_bytes()?);
+        }
+        Ok(())
+    }
+
+    fn validate_declared_size(&self) -> Result<()> {
+        let toolbar_size = self.toolbar.encoded_len()?;
+        let expected = 112usize
+            .checked_add(toolbar_size)
+            .ok_or_else(|| Error::Limit("CTB toolbar data size overflow".into()))?;
+        if usize::try_from(self.declared_toolbar_data_size).ok() != Some(expected) {
+            return Err(Error::invalid(
+                0,
+                format!(
+                    "CTB cbTBData is {}, expected {expected}",
+                    self.declared_toolbar_data_size
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ToolbarData {
+    fn read(input: &mut SliceReader<'_>) -> Result<Self> {
+        Ok(Self {
+            signature: input.u8()? as i8,
+            version: input.u8()? as i8,
+            declared_control_count: input.i16()?,
+            toolbar_id: input.i32()?,
+            type_restrictions: input.u32()?,
+            default_rows: input.u16()?,
+            flags: input.u16()?,
+            name: read_toolbar_string(input)?,
+        })
+    }
+
+    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        bytes.extend_from_slice(&[self.signature as u8, self.version as u8]);
+        bytes.extend_from_slice(&self.declared_control_count.to_le_bytes());
+        push_i32(bytes, self.toolbar_id);
+        push_u32(bytes, self.type_restrictions);
+        push_u16(bytes, self.default_rows);
+        push_u16(bytes, self.flags);
+        write_toolbar_string(bytes, &self.name)
+    }
+
+    fn encoded_len(&self) -> Result<usize> {
+        let name_bytes = self
+            .name
+            .len()
+            .checked_mul(2)
+            .and_then(|length| length.checked_add(1))
+            .ok_or_else(|| Error::Limit("toolbar name length overflow".into()))?;
+        16usize
+            .checked_add(name_bytes)
+            .ok_or_else(|| Error::Limit("toolbar data length overflow".into()))
+    }
+}
+
+impl ToolbarVisualData {
+    fn read(input: &mut SliceReader<'_>) -> Result<Self> {
+        Ok(Self {
+            dock_state: input.u8()? as i8,
+            visibility: input.u8()? as i8,
+            last_dock_state: input.u8()? as i8,
+            row: input.u8()? as i8,
+            docked: ToolbarRectangle::read(input)?,
+            floating: ToolbarRectangle::read(input)?,
+        })
+    }
+
+    fn write(self, bytes: &mut Vec<u8>) {
+        bytes.extend_from_slice(&[
+            self.dock_state as u8,
+            self.visibility as u8,
+            self.last_dock_state as u8,
+            self.row as u8,
+        ]);
+        self.docked.write(bytes);
+        self.floating.write(bytes);
+    }
+}
+
+impl ToolbarRectangle {
+    fn read(input: &mut SliceReader<'_>) -> Result<Self> {
+        Ok(Self {
+            left: input.i16()?,
+            top: input.i16()?,
+            right: input.i16()?,
+            bottom: input.i16()?,
+        })
+    }
+
+    fn write(self, bytes: &mut Vec<u8>) {
+        for value in [self.left, self.top, self.right, self.bottom] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
 impl ToolbarControl {
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let mut input = SliceReader::new(bytes);
+        let value = Self::read(&mut input)?;
+        if input.offset != bytes.len() {
+            return Err(Error::invalid(
+                input.offset as u64,
+                "trailing bytes after toolbar control",
+            ));
+        }
+        Ok(value)
+    }
+
+    fn read(input: &mut SliceReader<'_>) -> Result<Self> {
         let flags = input.u8()? as i8;
         let version = input.u8()? as i8;
         let header_flags = input.u8()?;
@@ -12786,25 +13047,25 @@ impl ToolbarControl {
         } else {
             let general_flags = input.u8()?;
             let custom_text = if general_flags & 0x01 != 0 {
-                Some(read_toolbar_string(&mut input)?)
+                Some(read_toolbar_string(input)?)
             } else {
                 None
             };
             let (description, tooltip) = if general_flags & 0x02 != 0 {
                 (
-                    Some(read_toolbar_string(&mut input)?),
-                    Some(read_toolbar_string(&mut input)?),
+                    Some(read_toolbar_string(input)?),
+                    Some(read_toolbar_string(input)?),
                 )
             } else {
                 (None, None)
             };
             let extra = if general_flags & 0x04 != 0 {
                 Some(ToolbarControlExtraInfo {
-                    help_file: read_toolbar_string(&mut input)?,
+                    help_file: read_toolbar_string(input)?,
                     help_context_id: input.i32()?,
-                    tag: read_toolbar_string(&mut input)?,
-                    on_action: read_toolbar_string(&mut input)?,
-                    parameter: read_toolbar_string(&mut input)?,
+                    tag: read_toolbar_string(input)?,
+                    on_action: read_toolbar_string(input)?,
+                    parameter: read_toolbar_string(input)?,
                     toolbar_control_user: input.u8()? as i8,
                     toolbar_control_modified: input.u8()? as i8,
                 })
@@ -12815,7 +13076,7 @@ impl ToolbarControl {
                 0x0a | 0x0c | 0x0d | 0x0e => {
                     let toolbar_id = input.i32()?;
                     let name = if toolbar_id == 1 {
-                        Some(read_toolbar_string(&mut input)?)
+                        Some(read_toolbar_string(input)?)
                     } else {
                         None
                     };
@@ -12839,12 +13100,6 @@ impl ToolbarControl {
                 specific,
             })
         };
-        if input.offset != bytes.len() {
-            return Err(Error::invalid(
-                input.offset as u64,
-                "trailing bytes after toolbar control",
-            ));
-        }
         Ok(Self {
             header,
             command_id,
@@ -15869,6 +16124,16 @@ impl StyleDefinition {
             post_2000.write(&mut bytes)?;
         }
         self.name.write(&mut bytes)?;
+        let revision_marked = matches!(
+            self.formatting,
+            StyleFormatting::RevisionParagraph { .. } | StyleFormatting::RevisionCharacter { .. }
+        );
+        if self.post_2000.is_some_and(|post| post.has_original_style) != revision_marked {
+            return Err(Error::invalid(
+                0,
+                "StdfPost2000 original-style flag and formatting mismatch",
+            ));
+        }
         self.formatting.write(&mut bytes, &self.base)?;
         if usize::from(self.base.byte_count) != bytes.len() {
             return Err(Error::invalid(6, "StdfBase.bchUpe does not match STD size"));
@@ -15883,31 +16148,48 @@ impl StyleFormatting {
         base: &StdfBase,
         post_2000: Option<StdfPost2000>,
     ) -> Result<Self> {
-        if post_2000.is_some_and(|post| post.has_original_style) {
-            return Err(Error::invalid(
-                input.offset as u64,
-                "revision-marked style formatting is not implemented",
-            ));
-        }
-        match (base.style_kind, base.formatting_count) {
-            (StyleKind::Paragraph, 2) => Ok(Self::Paragraph {
+        let revision_marked = post_2000.is_some_and(|post| post.has_original_style);
+        match (base.style_kind, base.formatting_count, revision_marked) {
+            (StyleKind::Paragraph, 2, false) => Ok(Self::Paragraph {
                 paragraph: StylePapx::read(input)?,
                 character: StyleGrpPrl::read(input)?,
             }),
-            (StyleKind::Character, 1) => Ok(Self::Character {
+            (StyleKind::Character, 1, false) => Ok(Self::Character {
                 character: StyleGrpPrl::read(input)?,
             }),
-            (StyleKind::Table, 3) => Ok(Self::Table {
+            (StyleKind::Paragraph, 3, true) => {
+                let paragraph = StylePapx::read(input)?;
+                let character = StyleGrpPrl::read(input)?;
+                let (revision, original_paragraph, original_character) =
+                    StyleRevision::read_paragraph(input)?;
+                Ok(Self::RevisionParagraph {
+                    paragraph,
+                    character,
+                    revision,
+                    original_paragraph,
+                    original_character,
+                })
+            }
+            (StyleKind::Character, 2, true) => {
+                let character = StyleGrpPrl::read(input)?;
+                let (revision, original_character) = StyleRevision::read_character(input)?;
+                Ok(Self::RevisionCharacter {
+                    character,
+                    revision,
+                    original_character,
+                })
+            }
+            (StyleKind::Table, 3, false) => Ok(Self::Table {
                 table: StyleGrpPrl::read(input)?,
                 paragraph: StylePapx::read(input)?,
                 character: StyleGrpPrl::read(input)?,
             }),
-            (StyleKind::Numbering, 1) => Ok(Self::Numbering {
+            (StyleKind::Numbering, 1, false) => Ok(Self::Numbering {
                 paragraph: StylePapx::read(input)?,
             }),
-            (kind, count) => Err(Error::invalid(
+            (kind, count, marked) => Err(Error::invalid(
                 input.offset as u64,
-                format!("invalid GrLPUpxSw shape {kind:?}/cupx={count}"),
+                format!("invalid GrLPUpxSw shape {kind:?}/cupx={count}/revision={marked}"),
             )),
         }
     }
@@ -15927,6 +16209,33 @@ impl StyleFormatting {
             }
             (Self::Character { character }, StyleKind::Character, 1) => {
                 character.write(bytes)?;
+            }
+            (
+                Self::RevisionParagraph {
+                    paragraph,
+                    character,
+                    revision,
+                    original_paragraph,
+                    original_character,
+                },
+                StyleKind::Paragraph,
+                3,
+            ) => {
+                paragraph.write(bytes)?;
+                character.write(bytes)?;
+                revision.write_paragraph(bytes, original_paragraph, original_character)?;
+            }
+            (
+                Self::RevisionCharacter {
+                    character,
+                    revision,
+                    original_character,
+                },
+                StyleKind::Character,
+                2,
+            ) => {
+                character.write(bytes)?;
+                revision.write_character(bytes, original_character)?;
             }
             (
                 Self::Table {
@@ -15956,6 +16265,26 @@ impl StyleFormatting {
                 character,
             } => paragraph.properties.properties.len() + character.properties.properties.len(),
             Self::Character { character } => character.properties.properties.len(),
+            Self::RevisionParagraph {
+                paragraph,
+                character,
+                original_paragraph,
+                original_character,
+                ..
+            } => {
+                paragraph.properties.properties.len()
+                    + character.properties.properties.len()
+                    + original_paragraph.properties.properties.len()
+                    + original_character.properties.properties.len()
+            }
+            Self::RevisionCharacter {
+                character,
+                original_character,
+                ..
+            } => {
+                character.properties.properties.len()
+                    + original_character.properties.properties.len()
+            }
             Self::Table {
                 table,
                 paragraph,
@@ -15968,6 +16297,94 @@ impl StyleFormatting {
             Self::Numbering { paragraph } => paragraph.properties.properties.len(),
         }
     }
+}
+
+impl StyleRevision {
+    fn read_header(input: &mut SliceReader<'_>) -> Result<Self> {
+        let length = input.u16()?;
+        if length != 6 {
+            return Err(Error::invalid(
+                input.offset as u64 - 2,
+                format!("LPUpxRm has {length} bytes, expected 6"),
+            ));
+        }
+        Ok(Self {
+            modified: Dttm::from_u32(input.u32()?)?,
+            author_index: input.i16()?,
+        })
+    }
+
+    fn read_paragraph(input: &mut SliceReader<'_>) -> Result<(Self, StylePapx, StyleGrpPrl)> {
+        let length = usize::from(input.u16()?);
+        let mut body = SliceReader::new(input.bytes(length)?);
+        let revision = Self::read_header(&mut body)?;
+        let paragraph = StylePapx::read(&mut body)?;
+        let character = StyleGrpPrl::read(&mut body)?;
+        if body.offset != body.bytes.len() {
+            return Err(Error::invalid(
+                body.offset as u64,
+                "trailing bytes in StkParaUpxGrLPUpxRM",
+            ));
+        }
+        Ok((revision, paragraph, character))
+    }
+
+    fn read_character(input: &mut SliceReader<'_>) -> Result<(Self, StyleGrpPrl)> {
+        let length = usize::from(input.u16()?);
+        let mut body = SliceReader::new(input.bytes(length)?);
+        let revision = Self::read_header(&mut body)?;
+        let character = StyleGrpPrl::read(&mut body)?;
+        if body.offset != body.bytes.len() {
+            return Err(Error::invalid(
+                body.offset as u64,
+                "trailing bytes in StkCharUpxGrLPUpxRM",
+            ));
+        }
+        Ok((revision, character))
+    }
+
+    fn write_header(self, bytes: &mut Vec<u8>) -> Result<()> {
+        push_u16(bytes, 6);
+        push_u32(bytes, self.modified.to_u32()?);
+        bytes.extend_from_slice(&self.author_index.to_le_bytes());
+        Ok(())
+    }
+
+    fn write_paragraph(
+        self,
+        bytes: &mut Vec<u8>,
+        paragraph: &StylePapx,
+        character: &StyleGrpPrl,
+    ) -> Result<()> {
+        let mut body = Vec::new();
+        self.write_header(&mut body)?;
+        paragraph.write(&mut body)?;
+        character.write(&mut body)?;
+        write_style_revision_body(bytes, &body)
+    }
+
+    fn write_character(self, bytes: &mut Vec<u8>, character: &StyleGrpPrl) -> Result<()> {
+        let mut body = Vec::new();
+        self.write_header(&mut body)?;
+        character.write(&mut body)?;
+        write_style_revision_body(bytes, &body)
+    }
+}
+
+fn write_style_revision_body(bytes: &mut Vec<u8>, body: &[u8]) -> Result<()> {
+    if !body.len().is_multiple_of(2) {
+        return Err(Error::invalid(
+            0,
+            "revision style wrapper is not even-sized",
+        ));
+    }
+    push_u16(
+        bytes,
+        u16::try_from(body.len())
+            .map_err(|_| Error::Limit("revision style wrapper exceeds u16".into()))?,
+    );
+    bytes.extend_from_slice(body);
+    Ok(())
 }
 
 impl StyleGrpPrl {
@@ -18737,6 +19154,93 @@ mod tests {
         };
         let bytes = style_sheet.to_bytes().unwrap();
         assert_eq!(StyleSheet::from_bytes(&bytes).unwrap(), style_sheet);
+    }
+
+    #[test]
+    fn revision_marked_styles_round_trip_original_and_current_formatting() {
+        let post_2000 = StdfPost2000 {
+            linked_style_index: 0,
+            has_original_style: true,
+            spare: 0,
+            revision_save_id: 7,
+            html_font_index: 0,
+            unused: false,
+            priority: 1,
+        };
+        let revision = StyleRevision {
+            modified: Dttm {
+                minute: 30,
+                hour: 14,
+                day: 12,
+                month: 6,
+                year_offset: 126,
+                weekday: 5,
+            },
+            author_index: 2,
+        };
+        let empty_character = || StyleGrpPrl {
+            properties: GrpPrl { properties: vec![] },
+            padding: None,
+        };
+        let paragraph = StyleDefinition {
+            base: StdfBase {
+                invariant_style_id: 0x0ffe,
+                flags: StdfBaseFlags::empty(),
+                style_kind: StyleKind::Paragraph,
+                base_style_index: 0x0fff,
+                formatting_count: 3,
+                next_style_index: 0,
+                byte_count: 44,
+                general_flags: StyleGeneralFlags::empty(),
+            },
+            post_2000: Some(post_2000),
+            name: Xstz {
+                characters: vec![],
+                terminator: 0,
+            },
+            formatting: StyleFormatting::RevisionParagraph {
+                paragraph: StylePapx {
+                    style_index: 0,
+                    properties: GrpPrl { properties: vec![] },
+                    padding: None,
+                },
+                character: empty_character(),
+                revision,
+                original_paragraph: StylePapx {
+                    style_index: 0,
+                    properties: GrpPrl { properties: vec![] },
+                    padding: None,
+                },
+                original_character: empty_character(),
+            },
+        };
+        let character = StyleDefinition {
+            base: StdfBase {
+                invariant_style_id: 0x0ffe,
+                flags: StdfBaseFlags::empty(),
+                style_kind: StyleKind::Character,
+                base_style_index: 0x0fff,
+                formatting_count: 2,
+                next_style_index: 0,
+                byte_count: 36,
+                general_flags: StyleGeneralFlags::empty(),
+            },
+            post_2000: Some(post_2000),
+            name: Xstz {
+                characters: vec![],
+                terminator: 0,
+            },
+            formatting: StyleFormatting::RevisionCharacter {
+                character: empty_character(),
+                revision,
+                original_character: empty_character(),
+            },
+        };
+        for value in [paragraph, character] {
+            let bytes = value.to_bytes().unwrap();
+            assert_eq!(bytes.len(), usize::from(value.base.byte_count));
+            assert_eq!(StyleDefinition::from_bytes(&bytes, 18).unwrap(), value);
+        }
     }
 
     #[test]
@@ -22250,6 +22754,74 @@ mod tests {
                         toolbar_index_flags: 1,
                         control_byte_count: 16,
                     }],
+                    custom_toolbar: None,
+                }],
+            })],
+        };
+        let bytes = value.to_bytes().unwrap();
+        assert_eq!(CommandCustomizations::from_bytes(&bytes).unwrap(), value);
+    }
+
+    #[test]
+    fn custom_toolbar_round_trips_tb_visual_data_and_controls() {
+        let rectangle = ToolbarRectangle {
+            left: 1,
+            top: 2,
+            right: 101,
+            bottom: 42,
+        };
+        let visual = ToolbarVisualData {
+            dock_state: 4,
+            visibility: 1,
+            last_dock_state: 1,
+            row: -2,
+            docked: rectangle,
+            floating: rectangle,
+        };
+        let value = CommandCustomizations {
+            records: vec![CommandCustomizationRecord::Toolbar(ToolbarWrapper {
+                reserved2: 0,
+                reserved3: 7,
+                reserved4: 6,
+                reserved5: 12,
+                toolbar_delta_size: 18,
+                controls: Vec::new(),
+                customizations: vec![ToolbarCustomization {
+                    toolbar_id: 0,
+                    reserved: 0,
+                    deltas: Vec::new(),
+                    custom_toolbar: Some(CustomToolbar {
+                        name: "Custom".encode_utf16().collect(),
+                        declared_toolbar_data_size: 129,
+                        toolbar: ToolbarData {
+                            signature: 2,
+                            version: 1,
+                            declared_control_count: 1,
+                            toolbar_id: 1,
+                            type_restrictions: 0,
+                            default_rows: 1,
+                            flags: 0,
+                            name: Vec::new(),
+                        },
+                        visual_data: [visual; 5],
+                        customization_index: 0,
+                        reserved: 0,
+                        unused: 0xa5a5,
+                        controls: vec![ToolbarControl {
+                            header: ToolbarControlHeader {
+                                signature: 3,
+                                version: 1,
+                                flags: 0,
+                                control_type: 0x16,
+                                control_id: 1,
+                                specific_flags: 0,
+                                priority: 0,
+                                size: None,
+                            },
+                            command_id: None,
+                            data: None,
+                        }],
+                    }),
                 }],
             })],
         };
