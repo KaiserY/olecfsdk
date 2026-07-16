@@ -7,22 +7,29 @@
 mod file;
 
 pub use file::{
-    DocDataStream, DocFile, DocFkpPage, DocLocated, DocLocatedBookmarks, DocSectionProperties,
-    DocTableStream, DocTableStreamName, DocTextPiece, DocWordDocumentStream,
+    DocChpxRun, DocDataNode, DocDataNodeValue, DocDataStream, DocDirectCharacterFormatting,
+    DocDirectFormatting, DocDirectParagraphFormatting, DocDirectTableState,
+    DocEmbeddedObjectStorage, DocFile, DocFkpPage, DocLocated, DocLocatedBookmarks,
+    DocObjectPoolStorage, DocPapxRun, DocSectionProperties, DocStyleProperties, DocTableStream,
+    DocTableStreamName, DocTextPiece, DocWordDocumentStream,
 };
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Cursor,
+};
 
 use bitflags::bitflags;
 
 use crate::{
-    Error, Result,
-    common::{CodePage, FileTime},
+    Error, Result, SdkBitfield, SdkEnum, SdkObject,
+    common::{CodePage, FileTime, Guid},
+    io::{Reader, SdkRead, SdkWrite, Writer},
     limits::Limits,
     office_art::{
-        OfficeArtIncompleteRecordData, OfficeArtPartialRecord, OfficeArtPartialSequence,
-        OfficeArtPartialStream, OfficeArtRecord, OfficeArtRecordData, OfficeArtStream,
-        OfficeArtWordClientTextbox,
+        OfficeArtDrawingGraph, OfficeArtIncompleteRecordData, OfficeArtPartialRecord,
+        OfficeArtPartialSequence, OfficeArtPartialStream, OfficeArtRecord, OfficeArtRecordData,
+        OfficeArtStream, OfficeArtWordClientTextbox,
     },
     shared::NumberingFormat,
 };
@@ -405,6 +412,23 @@ impl Fib {
 
     pub fn fc_lcb(&self, index: usize) -> Option<FibFcLcb> {
         self.fc_lcb.get(index).copied()
+    }
+
+    pub(crate) fn relocate_table_locations(
+        &mut self,
+        mut relocate: impl FnMut(FibFcLcb) -> Result<Option<FibFcLcb>>,
+    ) -> Result<()> {
+        for (index, location) in self.fc_lcb.iter_mut().enumerate() {
+            // This pair is a FILETIME split across the fc/lcb words, not a
+            // Table Stream range (MS-DOC FibRgFcLcb2000).
+            if index == FIB_LAST_SAVED_FILETIME_INDEX || location.lcb == 0 {
+                continue;
+            }
+            if let Some(relocated) = relocate(*location)? {
+                *location = relocated;
+            }
+        }
+        Ok(())
     }
 
     pub fn clx_location(&self) -> Option<FibFcLcb> {
@@ -3354,8 +3378,42 @@ pub struct ToolbarDelta {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldTable {
-    pub positions: Vec<u32>,
-    pub fields: Vec<FieldDescriptor>,
+    /// Top-level fields. Nested fields remain attached to the instruction or
+    /// result range that physically contains them.
+    pub fields: Vec<Field>,
+    /// The final PLC CP terminates the last physical Fld range and does not
+    /// identify a field character.
+    pub terminal_position: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Field {
+    pub begin: FieldBegin,
+    pub instruction_fields: Vec<Field>,
+    pub separator: Option<FieldSeparator>,
+    pub result_fields: Vec<Field>,
+    pub end: FieldEnd,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldBegin {
+    pub position: u32,
+    pub reserved: u8,
+    pub field_type: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldSeparator {
+    pub position: u32,
+    pub reserved: u8,
+    pub value: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldEnd {
+    pub position: u32,
+    pub reserved: u8,
+    pub flags: FieldEndFlags,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3604,8 +3662,10 @@ pub struct StdfPost2000 {
     pub priority: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate = "validate_xstz_encoding")]
 pub struct Xstz {
+    #[sdk(count_prefix = "u16")]
     pub characters: Vec<u16>,
     pub terminator: u16,
 }
@@ -4104,6 +4164,7 @@ pub enum SprmOperand {
     ParagraphNumberRevisionMark(NumRmOperand),
     CharacterMajority(Box<GrpPrl>),
     CharacterDisplayFieldRevisionMark(DispFldRmOperand),
+    StylePermutation(SppOperand),
     ConditionalFormatting(CnfOperand),
     AutoNumberedListData(AnldOperand),
     OutlineListData(Box<OlstOperand>),
@@ -4169,6 +4230,30 @@ pub struct CFitTextOperand {
 pub struct CnfOperand {
     pub condition: i16,
     pub properties: Box<GrpPrl>,
+}
+
+/// MS-DOC `SPPOperand`, used by sprmPIstdPermute and sprmCIstdPermute.
+/// The surrounding SPRM owns the one-byte `cb` prefix; this value models the
+/// bounded body selected by that prefix.
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate = "validate_spp_operand")]
+pub struct SppOperand {
+    pub ignored_long: u8,
+    pub first_style_index: u16,
+    pub last_style_index: u16,
+    #[sdk(remaining)]
+    pub remapped_style_indices: Vec<u16>,
+}
+
+impl SppOperand {
+    pub fn remap(&self, style_index: u16) -> Option<u16> {
+        if !(self.first_style_index..=self.last_style_index).contains(&style_index) {
+            return None;
+        }
+        self.remapped_style_indices
+            .get(usize::from(style_index - self.first_style_index))
+            .copied()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4263,15 +4348,230 @@ pub struct TableCellWidthOperand {
     pub width: u16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u32")]
 pub struct Brc80 {
+    #[sdk(bits = 0..=7)]
     pub line_width: u8,
+    #[sdk(bits = 8..=15)]
     pub border_type: u8,
+    #[sdk(bits = 16..=23)]
     pub color_index: u8,
+    #[sdk(bits = 24..=28)]
     pub spacing: u8,
+    #[sdk(bit = 29)]
     pub shadow: bool,
+    #[sdk(bit = 30)]
     pub frame: bool,
+    #[sdk(bit = 31)]
     pub reserved: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "i16")]
+pub enum PictureStorageFormat {
+    Shape = 0x0064,
+    ShapeFile = 0x0066,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct Mfpf {
+    pub format: PictureStorageFormat,
+    pub unused_x_extent: i16,
+    pub unused_y_extent: i16,
+    pub ignored_handle: i16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct PicfShape {
+    pub ignored_flags: u32,
+    pub padding1: u32,
+    pub ignored_mapping_mode: i16,
+    pub padding2: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct Picmid {
+    pub goal_width_twips: i16,
+    pub goal_height_twips: i16,
+    pub horizontal_scale_tenths_percent: u16,
+    pub vertical_scale_tenths_percent: u16,
+    pub reserved_width1: i16,
+    pub reserved_height1: i16,
+    pub reserved_width2: i16,
+    pub reserved_height2: i16,
+    pub reserved_flags: u8,
+    pub bits_per_pixel: u8,
+    pub top_border: Brc80,
+    pub left_border: Brc80,
+    pub bottom_border: Brc80,
+    pub right_border: Brc80,
+    pub reserved_width3: i16,
+    pub reserved_height3: i16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate = "validate_picf")]
+pub struct Picf {
+    pub total_length: i32,
+    pub header_length: u16,
+    pub storage: Mfpf,
+    pub shape: PicfShape,
+    pub picture: Picmid,
+    pub property_count: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PicfAndOfficeArtData {
+    pub picf: Picf,
+    pub shape_file_name: Option<Vec<u8>>,
+    pub picture: OfficeArtStream,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NilPicfAndBinData {
+    pub total_length: i32,
+    pub header_length: u16,
+    pub ignored_header: [u8; 62],
+    pub binary_data: NilPicfBinaryData,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HyperlinkFieldType {
+    Ref,
+    PageRef,
+    NoteRef,
+    Hyperlink,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormFieldType {
+    Text,
+    CheckBox,
+    DropDown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrivateFieldType {
+    Private,
+    AddIn,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NilPicfFieldType {
+    Hyperlink(HyperlinkFieldType),
+    Form(FormFieldType),
+    Private(PrivateFieldType),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NilPicfBinaryData {
+    /// A physical NilPICF parsed without the owning Plcfld context.
+    Unresolved(Vec<u8>),
+    Hyperlink {
+        field_type: HyperlinkFieldType,
+        value: Hfd,
+    },
+    Form {
+        field_type: FormFieldType,
+        value: FfData,
+    },
+    Private {
+        field_type: PrivateFieldType,
+        bytes: Vec<u8>,
+    },
+    /// MS-DOC permits invalid binData and requires consumers to ignore it.
+    Invalid {
+        field_type: NilPicfFieldType,
+        bytes: Vec<u8>,
+    },
+    /// The picture character could not be associated with one of the field
+    /// types permitted by MS-DOC 2.9.158. Compatibility mode preserves it.
+    InvalidContext(Vec<u8>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate = "validate_nil_picf_wire")]
+struct NilPicfWire {
+    total_length: i32,
+    header_length: u16,
+    ignored_header: [u8; 62],
+    #[sdk(remaining)]
+    binary_data: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormFieldKind {
+    Text,
+    CheckBox,
+    DropDown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextFormFieldKind {
+    Regular,
+    Number,
+    DateOrTime,
+    CurrentDate,
+    CurrentTime,
+    Calculated,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FfDataBits {
+    pub field_kind: FormFieldKind,
+    pub result: u8,
+    pub own_help: bool,
+    pub own_status: bool,
+    pub protected: bool,
+    pub automatic_size: bool,
+    pub text_kind: TextFormFieldKind,
+    pub recalculate: bool,
+    pub has_list_box: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HsttbDropList {
+    pub entries: Vec<Vec<u16>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FfData {
+    pub version: u32,
+    pub bits: FfDataBits,
+    pub maximum_text_length: u16,
+    pub check_box_size_half_points: u16,
+    pub name: Xstz,
+    pub default_text: Option<Xstz>,
+    pub default_selection: Option<u16>,
+    pub text_format: Xstz,
+    pub help_text: Xstz,
+    pub status_text: Xstz,
+    pub entry_macro: Xstz,
+    pub exit_macro: Xstz,
+    pub drop_down_list: Option<HsttbDropList>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HfdBits {
+    pub open_in_new_window: bool,
+    pub do_not_preserve_history: bool,
+    pub image_map: bool,
+    pub has_location: bool,
+    pub has_tooltip: bool,
+    pub unused: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hfd {
+    pub bits: HfdBits,
+    pub class_id: Guid,
+    pub hyperlink: crate::xls::HyperlinkObject,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrcData {
+    pub properties: GrpPrl,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4311,16 +4611,26 @@ pub struct Tc80 {
     pub borders: [Brc80; 4],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u16")]
 pub struct TcGrf {
+    #[sdk(bits = 0..=1)]
     pub horizontal_merge: u8,
+    #[sdk(bits = 2..=4)]
     pub text_flow: u8,
+    #[sdk(bits = 5..=6)]
     pub vertical_merge: u8,
+    #[sdk(bits = 7..=8)]
     pub vertical_alignment: u8,
+    #[sdk(bits = 9..=11)]
     pub width_type: u8,
+    #[sdk(bit = 12)]
     pub fit_text: bool,
+    #[sdk(bit = 13)]
     pub no_wrap: bool,
+    #[sdk(bit = 14)]
     pub hide_mark: bool,
+    #[sdk(bit = 15)]
     pub unused: bool,
 }
 
@@ -4336,10 +4646,14 @@ pub struct AddedTabStop {
     pub descriptor: TabDescriptor,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u8")]
 pub struct TabDescriptor {
+    #[sdk(bits = 0..=2)]
     pub alignment: u8,
+    #[sdk(bits = 3..=5)]
     pub leader: u8,
+    #[sdk(bits = 6..=7)]
     pub reserved: u8,
 }
 
@@ -4394,10 +4708,23 @@ pub enum TextPieceCharacters {
     Utf16(Vec<u16>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+impl TextPieceCharacters {
+    pub fn character_count(&self) -> usize {
+        match self {
+            Self::Compressed(value) => value.len(),
+            Self::Utf16(value) => value.len(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u32")]
 pub struct FcCompressed {
+    #[sdk(bits = 0..=29)]
     pub fc: u32,
+    #[sdk(bit = 30)]
     pub compressed: bool,
+    #[sdk(bit = 31)]
     pub reserved: bool,
 }
 
@@ -4415,6 +4742,106 @@ impl FcCompressed {
 pub enum Prm {
     Simple { isprm: u8, value: u8 },
     Complex { property_run_index: u16 },
+}
+
+impl Prm {
+    /// Resolves the property modifications selected by this `Prm`.
+    ///
+    /// MS-DOC 2.9.215 defines `Prm0.isprm` as a closed, non-arithmetic
+    /// mapping to one `Sprm`; MS-DOC 2.9.216 defines `Prm1` as an index into
+    /// the preceding CLX `Prc` array. The returned `GrpPrl` retains the
+    /// specification order and can subsequently be filtered by `SprmGroup`
+    /// for direct paragraph or direct character formatting.
+    pub fn property_modifications(self, clx: &Clx) -> Result<GrpPrl> {
+        match self {
+            Self::Simple { isprm: 0, value: 0 } => Ok(GrpPrl {
+                properties: Vec::new(),
+            }),
+            Self::Simple { isprm, value } => {
+                let known = simple_prm_sprm(isprm).ok_or_else(|| {
+                    Error::invalid(
+                        u64::from(isprm),
+                        format!("Prm0 isprm 0x{isprm:02x} is not defined by MS-DOC"),
+                    )
+                })?;
+                let opcode = known.opcode();
+                GrpPrl::from_bytes(&[opcode.to_le_bytes()[0], opcode.to_le_bytes()[1], value])
+            }
+            Self::Complex { property_run_index } => clx
+                .property_runs
+                .get(usize::from(property_run_index))
+                .map(|run| run.properties.clone())
+                .ok_or_else(|| {
+                    Error::invalid(
+                        u64::from(property_run_index),
+                        "Prm1 property-run index exceeds the CLX Prc array",
+                    )
+                }),
+        }
+    }
+}
+
+/// The normative `Prm0.isprm` table from MS-DOC 2.9.215.
+///
+/// This is deliberately an explicit table rather than a bit-layout derive:
+/// the numeric keys do not encode the resulting SPRM opcode.
+const fn simple_prm_sprm(isprm: u8) -> Option<KnownSprm> {
+    Some(match isprm {
+        0x00 => KnownSprm::CLbcCRJ,
+        0x04 => KnownSprm::PIncLvl,
+        0x05 => KnownSprm::PJc,
+        0x07 => KnownSprm::PFKeep,
+        0x08 => KnownSprm::PFKeepFollow,
+        0x09 => KnownSprm::PFPageBreakBefore,
+        0x0c => KnownSprm::PIlvl,
+        0x0d => KnownSprm::PFMirrorIndents,
+        0x0e => KnownSprm::PFNoLineNumb,
+        0x0f => KnownSprm::PTtwo,
+        0x18 => KnownSprm::PFInTable,
+        0x19 => KnownSprm::PFTtp,
+        0x1d => KnownSprm::PPc,
+        0x25 => KnownSprm::PWr,
+        0x2c => KnownSprm::PFNoAutoHyph,
+        0x32 => KnownSprm::PFLocked,
+        0x33 => KnownSprm::PFWidowControl,
+        0x35 => KnownSprm::PFKinsoku,
+        0x36 => KnownSprm::PFWordWrap,
+        0x37 => KnownSprm::PFOverflowPunct,
+        0x38 => KnownSprm::PFTopLinePunct,
+        0x39 => KnownSprm::PFAutoSpaceDE,
+        0x3a => KnownSprm::PFAutoSpaceDN,
+        0x41 => KnownSprm::CFRMarkDel,
+        0x42 => KnownSprm::CFRMarkIns,
+        0x43 => KnownSprm::CFFldVanish,
+        0x47 => KnownSprm::CFData,
+        0x4b => KnownSprm::CFOle2,
+        0x4d => KnownSprm::CHighlight,
+        0x4e => KnownSprm::CFEmboss,
+        0x4f => KnownSprm::CSfxText,
+        0x50 => KnownSprm::CFWebHidden,
+        0x51 => KnownSprm::CFSpecVanish,
+        0x53 => KnownSprm::CPlain,
+        0x55 => KnownSprm::CFBold,
+        0x56 => KnownSprm::CFItalic,
+        0x57 => KnownSprm::CFStrike,
+        0x58 => KnownSprm::CFOutline,
+        0x59 => KnownSprm::CFShadow,
+        0x5a => KnownSprm::CFSmallCaps,
+        0x5b => KnownSprm::CFCaps,
+        0x5c => KnownSprm::CFVanish,
+        0x5e => KnownSprm::CKul,
+        0x62 => KnownSprm::CIco,
+        0x68 => KnownSprm::CIss,
+        0x73 => KnownSprm::CFDStrike,
+        0x74 => KnownSprm::CFImprint,
+        0x75 => KnownSprm::CFSpec,
+        0x76 => KnownSprm::CFObj,
+        0x78 => KnownSprm::POutLvl,
+        0x7b => KnownSprm::CFSdtVanish,
+        0x7c => KnownSprm::CNeedFontFixup,
+        0x7e => KnownSprm::PFNumRMIns,
+        _ => return None,
+    })
 }
 
 impl Clx {
@@ -5676,6 +6103,29 @@ impl DocOfficeArtContent {
             bytes.extend_from_slice(&drawing.container.to_bytes()?);
         }
         Ok(bytes)
+    }
+
+    /// Aggregates the complete Dgg/Dg record trees into their MS-ODRAW
+    /// drawing, shape, and ID-cluster graph. Partial compatibility trees stay
+    /// explicit and cannot be mistaken for a complete graph.
+    pub fn drawing_graph(&self) -> Result<OfficeArtDrawingGraph> {
+        let DocOfficeArtRecordTree::Complete(drawing_group) = &self.drawing_group else {
+            return Err(Error::invalid(
+                0,
+                "OfficeArt drawing graph requires a complete DggContainer",
+            ));
+        };
+        let mut drawings = Vec::with_capacity(self.drawings.len());
+        for drawing in &self.drawings {
+            let DocOfficeArtRecordTree::Complete(container) = &drawing.container else {
+                return Err(Error::invalid(
+                    0,
+                    "OfficeArt drawing graph requires complete DgContainer records",
+                ));
+            };
+            drawings.push(container);
+        }
+        OfficeArtDrawingGraph::from_streams(drawing_group, &drawings)
     }
 
     fn require_single_container(
@@ -15663,6 +16113,13 @@ fn write_u16_array(bytes: &mut Vec<u8>, values: &[u16]) {
 
 impl FieldTable {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Self::from_bytes_with_compatibility(bytes, false)
+    }
+
+    pub(crate) fn from_bytes_with_compatibility(
+        bytes: &[u8],
+        preserve_separator_flag_mismatch: bool,
+    ) -> Result<Self> {
         if bytes.len() < 4 || !(bytes.len() - 4).is_multiple_of(6) {
             return Err(Error::invalid(
                 0,
@@ -15675,27 +16132,218 @@ impl FieldTable {
         for _ in 0..=field_count {
             positions.push(input.u32()?);
         }
-        let mut fields = Vec::with_capacity(field_count);
+        let mut descriptors = Vec::with_capacity(field_count);
         for _ in 0..field_count {
-            fields.push(FieldDescriptor::read(&mut input)?);
+            descriptors.push(FieldDescriptor::read(&mut input)?);
         }
-        require_nondecreasing(&positions, "Plcfld CP")?;
-        Ok(Self { positions, fields })
+        require_strictly_increasing(&positions, "Plcfld CP")?;
+        let terminal_position = positions[field_count];
+        let positions = &positions[..field_count];
+        let mut index = 0usize;
+        let mut fields = Vec::new();
+        while index < descriptors.len() {
+            fields.push(Field::from_flat(positions, &descriptors, &mut index)?);
+        }
+        let value = Self {
+            fields,
+            terminal_position,
+        };
+        if !preserve_separator_flag_mismatch
+            && let Some(position) = value.separator_flag_mismatches().next()
+        {
+            return Err(Error::invalid(
+                u64::from(position),
+                "Plcfld field separator and grffldEnd.fHasSep disagree",
+            ));
+        }
+        Ok(value)
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        if self.positions.len() != self.fields.len().saturating_add(1) {
-            return Err(Error::invalid(0, "Plcfld CP/Fld cardinality changed"));
+        let mut positions = Vec::new();
+        let mut descriptors = Vec::new();
+        for field in &self.fields {
+            field.append_flat(&mut positions, &mut descriptors)?;
         }
-        require_nondecreasing(&self.positions, "Plcfld CP")?;
-        let mut bytes = Vec::with_capacity(self.positions.len() * 4 + self.fields.len() * 2);
-        for position in &self.positions {
+        positions.push(self.terminal_position);
+        require_strictly_increasing(&positions, "Plcfld CP")?;
+        let mut bytes = Vec::with_capacity(positions.len() * 4 + descriptors.len() * 2);
+        for position in &positions {
             push_u32(&mut bytes, *position);
         }
-        for field in &self.fields {
-            field.write(&mut bytes)?;
+        for descriptor in descriptors {
+            descriptor.write(&mut bytes)?;
         }
         Ok(bytes)
+    }
+}
+
+impl Field {
+    fn from_flat(
+        positions: &[u32],
+        descriptors: &[FieldDescriptor],
+        index: &mut usize,
+    ) -> Result<Self> {
+        let begin_index = *index;
+        let begin = match descriptors.get(begin_index).map(|value| value.character) {
+            Some(FieldCharacter::Begin {
+                reserved,
+                field_type,
+            }) => FieldBegin {
+                position: positions[begin_index],
+                reserved,
+                field_type,
+            },
+            _ => {
+                return Err(Error::invalid(
+                    positions
+                        .get(begin_index)
+                        .copied()
+                        .unwrap_or_default()
+                        .into(),
+                    "Plcfld FieldList entry does not begin with a field-begin Fld",
+                ));
+            }
+        };
+        *index += 1;
+
+        let mut instruction_fields = Vec::new();
+        while matches!(
+            descriptors.get(*index).map(|value| value.character),
+            Some(FieldCharacter::Begin { .. })
+        ) {
+            instruction_fields.push(Self::from_flat(positions, descriptors, index)?);
+        }
+
+        let separator = match descriptors.get(*index).map(|value| value.character) {
+            Some(FieldCharacter::Separator { reserved, value }) => {
+                let value = Some(FieldSeparator {
+                    position: positions[*index],
+                    reserved,
+                    value,
+                });
+                *index += 1;
+                value
+            }
+            _ => None,
+        };
+
+        let mut result_fields = Vec::new();
+        if separator.is_some() {
+            while matches!(
+                descriptors.get(*index).map(|value| value.character),
+                Some(FieldCharacter::Begin { .. })
+            ) {
+                result_fields.push(Self::from_flat(positions, descriptors, index)?);
+            }
+        }
+
+        let end_index = *index;
+        let end = match descriptors.get(end_index).map(|value| value.character) {
+            Some(FieldCharacter::End { reserved, flags }) => FieldEnd {
+                position: positions[end_index],
+                reserved,
+                flags,
+            },
+            _ => {
+                return Err(Error::invalid(
+                    positions.get(end_index).copied().unwrap_or_default().into(),
+                    "Plcfld FieldList field does not end with a field-end Fld",
+                ));
+            }
+        };
+        *index += 1;
+        Ok(Self {
+            begin,
+            instruction_fields,
+            separator,
+            result_fields,
+            end,
+        })
+    }
+
+    fn append_flat(
+        &self,
+        positions: &mut Vec<u32>,
+        descriptors: &mut Vec<FieldDescriptor>,
+    ) -> Result<()> {
+        positions.push(self.begin.position);
+        descriptors.push(FieldDescriptor {
+            character: FieldCharacter::Begin {
+                reserved: self.begin.reserved,
+                field_type: self.begin.field_type,
+            },
+        });
+        for field in &self.instruction_fields {
+            field.append_flat(positions, descriptors)?;
+        }
+        if let Some(separator) = self.separator {
+            positions.push(separator.position);
+            descriptors.push(FieldDescriptor {
+                character: FieldCharacter::Separator {
+                    reserved: separator.reserved,
+                    value: separator.value,
+                },
+            });
+        }
+        for field in &self.result_fields {
+            field.append_flat(positions, descriptors)?;
+        }
+        positions.push(self.end.position);
+        descriptors.push(FieldDescriptor {
+            character: FieldCharacter::End {
+                reserved: self.end.reserved,
+                flags: self.end.flags,
+            },
+        });
+        Ok(())
+    }
+
+    pub fn contains_position(&self, position: u32) -> bool {
+        self.begin.position < position && position < self.end.position
+    }
+
+    /// Returns the innermost field containing a document-part-relative CP.
+    pub fn innermost_at(&self, position: u32) -> Option<&Self> {
+        if !self.contains_position(position) {
+            return None;
+        }
+        self.instruction_fields
+            .iter()
+            .chain(&self.result_fields)
+            .find_map(|field| field.innermost_at(position))
+            .or(Some(self))
+    }
+}
+
+impl FieldTable {
+    pub fn innermost_at(&self, position: u32) -> Option<&Field> {
+        self.fields
+            .iter()
+            .find_map(|field| field.innermost_at(position))
+    }
+
+    pub fn separator_flag_mismatches(&self) -> impl Iterator<Item = u32> + '_ {
+        self.fields
+            .iter()
+            .flat_map(Field::separator_flag_mismatches)
+    }
+}
+
+impl Field {
+    fn separator_flag_mismatches(&self) -> Box<dyn Iterator<Item = u32> + '_> {
+        let own = (self.end.flags.contains(FieldEndFlags::HAS_SEPARATOR)
+            != self.separator.is_some())
+        .then_some(self.end.position)
+        .into_iter();
+        Box::new(
+            own.chain(
+                self.instruction_fields
+                    .iter()
+                    .chain(&self.result_fields)
+                    .flat_map(Self::separator_flag_mismatches),
+            ),
+        )
     }
 }
 
@@ -16593,29 +17241,19 @@ impl StdfPost2000 {
 
 impl Xstz {
     fn read(input: &mut SliceReader<'_>) -> Result<Self> {
-        let count = usize::from(input.u16()?);
-        let mut characters = Vec::with_capacity(count);
-        for _ in 0..count {
-            characters.push(input.u16()?);
-        }
-        Ok(Self {
-            characters,
-            terminator: input.u16()?,
-        })
+        input.sdk_object()
     }
 
     fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
-        push_u16(
-            bytes,
-            u16::try_from(self.characters.len())
-                .map_err(|_| Error::Limit("Xstz exceeds u16 characters".into()))?,
-        );
-        for character in &self.characters {
-            push_u16(bytes, *character);
-        }
-        push_u16(bytes, self.terminator);
-        Ok(())
+        write_sdk_object(bytes, self)
     }
+}
+
+fn validate_xstz_encoding(value: &Xstz) -> Result<()> {
+    if value.terminator != 0 {
+        return Err(Error::invalid(0, "Xstz terminator must be zero"));
+    }
+    Ok(())
 }
 
 impl StyleSheetInfo {
@@ -16862,6 +17500,61 @@ impl FkpPageNumber {
 }
 
 impl ChpxFkp {
+    /// Builds a canonical 512-byte CHPX FKP layout from typed runs.
+    ///
+    /// Existing `property_offset` values are physical source coordinates and
+    /// are ignored. Equal property blocks share one canonical allocation.
+    pub fn with_canonical_layout(
+        file_positions: Vec<u32>,
+        mut runs: Vec<ChpxFkpRun>,
+    ) -> Result<Self> {
+        let run_count = runs.len();
+        if file_positions.len() != run_count.saturating_add(1) || !(1..=0x65).contains(&run_count) {
+            return Err(Error::invalid(0, "ChpxFkp run cardinality is invalid"));
+        }
+        require_strictly_increasing_u32(&file_positions, "ChpxFkp rgfc")?;
+        let table_end = (run_count + 1)
+            .checked_mul(4)
+            .and_then(|value| value.checked_add(run_count))
+            .ok_or_else(|| Error::Limit("ChpxFkp table size overflow".into()))?;
+        let mut cursor = 511usize;
+        let mut allocated = BTreeMap::<Vec<u8>, u16>::new();
+        for run in &mut runs {
+            let Some(properties) = &run.properties else {
+                run.property_offset = None;
+                continue;
+            };
+            let grpprl = properties.to_bytes()?;
+            let length = u8::try_from(grpprl.len())
+                .map_err(|_| Error::Limit("Chpx grpprl exceeds u8".into()))?;
+            let mut block = Vec::with_capacity(grpprl.len() + 1);
+            block.push(length);
+            block.extend_from_slice(&grpprl);
+            let offset = if let Some(offset) = allocated.get(&block) {
+                *offset
+            } else {
+                let start = cursor
+                    .checked_sub(block.len())
+                    .map(|value| value & !1)
+                    .filter(|value| *value >= table_end)
+                    .ok_or_else(|| Error::Limit("ChpxFkp typed runs exceed one page".into()))?;
+                cursor = start;
+                let offset = u16::try_from(start)
+                    .map_err(|_| Error::Limit("Chpx property offset exceeds u16".into()))?;
+                allocated.insert(block, offset);
+                offset
+            };
+            run.property_offset = Some(offset);
+        }
+        let page = Self {
+            file_positions,
+            runs,
+            unused_regions: Vec::new(),
+        };
+        page.to_bytes()?;
+        Ok(page)
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() != 512 {
             return Err(Error::invalid(0, "ChpxFkp is not 512 bytes"));
@@ -16993,6 +17686,56 @@ impl ChpxFkp {
 }
 
 impl PapxFkp {
+    /// Builds a canonical 512-byte PAPX FKP layout from typed runs.
+    ///
+    /// Existing `property_offset` values are physical source coordinates and
+    /// are ignored. Equal PapxInFkp blocks share one canonical allocation.
+    pub fn with_canonical_layout(
+        file_positions: Vec<u32>,
+        mut runs: Vec<PapxFkpRun>,
+    ) -> Result<Self> {
+        let run_count = runs.len();
+        if file_positions.len() != run_count.saturating_add(1) || !(1..=0x1d).contains(&run_count) {
+            return Err(Error::invalid(0, "PapxFkp run cardinality is invalid"));
+        }
+        require_strictly_increasing_u32(&file_positions, "PapxFkp rgfc")?;
+        let table_end = (run_count + 1)
+            .checked_mul(4)
+            .and_then(|value| value.checked_add(run_count.checked_mul(13)?))
+            .ok_or_else(|| Error::Limit("PapxFkp table size overflow".into()))?;
+        let mut cursor = 511usize;
+        let mut allocated = BTreeMap::<Vec<u8>, u16>::new();
+        for run in &mut runs {
+            let Some(properties) = &run.properties else {
+                run.property_offset = None;
+                continue;
+            };
+            let block = properties.to_block()?;
+            let offset = if let Some(offset) = allocated.get(&block) {
+                *offset
+            } else {
+                let start = cursor
+                    .checked_sub(block.len())
+                    .map(|value| value & !1)
+                    .filter(|value| *value >= table_end)
+                    .ok_or_else(|| Error::Limit("PapxFkp typed runs exceed one page".into()))?;
+                cursor = start;
+                let offset = u16::try_from(start)
+                    .map_err(|_| Error::Limit("Papx property offset exceeds u16".into()))?;
+                allocated.insert(block, offset);
+                offset
+            };
+            run.property_offset = Some(offset);
+        }
+        let page = Self {
+            file_positions,
+            runs,
+            unused_regions: Vec::new(),
+        };
+        page.to_bytes()?;
+        Ok(page)
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() != 512 {
             return Err(Error::invalid(0, "PapxFkp is not 512 bytes"));
@@ -17241,6 +17984,39 @@ fn collect_unused_regions(bytes: &[u8], used: &[bool; 512]) -> Vec<FkpUnusedRegi
     regions
 }
 
+fn require_strictly_increasing_u32(values: &[u32], label: &str) -> Result<()> {
+    if let Some(pair) = values.windows(2).find(|pair| pair[0] >= pair[1]) {
+        return Err(Error::invalid(
+            u64::from(pair[1]),
+            format!("{label} values are not strictly increasing"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_spp_operand(value: &SppOperand) -> Result<()> {
+    if value.ignored_long != 0 {
+        return Err(Error::invalid(0, "SPPOperand fLong must be zero"));
+    }
+    let expected = value
+        .last_style_index
+        .checked_sub(value.first_style_index)
+        .and_then(|distance| usize::from(distance).checked_add(1))
+        .ok_or_else(|| {
+            Error::invalid(
+                0,
+                "SPPOperand last style index precedes its first style index",
+            )
+        })?;
+    if value.remapped_style_indices.len() != expected {
+        return Err(Error::invalid(
+            0,
+            "SPPOperand remapping count does not match its inclusive style range",
+        ));
+    }
+    Ok(())
+}
+
 impl GrpPrl {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let mut input = SliceReader::new(bytes);
@@ -17332,6 +18108,10 @@ impl Prl {
                     0xca62 => SprmOperand::CharacterDisplayFieldRevisionMark(
                         DispFldRmOperand::from_bytes(body)?,
                     ),
+                    0xc601 | 0xca31 => {
+                        let mut body = SliceReader::new(body);
+                        SprmOperand::StylePermutation(body.sdk_object()?)
+                    }
                     0xc666 | 0xca85 | 0xd66a => {
                         SprmOperand::ConditionalFormatting(CnfOperand::from_bytes(body)?)
                     }
@@ -17411,13 +18191,13 @@ impl Prl {
                 write_variable8(bytes, &value.to_bytes())?;
             }
             (SprmOperand::TableBorders80(value), SprmOperandSize::Variable) if opcode == 0xd605 => {
-                write_variable8(bytes, &value.to_bytes())?;
+                write_variable8(bytes, &value.to_bytes()?)?;
             }
             (SprmOperand::TableBorders(value), SprmOperandSize::Variable) if opcode == 0xd613 => {
                 write_variable8(bytes, &value.to_bytes())?;
             }
             (SprmOperand::TableBorder80(value), SprmOperandSize::Variable) if opcode == 0xd620 => {
-                write_variable8(bytes, &value.to_bytes())?;
+                write_variable8(bytes, &value.to_bytes()?)?;
             }
             (SprmOperand::TableBorder(value), SprmOperandSize::Variable) if opcode == 0xd62f => {
                 write_variable8(bytes, &value.to_bytes())?;
@@ -17467,6 +18247,13 @@ impl Prl {
                 if opcode == 0xca62 =>
             {
                 write_variable8(bytes, &value.to_bytes())?;
+            }
+            (SprmOperand::StylePermutation(value), SprmOperandSize::Variable)
+                if matches!(opcode, 0xc601 | 0xca31) =>
+            {
+                let mut body = Vec::new();
+                write_sdk_object(&mut body, value)?;
+                write_variable8(bytes, &body)?;
             }
             (SprmOperand::ConditionalFormatting(value), SprmOperandSize::Variable)
                 if matches!(opcode, 0xc666 | 0xca85 | 0xd66a) =>
@@ -17627,7 +18414,7 @@ impl PChgTabsOperand {
         for position in added_positions {
             added.push(AddedTabStop {
                 position,
-                descriptor: TabDescriptor::from_raw(input.u8()?),
+                descriptor: input.sdk_object()?,
             });
         }
         if input.offset != bytes.len() {
@@ -17660,7 +18447,7 @@ impl PChgTabsOperand {
             bytes.extend_from_slice(&tab.position.to_le_bytes());
         }
         for tab in &self.added {
-            bytes.push(tab.descriptor.raw()?);
+            write_sdk_object(&mut bytes, &tab.descriptor)?;
         }
         Ok(bytes)
     }
@@ -17693,7 +18480,7 @@ impl PChgTabsPapxOperand {
         for position in added_positions {
             added.push(AddedTabStop {
                 position,
-                descriptor: TabDescriptor::from_raw(input.u8()?),
+                descriptor: input.sdk_object()?,
             });
         }
         if input.offset != bytes.len() {
@@ -17726,7 +18513,7 @@ impl PChgTabsPapxOperand {
             bytes.extend_from_slice(&tab.position.to_le_bytes());
         }
         for tab in &self.added {
-            bytes.push(tab.descriptor.raw()?);
+            write_sdk_object(&mut bytes, &tab.descriptor)?;
         }
         Ok(bytes)
     }
@@ -18198,31 +18985,645 @@ impl TableCellWidthOperand {
 
 impl Brc80 {
     fn read(input: &mut SliceReader<'_>) -> Result<Self> {
-        let line_width = input.u8()?;
-        let border_type = input.u8()?;
-        let color_index = input.u8()?;
-        let flags = input.u8()?;
+        input.sdk_object()
+    }
+
+    fn write(self, bytes: &mut Vec<u8>) -> Result<()> {
+        write_sdk_object(bytes, &self)
+    }
+}
+
+impl Picf {
+    pub const ENCODED_LEN: usize = 68;
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != Self::ENCODED_LEN {
+            return Err(Error::invalid(0, "PICF must contain exactly 68 bytes"));
+        }
+        let mut reader = Reader::new(Cursor::new(bytes))?;
+        Self::read_from(&mut reader)
+    }
+
+    pub fn to_bytes(self) -> Result<Vec<u8>> {
+        let mut writer = Writer::new(Cursor::new(Vec::with_capacity(Self::ENCODED_LEN)));
+        self.write_to(&mut writer)?;
+        Ok(writer.into_inner().into_inner())
+    }
+}
+
+fn validate_picf(value: &Picf) -> Result<()> {
+    if value.header_length != Picf::ENCODED_LEN as u16 {
+        return Err(Error::invalid(4, "PICF cbHeader must be 0x44"));
+    }
+    Ok(())
+}
+
+impl PicfAndOfficeArtData {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < Picf::ENCODED_LEN {
+            return Err(Error::invalid(0, "PICFAndOfficeArtData is truncated"));
+        }
+        let picf = Picf::from_bytes(&bytes[..Picf::ENCODED_LEN])?;
+        if usize::try_from(picf.total_length).ok() != Some(bytes.len()) {
+            return Err(Error::invalid(
+                0,
+                "PICF lcb does not match PICFAndOfficeArtData length",
+            ));
+        }
+        let mut offset = Picf::ENCODED_LEN;
+        let shape_file_name = match picf.storage.format {
+            PictureStorageFormat::Shape => None,
+            PictureStorageFormat::ShapeFile => {
+                let length = usize::from(*bytes.get(offset).ok_or_else(|| {
+                    Error::invalid(offset as u64, "PICF shape-file name length is missing")
+                })?);
+                offset += 1;
+                let end = offset
+                    .checked_add(length)
+                    .filter(|end| *end <= bytes.len())
+                    .ok_or_else(|| {
+                        Error::invalid(offset as u64, "PICF shape-file name is truncated")
+                    })?;
+                let name = bytes[offset..end].to_vec();
+                offset = end;
+                Some(name)
+            }
+        };
         Ok(Self {
-            line_width,
-            border_type,
-            color_index,
-            spacing: flags & 0x1f,
-            shadow: flags & 0x20 != 0,
-            frame: flags & 0x40 != 0,
-            reserved: flags & 0x80 != 0,
+            picf,
+            shape_file_name,
+            picture: OfficeArtStream::from_bytes(&bytes[offset..])?,
         })
     }
 
-    fn write(self, bytes: &mut Vec<u8>) {
-        bytes.extend_from_slice(&[
-            self.line_width,
-            self.border_type,
-            self.color_index,
-            (self.spacing & 0x1f)
-                | (u8::from(self.shadow) << 5)
-                | (u8::from(self.frame) << 6)
-                | (u8::from(self.reserved) << 7),
-        ]);
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        if matches!(self.picf.storage.format, PictureStorageFormat::Shape)
+            != self.shape_file_name.is_none()
+        {
+            return Err(Error::invalid(
+                0,
+                "PICF shape-file name presence does not match MFPF",
+            ));
+        }
+        let mut bytes = self.picf.to_bytes()?;
+        if let Some(name) = &self.shape_file_name {
+            bytes.push(
+                u8::try_from(name.len())
+                    .map_err(|_| Error::Limit("PICF shape-file name exceeds u8".into()))?,
+            );
+            bytes.extend_from_slice(name);
+        }
+        bytes.extend_from_slice(&self.picture.to_bytes()?);
+        if usize::try_from(self.picf.total_length).ok() != Some(bytes.len()) {
+            return Err(Error::invalid(
+                0,
+                "PICF lcb does not match encoded PICFAndOfficeArtData length",
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+impl NilPicfAndBinData {
+    pub const HEADER_LEN: usize = 68;
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < Self::HEADER_LEN {
+            return Err(Error::invalid(0, "NilPICFAndBinData is truncated"));
+        }
+        let mut reader = Reader::new(Cursor::new(bytes))?;
+        let value = NilPicfWire::read_from(&mut reader)?;
+        Ok(Self {
+            total_length: value.total_length,
+            header_length: value.header_length,
+            ignored_header: value.ignored_header,
+            binary_data: NilPicfBinaryData::Unresolved(value.binary_data),
+        })
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let binary_data = self.binary_data.to_bytes()?;
+        let mut writer = Writer::new(Cursor::new(Vec::with_capacity(
+            Self::HEADER_LEN.saturating_add(binary_data.len()),
+        )));
+        NilPicfWire {
+            total_length: self.total_length,
+            header_length: self.header_length,
+            ignored_header: self.ignored_header,
+            binary_data,
+        }
+        .write_to(&mut writer)?;
+        Ok(writer.into_inner().into_inner())
+    }
+
+    pub fn interpret(&mut self, field_type: NilPicfFieldType) {
+        let bytes = match &self.binary_data {
+            NilPicfBinaryData::Unresolved(bytes) => bytes.clone(),
+            _ => return,
+        };
+        self.binary_data = match field_type {
+            NilPicfFieldType::Hyperlink(field_type) => match Hfd::from_bytes(&bytes) {
+                Ok(value) => NilPicfBinaryData::Hyperlink { field_type, value },
+                Err(_) => NilPicfBinaryData::Invalid {
+                    field_type: NilPicfFieldType::Hyperlink(field_type),
+                    bytes,
+                },
+            },
+            NilPicfFieldType::Form(field_type) => match FfData::from_bytes(&bytes) {
+                Ok(value) if field_type.matches(value.bits.field_kind) => {
+                    NilPicfBinaryData::Form { field_type, value }
+                }
+                Ok(_) | Err(_) => NilPicfBinaryData::Invalid {
+                    field_type: NilPicfFieldType::Form(field_type),
+                    bytes,
+                },
+            },
+            NilPicfFieldType::Private(field_type) => {
+                NilPicfBinaryData::Private { field_type, bytes }
+            }
+        };
+    }
+
+    pub(crate) fn mark_invalid_context(&mut self) {
+        let NilPicfBinaryData::Unresolved(bytes) = &self.binary_data else {
+            return;
+        };
+        self.binary_data = NilPicfBinaryData::InvalidContext(bytes.clone());
+    }
+
+    pub fn binary_len(&self) -> Result<usize> {
+        Ok(self.binary_data.to_bytes()?.len())
+    }
+}
+
+impl NilPicfBinaryData {
+    fn to_bytes(&self) -> Result<Vec<u8>> {
+        match self {
+            Self::Unresolved(bytes)
+            | Self::InvalidContext(bytes)
+            | Self::Private { bytes, .. }
+            | Self::Invalid { bytes, .. } => Ok(bytes.clone()),
+            Self::Hyperlink { value, .. } => value.to_bytes(),
+            Self::Form { field_type, value } if field_type.matches(value.bits.field_kind) => {
+                value.to_bytes()
+            }
+            Self::Form { .. } => Err(Error::invalid(
+                0,
+                "NilPICF form field type does not match FFDataBits.iType",
+            )),
+        }
+    }
+}
+
+impl FormFieldType {
+    fn matches(self, kind: FormFieldKind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::Text, FormFieldKind::Text)
+                | (Self::CheckBox, FormFieldKind::CheckBox)
+                | (Self::DropDown, FormFieldKind::DropDown)
+        )
+    }
+}
+
+impl NilPicfFieldType {
+    pub const fn from_field_type(value: u8) -> Option<Self> {
+        match value {
+            0x03 => Some(Self::Hyperlink(HyperlinkFieldType::Ref)),
+            0x25 => Some(Self::Hyperlink(HyperlinkFieldType::PageRef)),
+            0x46 => Some(Self::Form(FormFieldType::Text)),
+            0x47 => Some(Self::Form(FormFieldType::CheckBox)),
+            0x48 => Some(Self::Hyperlink(HyperlinkFieldType::NoteRef)),
+            0x4d => Some(Self::Private(PrivateFieldType::Private)),
+            0x51 => Some(Self::Private(PrivateFieldType::AddIn)),
+            0x53 => Some(Self::Form(FormFieldType::DropDown)),
+            0x58 => Some(Self::Hyperlink(HyperlinkFieldType::Hyperlink)),
+            _ => None,
+        }
+    }
+}
+
+fn validate_nil_picf_wire(value: &NilPicfWire) -> Result<()> {
+    if value.header_length != NilPicfAndBinData::HEADER_LEN as u16 {
+        return Err(Error::invalid(4, "NilPICFAndBinData cbHeader must be 0x44"));
+    }
+    let length = NilPicfAndBinData::HEADER_LEN
+        .checked_add(value.binary_data.len())
+        .ok_or_else(|| Error::Limit("NilPICFAndBinData length overflow".into()))?;
+    if usize::try_from(value.total_length).ok() != Some(length) {
+        return Err(Error::invalid(
+            0,
+            "NilPICFAndBinData lcb does not match encoded length",
+        ));
+    }
+    Ok(())
+}
+
+impl FfDataBits {
+    pub fn from_u16(value: u16) -> Result<Self> {
+        let field_kind = match value & 0x0003 {
+            0 => FormFieldKind::Text,
+            1 => FormFieldKind::CheckBox,
+            2 => FormFieldKind::DropDown,
+            _ => return Err(Error::invalid(0, "FFDataBits iType is reserved")),
+        };
+        let text_kind = match (value >> 11) & 0x0007 {
+            0 => TextFormFieldKind::Regular,
+            1 => TextFormFieldKind::Number,
+            2 => TextFormFieldKind::DateOrTime,
+            3 => TextFormFieldKind::CurrentDate,
+            4 => TextFormFieldKind::CurrentTime,
+            5 => TextFormFieldKind::Calculated,
+            _ => return Err(Error::invalid(0, "FFDataBits iTypeTxt is reserved")),
+        };
+        let result = ((value >> 2) & 0x001f) as u8;
+        let automatic_size = value & 0x0400 != 0;
+        let has_list_box = value & 0x8000 != 0;
+        if field_kind == FormFieldKind::Text && result != 0 {
+            return Err(Error::invalid(0, "text FFDataBits iRes must be zero"));
+        }
+        if field_kind == FormFieldKind::CheckBox && !matches!(result, 0 | 1 | 25) {
+            return Err(Error::invalid(0, "checkbox FFDataBits iRes is invalid"));
+        }
+        if field_kind != FormFieldKind::CheckBox && automatic_size {
+            return Err(Error::invalid(
+                0,
+                "non-checkbox FFDataBits iSize must be zero",
+            ));
+        }
+        if field_kind != FormFieldKind::Text && text_kind != TextFormFieldKind::Regular {
+            return Err(Error::invalid(
+                0,
+                "non-text FFDataBits iTypeTxt must be zero",
+            ));
+        }
+        if has_list_box != (field_kind == FormFieldKind::DropDown) {
+            return Err(Error::invalid(
+                0,
+                "FFDataBits fHasListBox does not match iType",
+            ));
+        }
+        Ok(Self {
+            field_kind,
+            result,
+            own_help: value & 0x0080 != 0,
+            own_status: value & 0x0100 != 0,
+            protected: value & 0x0200 != 0,
+            automatic_size,
+            text_kind,
+            recalculate: value & 0x4000 != 0,
+            has_list_box,
+        })
+    }
+
+    pub fn to_u16(self) -> Result<u16> {
+        let field_kind = match self.field_kind {
+            FormFieldKind::Text => 0,
+            FormFieldKind::CheckBox => 1,
+            FormFieldKind::DropDown => 2,
+        };
+        let text_kind = match self.text_kind {
+            TextFormFieldKind::Regular => 0,
+            TextFormFieldKind::Number => 1,
+            TextFormFieldKind::DateOrTime => 2,
+            TextFormFieldKind::CurrentDate => 3,
+            TextFormFieldKind::CurrentTime => 4,
+            TextFormFieldKind::Calculated => 5,
+        };
+        let value = field_kind
+            | (u16::from(self.result) << 2)
+            | (u16::from(self.own_help) << 7)
+            | (u16::from(self.own_status) << 8)
+            | (u16::from(self.protected) << 9)
+            | (u16::from(self.automatic_size) << 10)
+            | (text_kind << 11)
+            | (u16::from(self.recalculate) << 14)
+            | (u16::from(self.has_list_box) << 15);
+        if self.result > 0x1f || Self::from_u16(value)? != self {
+            return Err(Error::invalid(0, "FFDataBits fields are inconsistent"));
+        }
+        Ok(value)
+    }
+}
+
+impl HsttbDropList {
+    fn read(input: &mut SliceReader<'_>) -> Result<Self> {
+        if input.u16()? != 0xffff {
+            return Err(Error::invalid(
+                input.offset.saturating_sub(2) as u64,
+                "FFData dropdown list is not an extended STTB",
+            ));
+        }
+        let count = usize::from(input.u16()?);
+        if count > 25 {
+            return Err(Error::invalid(
+                input.offset.saturating_sub(2) as u64,
+                "FFData dropdown list exceeds 25 entries",
+            ));
+        }
+        if input.u16()? != 0 {
+            return Err(Error::invalid(
+                input.offset.saturating_sub(2) as u64,
+                "FFData dropdown STTB cbExtra is not zero",
+            ));
+        }
+        let mut entries = Vec::with_capacity(count);
+        for _ in 0..count {
+            let length = usize::from(input.u16()?);
+            let mut entry = Vec::with_capacity(length);
+            for _ in 0..length {
+                entry.push(input.u16()?);
+            }
+            entries.push(entry);
+        }
+        Ok(Self { entries })
+    }
+
+    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        if self.entries.len() > 25 {
+            return Err(Error::invalid(0, "FFData dropdown list exceeds 25 entries"));
+        }
+        push_u16(bytes, 0xffff);
+        push_u16(
+            bytes,
+            u16::try_from(self.entries.len())
+                .map_err(|_| Error::Limit("FFData dropdown count exceeds u16".into()))?,
+        );
+        push_u16(bytes, 0);
+        for entry in &self.entries {
+            push_u16(
+                bytes,
+                u16::try_from(entry.len())
+                    .map_err(|_| Error::Limit("FFData dropdown entry exceeds u16".into()))?,
+            );
+            write_u16_array(bytes, entry);
+        }
+        Ok(())
+    }
+}
+
+impl FfData {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let mut input = SliceReader::new(bytes);
+        let version = input.u32()?;
+        let bits = FfDataBits::from_u16(input.u16()?)?;
+        let maximum_text_length = input.u16()?;
+        let check_box_size_half_points = input.u16()?;
+        let name = Xstz::read(&mut input)?;
+        let (default_text, default_selection) = match bits.field_kind {
+            FormFieldKind::Text => (Some(Xstz::read(&mut input)?), None),
+            FormFieldKind::CheckBox | FormFieldKind::DropDown => (None, Some(input.u16()?)),
+        };
+        let text_format = Xstz::read(&mut input)?;
+        let help_text = Xstz::read(&mut input)?;
+        let status_text = Xstz::read(&mut input)?;
+        let entry_macro = Xstz::read(&mut input)?;
+        let exit_macro = Xstz::read(&mut input)?;
+        let drop_down_list = (bits.field_kind == FormFieldKind::DropDown)
+            .then(|| HsttbDropList::read(&mut input))
+            .transpose()?;
+        if input.offset != bytes.len() {
+            return Err(Error::invalid(
+                input.offset as u64,
+                "trailing bytes after FFData",
+            ));
+        }
+        let value = Self {
+            version,
+            bits,
+            maximum_text_length,
+            check_box_size_half_points,
+            name,
+            default_text,
+            default_selection,
+            text_format,
+            help_text,
+            status_text,
+            entry_macro,
+            exit_macro,
+            drop_down_list,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let mut bytes = Vec::new();
+        push_u32(&mut bytes, self.version);
+        push_u16(&mut bytes, self.bits.to_u16()?);
+        push_u16(&mut bytes, self.maximum_text_length);
+        push_u16(&mut bytes, self.check_box_size_half_points);
+        self.name.write(&mut bytes)?;
+        match self.bits.field_kind {
+            FormFieldKind::Text => self
+                .default_text
+                .as_ref()
+                .expect("validated")
+                .write(&mut bytes)?,
+            FormFieldKind::CheckBox | FormFieldKind::DropDown => {
+                push_u16(&mut bytes, self.default_selection.expect("validated"))
+            }
+        }
+        self.text_format.write(&mut bytes)?;
+        self.help_text.write(&mut bytes)?;
+        self.status_text.write(&mut bytes)?;
+        self.entry_macro.write(&mut bytes)?;
+        self.exit_macro.write(&mut bytes)?;
+        if let Some(drop_down_list) = &self.drop_down_list {
+            drop_down_list.write(&mut bytes)?;
+        }
+        Ok(bytes)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.version != 0xffff_ffff {
+            return Err(Error::invalid(0, "FFData version must be 0xFFFFFFFF"));
+        }
+        self.bits.to_u16()?;
+        if self.maximum_text_length > 32767
+            || (self.bits.field_kind != FormFieldKind::Text && self.maximum_text_length != 0)
+        {
+            return Err(Error::invalid(
+                0,
+                "FFData cch is invalid for its field type",
+            ));
+        }
+        if self.bits.field_kind == FormFieldKind::CheckBox
+            && !(2..=3168).contains(&self.check_box_size_half_points)
+        {
+            return Err(Error::invalid(0, "FFData checkbox hps is outside 2..=3168"));
+        }
+        validate_xstz(&self.name, 20, "FFData name")?;
+        validate_xstz(&self.text_format, 64, "FFData text format")?;
+        validate_xstz(&self.help_text, 255, "FFData help text")?;
+        validate_xstz(&self.status_text, 138, "FFData status text")?;
+        validate_xstz(&self.entry_macro, 32, "FFData entry macro")?;
+        validate_xstz(&self.exit_macro, 32, "FFData exit macro")?;
+        match self.bits.field_kind {
+            FormFieldKind::Text => {
+                let default = self
+                    .default_text
+                    .as_ref()
+                    .ok_or_else(|| Error::invalid(0, "text FFData is missing xstzTextDef"))?;
+                validate_xstz(default, 255, "FFData default text")?;
+                if matches!(
+                    self.bits.text_kind,
+                    TextFormFieldKind::CurrentDate | TextFormFieldKind::CurrentTime
+                ) && !default.characters.is_empty()
+                {
+                    return Err(Error::invalid(
+                        0,
+                        "current date/time FFData default text must be empty",
+                    ));
+                }
+                if self.default_selection.is_some() || self.drop_down_list.is_some() {
+                    return Err(Error::invalid(
+                        0,
+                        "text FFData has non-text optional fields",
+                    ));
+                }
+            }
+            FormFieldKind::CheckBox => {
+                if !matches!(self.default_selection, Some(0 | 1))
+                    || self.default_text.is_some()
+                    || self.drop_down_list.is_some()
+                {
+                    return Err(Error::invalid(
+                        0,
+                        "checkbox FFData optional fields are invalid",
+                    ));
+                }
+            }
+            FormFieldKind::DropDown => {
+                let list = self.drop_down_list.as_ref().ok_or_else(|| {
+                    Error::invalid(0, "dropdown FFData is missing its string table")
+                })?;
+                let selection = usize::from(
+                    self.default_selection
+                        .ok_or_else(|| Error::invalid(0, "dropdown FFData is missing wDef"))?,
+                );
+                if selection >= list.entries.len()
+                    || (self.bits.result != 25
+                        && usize::from(self.bits.result) >= list.entries.len())
+                    || self.default_text.is_some()
+                {
+                    return Err(Error::invalid(
+                        0,
+                        "dropdown FFData selection is out of bounds",
+                    ));
+                }
+            }
+        }
+        if self.bits.field_kind != FormFieldKind::Text && !self.text_format.characters.is_empty() {
+            return Err(Error::invalid(
+                0,
+                "non-text FFData text format must be empty",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_xstz(value: &Xstz, maximum: usize, label: &str) -> Result<()> {
+    if value.characters.len() > maximum || value.terminator != 0 {
+        return Err(Error::invalid(
+            0,
+            format!("{label} length or terminator is invalid"),
+        ));
+    }
+    Ok(())
+}
+
+impl HfdBits {
+    pub fn from_u8(value: u8) -> Result<Self> {
+        let result = Self {
+            open_in_new_window: value & 0x01 != 0,
+            do_not_preserve_history: value & 0x02 != 0,
+            image_map: value & 0x04 != 0,
+            has_location: value & 0x08 != 0,
+            has_tooltip: value & 0x10 != 0,
+            unused: value >> 5,
+        };
+        if result.unused != 0 {
+            return Err(Error::invalid(0, "HFDBits unused bits must be zero"));
+        }
+        Ok(result)
+    }
+
+    pub fn to_u8(self) -> Result<u8> {
+        if self.unused != 0 {
+            return Err(Error::invalid(0, "HFDBits unused bits must be zero"));
+        }
+        Ok(u8::from(self.open_in_new_window)
+            | (u8::from(self.do_not_preserve_history) << 1)
+            | (u8::from(self.image_map) << 2)
+            | (u8::from(self.has_location) << 3)
+            | (u8::from(self.has_tooltip) << 4))
+    }
+}
+
+impl Hfd {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < 25 {
+            return Err(Error::invalid(0, "HFD is shorter than its fixed prefix"));
+        }
+        let mut input = SliceReader::new(bytes);
+        let bits = HfdBits::from_u8(input.u8()?)?;
+        let class_id = Guid {
+            data1: input.u32()?,
+            data2: input.u16()?,
+            data3: input.u16()?,
+            data4: input.take()?,
+        };
+        let hyperlink = crate::xls::HyperlinkObject::parse(&bytes[input.offset..])?;
+        Ok(Self {
+            bits,
+            class_id,
+            hyperlink,
+        })
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        bytes.push(self.bits.to_u8()?);
+        push_u32(&mut bytes, self.class_id.data1);
+        push_u16(&mut bytes, self.class_id.data2);
+        push_u16(&mut bytes, self.class_id.data3);
+        bytes.extend_from_slice(&self.class_id.data4);
+        bytes.extend_from_slice(&self.hyperlink.to_bytes()?);
+        Ok(bytes)
+    }
+}
+
+impl PrcData {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let mut input = SliceReader::new(bytes);
+        let length = input.i16()?;
+        if !(0..=0x3fa2).contains(&length) {
+            return Err(Error::invalid(0, "PrcData cbGrpprl is outside 0..=0x3FA2"));
+        }
+        let length = length as usize;
+        if bytes.len() != length + 2 {
+            return Err(Error::invalid(
+                0,
+                "PrcData cbGrpprl does not match its length",
+            ));
+        }
+        Ok(Self {
+            properties: GrpPrl::from_bytes(input.bytes(length)?)?,
+        })
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let properties = self.properties.to_bytes()?;
+        if properties.len() > 0x3fa2 {
+            return Err(Error::Limit("PrcData GrpPrl exceeds 0x3FA2 bytes".into()));
+        }
+        let mut bytes = Vec::with_capacity(properties.len() + 2);
+        bytes.extend_from_slice(&(properties.len() as i16).to_le_bytes());
+        bytes.extend_from_slice(&properties);
+        Ok(bytes)
     }
 }
 
@@ -18261,12 +19662,12 @@ impl TableBordersOperand80 {
         })
     }
 
-    fn to_bytes(self) -> Vec<u8> {
+    fn to_bytes(self) -> Result<Vec<u8>> {
         let mut bytes = Vec::with_capacity(24);
         for border in self.borders {
-            border.write(&mut bytes);
+            border.write(&mut bytes)?;
         }
-        bytes
+        Ok(bytes)
     }
 }
 
@@ -18306,45 +19707,17 @@ impl TableBrcOperand80 {
         })
     }
 
-    fn to_bytes(self) -> Vec<u8> {
+    fn to_bytes(self) -> Result<Vec<u8>> {
         let mut bytes = Vec::with_capacity(7);
         bytes.extend_from_slice(&[self.cells.first, self.cells.limit, self.borders_to_apply]);
-        self.border.write(&mut bytes);
-        bytes
-    }
-}
-
-impl TcGrf {
-    fn from_raw(value: u16) -> Self {
-        Self {
-            horizontal_merge: (value & 0x0003) as u8,
-            text_flow: ((value >> 2) & 0x0007) as u8,
-            vertical_merge: ((value >> 5) & 0x0003) as u8,
-            vertical_alignment: ((value >> 7) & 0x0003) as u8,
-            width_type: ((value >> 9) & 0x0007) as u8,
-            fit_text: value & 0x1000 != 0,
-            no_wrap: value & 0x2000 != 0,
-            hide_mark: value & 0x4000 != 0,
-            unused: value & 0x8000 != 0,
-        }
-    }
-
-    fn raw(self) -> u16 {
-        u16::from(self.horizontal_merge & 0x03)
-            | (u16::from(self.text_flow & 0x07) << 2)
-            | (u16::from(self.vertical_merge & 0x03) << 5)
-            | (u16::from(self.vertical_alignment & 0x03) << 7)
-            | (u16::from(self.width_type & 0x07) << 9)
-            | (u16::from(self.fit_text) << 12)
-            | (u16::from(self.no_wrap) << 13)
-            | (u16::from(self.hide_mark) << 14)
-            | (u16::from(self.unused) << 15)
+        self.border.write(&mut bytes)?;
+        Ok(bytes)
     }
 }
 
 impl Tc80 {
     fn read(input: &mut SliceReader<'_>) -> Result<Self> {
-        let formatting = TcGrf::from_raw(input.u16()?);
+        let formatting = input.sdk_object()?;
         let preferred_width = input.u16()?;
         let mut borders = Vec::with_capacity(4);
         for _ in 0..4 {
@@ -18357,12 +19730,13 @@ impl Tc80 {
         })
     }
 
-    fn write(self, bytes: &mut Vec<u8>) {
-        push_u16(bytes, self.formatting.raw());
+    fn write(self, bytes: &mut Vec<u8>) -> Result<()> {
+        write_sdk_object(bytes, &self.formatting)?;
         push_u16(bytes, self.preferred_width);
         for border in self.borders {
-            border.write(bytes);
+            border.write(bytes)?;
         }
+        Ok(())
     }
 }
 
@@ -18410,7 +19784,7 @@ impl TDefTableOperand {
             bytes.extend_from_slice(&boundary.to_le_bytes());
         }
         for cell in &self.cells {
-            cell.write(&mut bytes);
+            cell.write(&mut bytes)?;
         }
         Ok(bytes)
     }
@@ -18427,23 +19801,6 @@ fn require_operand_len(bytes: &[u8], expected: usize, name: &str) -> Result<()> 
         ));
     }
     Ok(())
-}
-
-impl TabDescriptor {
-    fn from_raw(value: u8) -> Self {
-        Self {
-            alignment: value & 0x07,
-            leader: (value >> 3) & 0x07,
-            reserved: value >> 6,
-        }
-    }
-
-    fn raw(self) -> Result<u8> {
-        if self.alignment > 7 || self.leader > 7 || self.reserved > 3 {
-            return Err(Error::invalid(0, "TBD field exceeds its bit width"));
-        }
-        Ok(self.alignment | (self.leader << 3) | (self.reserved << 6))
-    }
 }
 
 impl NumRmOperand {
@@ -18621,18 +19978,14 @@ impl Pcd {
 
     fn read(input: &mut SliceReader<'_>) -> Result<Self> {
         let flags = input.u16()?;
-        let raw_fc = input.u32()?;
+        let file_position = input.sdk_object()?;
         let raw_prm = input.u16()?;
         Ok(Self {
             no_paragraph_mark_at_end: flags & 0x0001 != 0,
             reserved1: flags & 0x0002 != 0,
             dirty: flags & 0x0004 != 0,
             reserved2: flags >> 3,
-            file_position: FcCompressed {
-                fc: raw_fc & 0x3fff_ffff,
-                compressed: raw_fc & 0x4000_0000 != 0,
-                reserved: raw_fc & 0x8000_0000 != 0,
-            },
+            file_position,
             property_modifier: if raw_prm & 1 == 0 {
                 Prm::Simple {
                     isprm: ((raw_prm >> 1) & 0x7f) as u8,
@@ -18650,18 +20003,12 @@ impl Pcd {
         if self.reserved2 > 0x1fff {
             return Err(Error::invalid(0, "Pcd reserved field exceeds 13 bits"));
         }
-        if self.file_position.fc > 0x3fff_ffff {
-            return Err(Error::invalid(0, "FcCompressed offset exceeds 30 bits"));
-        }
         let flags = u16::from(self.no_paragraph_mark_at_end)
             | (u16::from(self.reserved1) << 1)
             | (u16::from(self.dirty) << 2)
             | (self.reserved2 << 3);
         push_u16(bytes, flags);
-        let raw_fc = self.file_position.fc
-            | (u32::from(self.file_position.compressed) << 30)
-            | (u32::from(self.file_position.reserved) << 31);
-        push_u32(bytes, raw_fc);
+        write_sdk_object(bytes, &self.file_position)?;
         let raw_prm = match self.property_modifier {
             Prm::Simple { isprm, value } if isprm <= 0x7f => {
                 (u16::from(isprm) << 1) | (u16::from(value) << 8)
@@ -18696,10 +20043,7 @@ impl TextPiece {
     }
 
     pub fn character_count(&self) -> usize {
-        match &self.characters {
-            TextPieceCharacters::Compressed(value) => value.len(),
-            TextPieceCharacters::Utf16(value) => value.len(),
-        }
+        self.characters.character_count()
     }
 }
 
@@ -18885,6 +20229,22 @@ impl<'a> SliceReader<'a> {
         self.offset = end;
         Ok(value)
     }
+
+    fn sdk_object<T: SdkRead>(&mut self) -> Result<T> {
+        let mut reader = Reader::new(Cursor::new(&self.bytes[self.offset..]))?;
+        let value = T::read_from(&mut reader)?;
+        let consumed = usize::try_from(reader.position()?)
+            .map_err(|_| Error::Limit("SDK object length does not fit usize".into()))?;
+        self.bytes(consumed)?;
+        Ok(value)
+    }
+}
+
+fn write_sdk_object<T: SdkWrite>(bytes: &mut Vec<u8>, value: &T) -> Result<()> {
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    value.write_to(&mut writer)?;
+    bytes.extend_from_slice(&writer.into_inner().into_inner());
+    Ok(())
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
@@ -19048,6 +20408,73 @@ mod tests {
         let bytes = value.to_bytes().unwrap();
         assert_eq!(Clx::from_bytes(&bytes).unwrap(), value);
         assert_eq!(Clx::from_bytes(&bytes).unwrap().to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn prm_resolves_the_normative_simple_table_and_complex_prc_reference() {
+        let clx = Clx {
+            property_runs: vec![Prc {
+                properties: GrpPrl {
+                    properties: vec![Prl {
+                        sprm: Sprm::from_opcode(KnownSprm::CFItalic.opcode()),
+                        operand: SprmOperand::Toggle(1),
+                    }],
+                },
+            }],
+            piece_table: PlcPcd {
+                character_positions: vec![0],
+                pieces: Vec::new(),
+            },
+        };
+
+        let no_effect = Prm::Simple { isprm: 0, value: 0 }
+            .property_modifications(&clx)
+            .unwrap();
+        assert!(no_effect.properties.is_empty());
+
+        let simple = Prm::Simple {
+            isprm: 0x75,
+            value: 1,
+        }
+        .property_modifications(&clx)
+        .unwrap();
+        assert_eq!(simple.properties.len(), 1);
+        assert_eq!(
+            simple.properties[0].sprm.kind(),
+            SprmKind::Known(KnownSprm::CFSpec)
+        );
+        assert_eq!(simple.properties[0].operand, SprmOperand::Toggle(1));
+
+        let line_break = Prm::Simple { isprm: 0, value: 2 }
+            .property_modifications(&clx)
+            .unwrap();
+        assert_eq!(
+            line_break.properties[0].sprm.kind(),
+            SprmKind::Known(KnownSprm::CLbcCRJ)
+        );
+        assert_eq!(line_break.properties[0].operand, SprmOperand::Byte(2));
+
+        let complex = Prm::Complex {
+            property_run_index: 0,
+        }
+        .property_modifications(&clx)
+        .unwrap();
+        assert_eq!(complex, clx.property_runs[0].properties);
+        assert!(
+            Prm::Simple {
+                isprm: 0x01,
+                value: 1,
+            }
+            .property_modifications(&clx)
+            .is_err()
+        );
+        assert!(
+            Prm::Complex {
+                property_run_index: 1,
+            }
+            .property_modifications(&clx)
+            .is_err()
+        );
     }
 
     #[test]
@@ -19253,30 +20680,99 @@ mod tests {
     #[test]
     fn field_and_bookmark_plcs_round_trip_static_records() {
         let fields = FieldTable {
-            positions: vec![3, 8, 12, 13],
-            fields: vec![
-                FieldDescriptor {
-                    character: FieldCharacter::Begin {
-                        reserved: 0,
-                        field_type: 13,
-                    },
+            fields: vec![Field {
+                begin: FieldBegin {
+                    position: 3,
+                    reserved: 0,
+                    field_type: 13,
                 },
-                FieldDescriptor {
-                    character: FieldCharacter::Separator {
-                        reserved: 1,
-                        value: 0,
-                    },
+                instruction_fields: Vec::new(),
+                separator: Some(FieldSeparator {
+                    position: 8,
+                    reserved: 1,
+                    value: 0,
+                }),
+                result_fields: Vec::new(),
+                end: FieldEnd {
+                    position: 12,
+                    reserved: 0,
+                    flags: FieldEndFlags::HAS_SEPARATOR | FieldEndFlags::RESULTS_DIRTY,
                 },
-                FieldDescriptor {
-                    character: FieldCharacter::End {
-                        reserved: 0,
-                        flags: FieldEndFlags::HAS_SEPARATOR | FieldEndFlags::RESULTS_DIRTY,
-                    },
-                },
-            ],
+            }],
+            terminal_position: 13,
         };
         let field_bytes = fields.to_bytes().unwrap();
         assert_eq!(FieldTable::from_bytes(&field_bytes).unwrap(), fields);
+        assert_eq!(fields.innermost_at(9).unwrap().begin.field_type, 13);
+
+        let nested = FieldTable {
+            fields: vec![Field {
+                begin: FieldBegin {
+                    position: 1,
+                    reserved: 0,
+                    field_type: 0x0d,
+                },
+                instruction_fields: vec![Field {
+                    begin: FieldBegin {
+                        position: 3,
+                        reserved: 0,
+                        field_type: 0x25,
+                    },
+                    instruction_fields: Vec::new(),
+                    separator: None,
+                    result_fields: Vec::new(),
+                    end: FieldEnd {
+                        position: 5,
+                        reserved: 0,
+                        flags: FieldEndFlags::empty(),
+                    },
+                }],
+                separator: Some(FieldSeparator {
+                    position: 7,
+                    reserved: 0,
+                    value: 0,
+                }),
+                result_fields: vec![Field {
+                    begin: FieldBegin {
+                        position: 9,
+                        reserved: 0,
+                        field_type: 0x58,
+                    },
+                    instruction_fields: Vec::new(),
+                    separator: None,
+                    result_fields: Vec::new(),
+                    end: FieldEnd {
+                        position: 11,
+                        reserved: 0,
+                        flags: FieldEndFlags::empty(),
+                    },
+                }],
+                end: FieldEnd {
+                    position: 13,
+                    reserved: 0,
+                    flags: FieldEndFlags::HAS_SEPARATOR,
+                },
+            }],
+            terminal_position: 14,
+        };
+        let nested_bytes = nested.to_bytes().unwrap();
+        assert_eq!(FieldTable::from_bytes(&nested_bytes).unwrap(), nested);
+        assert_eq!(nested.innermost_at(4).unwrap().begin.field_type, 0x25);
+        assert_eq!(nested.innermost_at(10).unwrap().begin.field_type, 0x58);
+
+        let mut mismatched = nested;
+        mismatched.fields[0]
+            .end
+            .flags
+            .remove(FieldEndFlags::HAS_SEPARATOR);
+        let mismatched_bytes = mismatched.to_bytes().unwrap();
+        assert!(FieldTable::from_bytes(&mismatched_bytes).is_err());
+        let compatible =
+            FieldTable::from_bytes_with_compatibility(&mismatched_bytes, true).unwrap();
+        assert_eq!(
+            compatible.separator_flag_mismatches().collect::<Vec<_>>(),
+            vec![13]
+        );
 
         let bookmarks = Bookmarks {
             names: BookmarkNames {
@@ -22951,12 +24447,39 @@ mod tests {
                         previous_result: [0; 16],
                     }),
                 },
+                Prl {
+                    sprm: Sprm::from_opcode(KnownSprm::PIstdPermute.opcode()),
+                    operand: SprmOperand::StylePermutation(SppOperand {
+                        ignored_long: 0,
+                        first_style_index: 3,
+                        last_style_index: 5,
+                        remapped_style_indices: vec![7, 8, 9],
+                    }),
+                },
             ],
         };
         let bytes = value.to_bytes().unwrap();
         let parsed = GrpPrl::from_bytes(&bytes).unwrap();
         assert_eq!(parsed, value);
         assert_eq!(parsed.to_bytes().unwrap(), bytes);
+        let SprmOperand::StylePermutation(permutation) = &parsed.properties.last().unwrap().operand
+        else {
+            panic!("sprmPIstdPermute was not parsed as SPPOperand")
+        };
+        assert_eq!(permutation.remap(2), None);
+        assert_eq!(permutation.remap(4), Some(8));
+        let mut invalid_permutation = permutation.clone();
+        invalid_permutation.remapped_style_indices.pop();
+        assert!(
+            GrpPrl {
+                properties: vec![Prl {
+                    sprm: Sprm::from_opcode(KnownSprm::PIstdPermute.opcode()),
+                    operand: SprmOperand::StylePermutation(invalid_permutation),
+                }],
+            }
+            .to_bytes()
+            .is_err()
+        );
         let mut invalid_flags = SectionHeaderFooterFlags::from_bits(0);
         invalid_flags.reserved = 4;
         assert!(invalid_flags.bits().is_err());
@@ -22969,5 +24492,258 @@ mod tests {
         assert_eq!(known.opcode(), 0xd608);
         assert_eq!(known.name(), "sprmTDefTable");
         assert_eq!(KnownSprm::from_opcode(0xffff), None);
+    }
+
+    #[test]
+    fn data_stream_headers_and_prc_data_round_trip_statically() {
+        let border = Brc80 {
+            line_width: 1,
+            border_type: 2,
+            color_index: 3,
+            spacing: 4,
+            shadow: true,
+            frame: false,
+            reserved: false,
+        };
+        let mut border_writer = Writer::new(Cursor::new(Vec::new()));
+        border.write_to(&mut border_writer).unwrap();
+        assert_eq!(border_writer.into_inner().into_inner(), [1, 2, 3, 0x24]);
+        let mut invalid_border = border;
+        invalid_border.spacing = 0x20;
+        assert!(
+            invalid_border
+                .write_to(&mut Writer::new(Cursor::new(Vec::new())))
+                .is_err()
+        );
+        let picf = Picf {
+            total_length: Picf::ENCODED_LEN as i32,
+            header_length: Picf::ENCODED_LEN as u16,
+            storage: Mfpf {
+                format: PictureStorageFormat::Shape,
+                unused_x_extent: 0,
+                unused_y_extent: 0,
+                ignored_handle: 0,
+            },
+            shape: PicfShape {
+                ignored_flags: 0x1234,
+                padding1: 0,
+                ignored_mapping_mode: 0,
+                padding2: 0,
+            },
+            picture: Picmid {
+                goal_width_twips: 720,
+                goal_height_twips: 360,
+                horizontal_scale_tenths_percent: 1000,
+                vertical_scale_tenths_percent: 1000,
+                reserved_width1: 0,
+                reserved_height1: 0,
+                reserved_width2: 0,
+                reserved_height2: 0,
+                reserved_flags: 0,
+                bits_per_pixel: 24,
+                top_border: border,
+                left_border: border,
+                bottom_border: border,
+                right_border: border,
+                reserved_width3: 0,
+                reserved_height3: 0,
+            },
+            property_count: 0,
+        };
+        let picf_bytes = picf.to_bytes().unwrap();
+        assert_eq!(picf_bytes.len(), Picf::ENCODED_LEN);
+        assert_eq!(Picf::from_bytes(&picf_bytes).unwrap(), picf);
+
+        let binary = NilPicfAndBinData {
+            total_length: 71,
+            header_length: 68,
+            ignored_header: [0; 62],
+            binary_data: NilPicfBinaryData::Unresolved(vec![1, 2, 3]),
+        };
+        let binary_bytes = binary.to_bytes().unwrap();
+        assert_eq!(
+            NilPicfAndBinData::from_bytes(&binary_bytes).unwrap(),
+            binary
+        );
+
+        let properties = PrcData {
+            properties: GrpPrl {
+                properties: vec![Prl {
+                    sprm: Sprm::from_opcode(0x0835),
+                    operand: SprmOperand::Toggle(1),
+                }],
+            },
+        };
+        let property_bytes = properties.to_bytes().unwrap();
+        assert_eq!(PrcData::from_bytes(&property_bytes).unwrap(), properties);
+        assert!(PrcData::from_bytes(&[0xff, 0xff]).is_err());
+    }
+
+    #[test]
+    fn canonical_fkp_layout_packs_typed_runs_and_rejects_duplicate_boundaries() {
+        let properties = GrpPrl {
+            properties: vec![Prl {
+                sprm: Sprm::from_opcode(0x0835),
+                operand: SprmOperand::Toggle(1),
+            }],
+        };
+        let chpx = ChpxFkp::with_canonical_layout(
+            vec![10, 20, 30],
+            vec![
+                ChpxFkpRun {
+                    property_offset: None,
+                    properties: Some(properties.clone()),
+                },
+                ChpxFkpRun {
+                    property_offset: Some(42),
+                    properties: Some(properties.clone()),
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(chpx.runs[0].property_offset, chpx.runs[1].property_offset);
+        let chpx_bytes = chpx.to_bytes().unwrap();
+        let reopened_chpx = ChpxFkp::from_bytes(&chpx_bytes).unwrap();
+        assert_eq!(reopened_chpx.file_positions, chpx.file_positions);
+        assert_eq!(reopened_chpx.runs, chpx.runs);
+        assert_eq!(reopened_chpx.to_bytes().unwrap(), chpx_bytes);
+
+        let papx_properties = PapxInFkp {
+            length_encoding: PapxLengthEncoding::HalfWordsMinusOne,
+            style_index: 3,
+            properties,
+            trailing_byte: None,
+        };
+        let papx = PapxFkp::with_canonical_layout(
+            vec![100, 120, 140],
+            vec![
+                PapxFkpRun {
+                    property_offset: None,
+                    paragraph_height_info: [1; 12],
+                    properties: Some(papx_properties.clone()),
+                },
+                PapxFkpRun {
+                    property_offset: Some(64),
+                    paragraph_height_info: [2; 12],
+                    properties: Some(papx_properties),
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(papx.runs[0].property_offset, papx.runs[1].property_offset);
+        let papx_bytes = papx.to_bytes().unwrap();
+        let reopened_papx = PapxFkp::from_bytes(&papx_bytes).unwrap();
+        assert_eq!(reopened_papx.file_positions, papx.file_positions);
+        assert_eq!(reopened_papx.runs, papx.runs);
+        assert_eq!(reopened_papx.to_bytes().unwrap(), papx_bytes);
+
+        assert!(
+            ChpxFkp::with_canonical_layout(
+                vec![10, 10],
+                vec![ChpxFkpRun {
+                    property_offset: None,
+                    properties: None,
+                }],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn ffdata_and_hfd_round_trip_conditional_fields_statically() {
+        let xstz = |characters: &[u16]| Xstz {
+            characters: characters.to_vec(),
+            terminator: 0,
+        };
+        let dropdown = FfData {
+            version: 0xffff_ffff,
+            bits: FfDataBits {
+                field_kind: FormFieldKind::DropDown,
+                result: 1,
+                own_help: true,
+                own_status: false,
+                protected: true,
+                automatic_size: false,
+                text_kind: TextFormFieldKind::Regular,
+                recalculate: false,
+                has_list_box: true,
+            },
+            maximum_text_length: 0,
+            check_box_size_half_points: 0,
+            name: xstz(&[b'f' as u16]),
+            default_text: None,
+            default_selection: Some(0),
+            text_format: xstz(&[]),
+            help_text: xstz(&[b'h' as u16]),
+            status_text: xstz(&[]),
+            entry_macro: xstz(&[]),
+            exit_macro: xstz(&[]),
+            drop_down_list: Some(HsttbDropList {
+                entries: vec![vec![b'A' as u16], vec![b'B' as u16]],
+            }),
+        };
+        let dropdown_bytes = dropdown.to_bytes().unwrap();
+        assert_eq!(FfData::from_bytes(&dropdown_bytes).unwrap(), dropdown);
+
+        let hfd = Hfd {
+            bits: HfdBits {
+                open_in_new_window: true,
+                do_not_preserve_history: false,
+                image_map: false,
+                has_location: false,
+                has_tooltip: false,
+                unused: 0,
+            },
+            class_id: Guid::ZERO,
+            hyperlink: crate::xls::HyperlinkObject::Parsed {
+                stream_version: 2,
+                flags: crate::xls::HyperlinkFlags::empty(),
+                display_name: None,
+                target_frame_name: None,
+                moniker: None,
+                location: None,
+                guid: None,
+                creation_time: None,
+                trailing: Vec::new(),
+            },
+        };
+        let hfd_bytes = hfd.to_bytes().unwrap();
+        assert_eq!(Hfd::from_bytes(&hfd_bytes).unwrap(), hfd);
+
+        let mut form_container = NilPicfAndBinData {
+            total_length: i32::try_from(NilPicfAndBinData::HEADER_LEN + dropdown_bytes.len())
+                .unwrap(),
+            header_length: NilPicfAndBinData::HEADER_LEN as u16,
+            ignored_header: [0; 62],
+            binary_data: NilPicfBinaryData::Unresolved(dropdown_bytes),
+        };
+        form_container.interpret(NilPicfFieldType::Form(FormFieldType::DropDown));
+        assert!(matches!(
+            form_container.binary_data,
+            NilPicfBinaryData::Form {
+                field_type: FormFieldType::DropDown,
+                ref value,
+            } if value == &dropdown
+        ));
+
+        let mut hyperlink_container = NilPicfAndBinData {
+            total_length: i32::try_from(NilPicfAndBinData::HEADER_LEN + hfd_bytes.len()).unwrap(),
+            header_length: NilPicfAndBinData::HEADER_LEN as u16,
+            ignored_header: [0; 62],
+            binary_data: NilPicfBinaryData::Unresolved(hfd_bytes),
+        };
+        hyperlink_container.interpret(NilPicfFieldType::Hyperlink(HyperlinkFieldType::Hyperlink));
+        assert!(matches!(
+            hyperlink_container.binary_data,
+            NilPicfBinaryData::Hyperlink {
+                field_type: HyperlinkFieldType::Hyperlink,
+                ref value,
+            } if value == &hfd
+        ));
+
+        let mut invalid = dropdown;
+        invalid.bits.has_list_box = false;
+        assert!(invalid.to_bytes().is_err());
+        assert!(HfdBits::from_u8(0xe0).is_err());
     }
 }

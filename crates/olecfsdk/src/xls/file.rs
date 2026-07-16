@@ -7,6 +7,7 @@ use crate::{
     cfb::CompoundFile,
     io::BinaryFormat,
     limits::Limits,
+    office_art::{OfficeArtDrawingGraph, OfficeArtStream},
     parse::{
         ParseDiagnostic, ParseDiagnosticCode, ParseOptions, ParseOutcome, SpecificationReference,
         compound_from_bytes, compound_from_path, compound_outcome,
@@ -173,18 +174,84 @@ impl BiffWorkbookTree {
         Ok(())
     }
 
-    pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        // Re-index first so edits cannot leave a stale structural tree.
-        let indexed = Self::from_stream(self.stream.clone())?;
-        if indexed.substreams != self.substreams
-            || indexed.outside_substream_ranges != self.outside_substream_ranges
-        {
+    /// Rebuilds physical BIFF positions, specification file pointers, and the
+    /// BOF/EOF substream index after record-tree edits.
+    pub fn relayout(&mut self) -> Result<()> {
+        let mut rebuilt = self.clone();
+        rebuilt.stream.relayout()?;
+        rebuilt.reindex()?;
+        *self = rebuilt;
+        Ok(())
+    }
+
+    /// Aggregates the workbook-global `OfficeArtDggContainer` and the
+    /// `OfficeArtDgContainer` values owned by sheet substreams.
+    ///
+    /// The BIFF and OfficeArt record trees remain the editable source of
+    /// truth. A workbook without OfficeArt returns `None`; partial or
+    /// ambiguous OfficeArt framing is rejected instead of being presented as
+    /// a complete drawing graph.
+    pub fn drawing_graph(&self) -> Result<Option<OfficeArtDrawingGraph>> {
+        let mut drawing_groups = Vec::<&OfficeArtStream>::new();
+        let mut drawings = Vec::<&OfficeArtStream>::new();
+        let mut incomplete_kinds = Vec::new();
+
+        for record in &self.stream.records {
+            match &record.data {
+                BiffRecordData::MsoDrawingGroup(value) => match &value.data {
+                    MsoDrawingData::Complete(stream) => drawing_groups.push(stream),
+                    MsoDrawingData::Partial(_) => incomplete_kinds.push("partial MsoDrawingGroup"),
+                    MsoDrawingData::Incomplete { .. } => {
+                        incomplete_kinds.push("incomplete MsoDrawingGroup")
+                    }
+                },
+                BiffRecordData::MsoDrawing(value) => match &value.data {
+                    MsoDrawingData::Complete(stream) => drawings.push(stream),
+                    MsoDrawingData::Partial(_) => incomplete_kinds.push("partial MsoDrawing"),
+                    MsoDrawingData::Incomplete { .. } => {
+                        incomplete_kinds.push("incomplete MsoDrawing")
+                    }
+                },
+                _ => {}
+            }
+        }
+
+        if drawing_groups.is_empty() && drawings.is_empty() && incomplete_kinds.is_empty() {
+            return Ok(None);
+        }
+        if !incomplete_kinds.is_empty() {
             return Err(Error::invalid(
                 0,
-                "BIFF substream index is stale after record-tree editing",
+                format!(
+                    "XLS drawing graph contains non-complete OfficeArt aggregates: {}",
+                    incomplete_kinds.join(", ")
+                ),
             ));
         }
-        self.stream.to_bytes()
+        let [drawing_group] = drawing_groups.as_slice() else {
+            return Err(Error::invalid(
+                0,
+                format!(
+                    "XLS drawing graph contains {} complete MsoDrawingGroup records, expected 1",
+                    drawing_groups.len()
+                ),
+            ));
+        };
+        OfficeArtDrawingGraph::from_streams(drawing_group, &drawings).map(Some)
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let mut tree = self.clone();
+        tree.relayout()?;
+        tree.stream.to_bytes()
+    }
+}
+
+impl XlsWorkbookStream {
+    /// Returns the complete drawing graph for this Workbook Stream when one
+    /// is present.
+    pub fn drawing_graph(&self) -> Result<Option<OfficeArtDrawingGraph>> {
+        self.tree.drawing_graph()
     }
 }
 
@@ -257,6 +324,20 @@ impl XlsFile {
     ) -> Result<ParseOutcome<Self>> {
         let compound = compound_outcome(compound_file, options, BinaryFormat::Xls)?;
         Self::from_compound_outcome(compound, options)
+    }
+
+    /// Rebuilds every managed BIFF stream's derived physical layout after
+    /// callers edit the public Rust record trees.
+    pub fn relayout(&mut self) -> Result<()> {
+        let mut rebuilt = self.clone();
+        for workbook in &mut rebuilt.workbooks {
+            workbook.tree.relayout()?;
+        }
+        if let Some(XlsRevisionLog::Parsed(log)) = &mut rebuilt.revision_log {
+            log.relayout()?;
+        }
+        *self = rebuilt;
+        Ok(())
     }
 
     fn from_compound_outcome(
@@ -488,6 +569,57 @@ fn audit_workbook(
                 "BRAI",
                 "2.4.29",
             )?,
+            BiffRecordData::ChartEndObject(value)
+                if !matches!(value.object_kind, 0x0010..=0x0012) =>
+            {
+                report_record_issue(
+                    workbook,
+                    record,
+                    strict,
+                    diagnostics,
+                    ParseDiagnosticCode::NonconformingRecord,
+                    "EndObject",
+                    "2.4.101",
+                    format!(
+                        "iObjectKind is {:#06x}, outside the specified 0x0010..=0x0012 range",
+                        value.object_kind
+                    ),
+                )?;
+            }
+            BiffRecordData::ExtSst(value) => {
+                let nonzero_reserved = value
+                    .buckets
+                    .iter()
+                    .filter(|bucket| bucket.reserved != 0)
+                    .count();
+                let invalid_offsets = value
+                    .buckets
+                    .iter()
+                    .filter(|bucket| u32::from(bucket.record_offset) >= bucket.stream_offset)
+                    .count();
+                let invalid_buckets = value
+                    .buckets
+                    .iter()
+                    .filter(|bucket| {
+                        bucket.reserved != 0
+                            || u32::from(bucket.record_offset) >= bucket.stream_offset
+                    })
+                    .count();
+                if invalid_buckets != 0 {
+                    report_record_issue(
+                        workbook,
+                        record,
+                        strict,
+                        diagnostics,
+                        ParseDiagnosticCode::NonconformingRecord,
+                        "ISSTInf",
+                        "2.5.167",
+                        format!(
+                            "ExtSST contains {invalid_buckets} nonconforming bucket(s): {nonzero_reserved} with a nonzero reserved field and {invalid_offsets} with cbOffset not less than ib"
+                        ),
+                    )?;
+                }
+            }
             BiffRecordData::Hyperlink(value) => match &value.object {
                 HyperlinkObject::Parsed { .. } => {}
                 HyperlinkObject::Truncated { payload, .. } => report_record_issue(
@@ -942,8 +1074,9 @@ mod tests {
     use crate::{
         cfb::Version,
         xls::{
-            BofRecord, CellHeader, DevModeFields, DevModeWPublic, FormulaCachedResult,
-            FormulaRecord, FormulaTokenStream, FormulaTokens,
+            BofRecord, CellHeader, ChartEndObjectRecord, DevModeFields, DevModeWPublic,
+            ExtSstRecord, FormulaCachedResult, FormulaRecord, FormulaTokenStream, FormulaTokens,
+            FrtFlags, FrtHeaderOld, IsstInf,
         },
     };
 
@@ -982,10 +1115,11 @@ mod tests {
         tree.stream
             .records
             .insert(2, record(30, BiffRecordData::CodePage { code_page: 1252 }));
-        assert!(tree.to_bytes().is_err());
-        tree.reindex().unwrap();
+        tree.relayout().unwrap();
         assert_eq!(tree.substreams[0].record_range, 0..5);
         assert_eq!(tree.substreams[0].children[0].record_range, 1..4);
+        assert_eq!(tree.stream.records[2].offset, 40);
+        assert_eq!(tree.to_bytes().unwrap().len(), 54);
     }
 
     fn workbook_bytes() -> Vec<u8> {
@@ -1111,6 +1245,78 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].structure, "BOF");
         assert_eq!(diagnostics[0].specification.section, "2.4.21");
+    }
+
+    #[test]
+    fn end_object_kind_uses_the_root_strictness_gate() {
+        let workbook = XlsWorkbookStream {
+            name: XlsStreamName::Workbook,
+            tree: BiffWorkbookTree::from_stream(BiffStream {
+                records: vec![
+                    record(0, BiffRecordData::Bof(bof(0x0005))),
+                    record(20, BiffRecordData::Eof),
+                    record(24, BiffRecordData::Bof(bof(0x0020))),
+                    record(
+                        44,
+                        BiffRecordData::ChartEndObject(ChartEndObjectRecord {
+                            header: FrtHeaderOld {
+                                record_type: 0x0855,
+                                flags: FrtFlags::empty(),
+                            },
+                            object_kind: 0x0013,
+                            unused1: None,
+                            unused2: None,
+                            unused3: None,
+                        }),
+                    ),
+                    record(54, BiffRecordData::Eof),
+                ],
+                trailing_padding: Vec::new(),
+            })
+            .unwrap(),
+        };
+
+        assert!(audit_workbook(&workbook, true, &mut Vec::new()).is_err());
+        let mut diagnostics = Vec::new();
+        audit_workbook(&workbook, false, &mut diagnostics).unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].structure, "EndObject");
+        assert_eq!(diagnostics[0].specification.section, "2.4.101");
+    }
+
+    #[test]
+    fn ext_sst_bucket_must_fields_use_the_root_strictness_gate() {
+        let workbook = XlsWorkbookStream {
+            name: XlsStreamName::Workbook,
+            tree: BiffWorkbookTree::from_stream(BiffStream {
+                records: vec![
+                    record(0, BiffRecordData::Bof(bof(0x0005))),
+                    record(
+                        20,
+                        BiffRecordData::ExtSst(ExtSstRecord {
+                            strings_per_bucket: 8,
+                            buckets: vec![IsstInf {
+                                stream_offset: 4,
+                                record_offset: 4,
+                                reserved: 1,
+                            }],
+                        }),
+                    ),
+                    record(34, BiffRecordData::Eof),
+                ],
+                trailing_padding: Vec::new(),
+            })
+            .unwrap(),
+        };
+
+        assert!(audit_workbook(&workbook, true, &mut Vec::new()).is_err());
+        let mut diagnostics = Vec::new();
+        audit_workbook(&workbook, false, &mut diagnostics).unwrap();
+        let issue = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.structure == "ISSTInf")
+            .expect("ISSTInf diagnostic");
+        assert_eq!(issue.specification.section, "2.5.167");
     }
 
     #[test]

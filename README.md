@@ -25,7 +25,7 @@ plain-text, slide-summary, or cell-string projections for these trees.
   rebuilt deterministically.
 - Stream bytes, storage metadata, CLSIDs, state bits, and timestamps participate
   in logical round-trip comparison.
-- Bounded readers, writers, allocation limits, and `SdkObject`/`SdkEnum` derives
+- Bounded readers, writers, allocation limits, and `SdkObject`/`SdkEnum`/`SdkBitfield` derives
   provide the base for typed DOC/XLS/PPT records.
 - CFB reading and deterministic writing use SDK-owned static header,
   DIFAT/FAT, MiniFAT, directory, and regular/mini-stream types. Strict reopen,

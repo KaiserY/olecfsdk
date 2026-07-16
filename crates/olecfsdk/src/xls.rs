@@ -14,13 +14,15 @@ pub use formula::{
     FormulaTokenData, FormulaTokenStream,
 };
 
+pub use crate::shared::{FactoidType, PbString, PbStringCharacters, PropertyBagStore};
+
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io::{Cursor, Read, Seek, Write},
 };
 
 use crate::{
-    Error, Result, SdkEnum, SdkObject,
+    Error, Result, SdkBitfield, SdkEnum, SdkObject,
     cfb::CompoundFile,
     io::{Reader, SdkEnumValue, SdkRead, SdkSize, SdkWrite, Writer},
     limits::Limits,
@@ -51,6 +53,9 @@ const CODE_PAGE: u16 = 0x0042;
 const PLS: u16 = 0x004d;
 const FN_GROUP_NAME: u16 = 0x009a;
 const LPR: u16 = 0x0098;
+const DOC_ROUTE: u16 = 0x00b8;
+const BIG_NAME: u16 = 0x0418;
+const CONTINUE_BIG_NAME: u16 = 0x043c;
 const DCON: u16 = 0x0050;
 const DCON_REF: u16 = 0x0051;
 const DCON_NAME: u16 = 0x0052;
@@ -61,6 +66,11 @@ const QSI_SX_TAG: u16 = 0x0802;
 const SX_VIEW_EX9: u16 = 0x0810;
 const DB_QUERY_EXT: u16 = 0x0803;
 const HLINK_TOOLTIP: u16 = 0x0800;
+const EXT_STRING: u16 = 0x0804;
+const OLE_DB_CONN: u16 = 0x080a;
+const WEB_PUB: u16 = 0x0801;
+const QSIR: u16 = 0x0806;
+const QSIF: u16 = 0x0807;
 const CONTINUE_FRT: u16 = 0x0812;
 const CONTINUE_FRT11: u16 = 0x0875;
 const CONTINUE_FRT12: u16 = 0x087f;
@@ -130,12 +140,14 @@ const MDX_TUPLE: u16 = 0x0886;
 const MDX_SET: u16 = 0x0887;
 const MDX_PROP: u16 = 0x0888;
 const MDX_KPI: u16 = 0x0889;
+const MDB: u16 = 0x088a;
 const SX_VIEW_EX: u16 = 0x080c;
 const SX_TH: u16 = 0x080d;
 const SX_PI_EX: u16 = 0x080e;
 const SXVD_TEX: u16 = 0x080f;
 const FEATURE12: u16 = 0x0878;
 const RECIP_NAME: u16 = 0x00b9;
+const L_RNG: u16 = 0x015f;
 const SX_VIEW: u16 = 0x00b0;
 const MUL_RK: u16 = 0x00bd;
 const MUL_BLANK: u16 = 0x00be;
@@ -207,6 +219,10 @@ const FORCE_FULL_CALCULATION: u16 = 0x08a3;
 const COMPRESS_PICTURES: u16 = 0x089b;
 const CRT_ML_FRT: u16 = 0x089e;
 const GEL_FRAME: u16 = 0x1066;
+const FRT_WRAPPER: u16 = 0x0851;
+const SX_VIEW_LINK: u16 = 0x0858;
+const CR_ERR: u16 = 0x0865;
+const AUTO_FILTER12: u16 = 0x087e;
 const LABEL_SST: u16 = 0x00fd;
 const LABEL: u16 = 0x0204;
 const SXVI: u16 = 0x00b2;
@@ -329,6 +345,8 @@ const CHART_FONT_BASIS2: u16 = 0x1068;
 const START_BLOCK: u16 = 0x0852;
 const END_BLOCK: u16 = 0x0853;
 const CHART_FRT_INFO: u16 = 0x0850;
+const FRT_FONT_LIST: u16 = 0x085a;
+const DATA_LAB_EXT: u16 = 0x086a;
 const CHART_CAT_LAB: u16 = 0x0856;
 const CHART_YMULT: u16 = 0x0857;
 const PIVOT_CHART_BITS: u16 = 0x0859;
@@ -383,7 +401,11 @@ pub enum BiffRecordData {
     FnGroupName(FnGroupNameRecord),
     FnGrp12(FnGrp12Record),
     Lpr(LprRecord),
+    DocRoute(DocRouteRecord),
     RecipName(RecipNameRecord),
+    BigName(BigNameRecord),
+    ContinueBigName(ContinueBigNameRecord),
+    Lrng(LrngRecord),
     Lel(LelRecord),
     MsoDrawingGroup(MsoDrawingRecord),
     MsoDrawing(MsoDrawingRecord),
@@ -402,6 +424,11 @@ pub enum BiffRecordData {
     DConName(DConNameRecord),
     DConBin(DConBinRecord),
     DConn(DConnRecord),
+    ExtString(ExtStringRecord),
+    OleDbConn(OleDbConnRecord),
+    WebPub(WebPubRecord),
+    Qsir(QsirRecord),
+    Qsif(QsifRecord),
     TextQuery(TextQuery),
     QsiSxTag(QsiSxTagRecord),
     SxViewEx9(SxViewEx9Record),
@@ -420,6 +447,7 @@ pub enum BiffRecordData {
     LhRecord(LhRecord),
     SortData(SortDataRecord),
     AutoFilter(AutoFilterRecord),
+    AutoFilter12(AutoFilter12Record),
     SxFormat(SxFormatRecord),
     WOpt(WOptRecord),
     Table(TableRecord),
@@ -510,6 +538,7 @@ pub enum BiffRecordData {
     SxvdEx(SxvdExRecord),
     Sxvd(SxvdRecord),
     MdtInfo(MdtInfoRecord),
+    Mdb(MdbRecord),
     MdxStr(MdxStrRecord),
     MdxTuple(MdxTupleRecord),
     MdxSet(MdxSetRecord),
@@ -582,7 +611,12 @@ pub enum BiffRecordData {
     ForceFullCalculation(ForceFullCalculationRecord),
     CompressPictures(CompressPicturesRecord),
     CrtMlFrt(CrtMlFrtRecord),
+    FrtWrapper(FrtWrapperRecord),
+    CrErr(CrErrRecord),
+    SxViewLink(SxViewLinkRecord),
     ChartFrtInfo(ChartFrtInfoRecord),
+    FrtFontList(FrtFontListRecord),
+    DataLabExt(DataLabExtRecord),
     PivotChartBits(PivotChartBitsRecord),
     ChartYMult(ChartYMultRecord),
     ChartCatLab(ChartCatLabRecord),
@@ -978,17 +1012,28 @@ pub struct HyperlinkLongPath {
     pub characters: Vec<u16>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u32")]
 pub struct DataValidationOptions {
+    #[sdk(bits = 0..=3)]
     pub validation_type: u8,
+    #[sdk(bits = 4..=6)]
     pub error_style: u8,
+    #[sdk(bit = 7)]
     pub string_lookup: bool,
+    #[sdk(bit = 8)]
     pub allow_blank: bool,
+    #[sdk(bit = 9)]
     pub suppress_combo: bool,
+    #[sdk(bits = 10..=17)]
     pub ime_mode: u8,
+    #[sdk(bit = 18)]
     pub show_input_message: bool,
+    #[sdk(bit = 19)]
     pub show_error_message: bool,
+    #[sdk(bits = 20..=23)]
     pub operator: u8,
+    #[sdk(bits = 24..=31)]
     pub reserved: u8,
 }
 
@@ -1002,7 +1047,8 @@ pub struct FnGroupNameRecord {
     pub name: XlUnicodeString,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_fn_grp12")]
 pub struct FnGrp12Record {
     pub header: FrtHeader,
     pub name: XlUnicodeString,
@@ -1017,31 +1063,11 @@ impl FnGroupNameRecord {
     }
 }
 
-impl SdkRead for FnGrp12Record {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let position = reader.position()?;
-        let value = Self {
-            header: FrtHeader::read_from(reader)?,
-            name: XlUnicodeString::read_from(reader)?,
-        };
-        if value.header.record_type != FN_GRP12 || value.name.text.character_count() > 32 {
-            return Err(Error::invalid(position, "FnGrp12 fields are invalid"));
-        }
-        Ok(value)
+fn validate_fn_grp12(value: &FnGrp12Record, offset: u64) -> Result<()> {
+    if value.header.record_type != FN_GRP12 || value.name.text.character_count() > 32 {
+        return Err(Error::invalid(offset, "FnGrp12 fields are invalid"));
     }
-}
-
-impl SdkWrite for FnGrp12Record {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.header.record_type != FN_GRP12 || self.name.text.character_count() > 32 {
-            return Err(Error::invalid(
-                writer.position()?,
-                "FnGrp12 fields are invalid",
-            ));
-        }
-        self.header.write_to(writer)?;
-        self.name.write_to(writer)
-    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
@@ -1098,6 +1124,49 @@ impl RecipNameRecord {
         }
         Ok(())
     }
+}
+
+/// Physical data segmentation for a [`BigNameRecord`].
+///
+/// The first item belongs to the BigName record; every later item belongs to
+/// one ContinueBigName record. The name and fixed prefix are not included.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BigNameSegmentLayout {
+    pub data_byte_count: u16,
+}
+
+/// MS-XLS BigName: an ANSI name and an arbitrary, potentially continued value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BigNameRecord {
+    pub reserved: u16,
+    pub declared_data_byte_count: i32,
+    pub declared_name_byte_count: u8,
+    pub name: Vec<u8>,
+    pub data: Vec<u8>,
+    pub physical_segments: Vec<BigNameSegmentLayout>,
+}
+
+/// A physical ContinueBigName record.
+///
+/// Parsed workbook streams aggregate these bytes into [`BigNameRecord::data`],
+/// but the type remains public for record-level construction and diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_continue_big_name")]
+pub struct ContinueBigNameRecord {
+    #[sdk(remaining)]
+    pub data: Vec<u8>,
+}
+
+/// MS-XLS LRng: row and column label ranges for natural-language formulas.
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_lrng")]
+pub struct LrngRecord {
+    pub declared_row_range_count: u16,
+    #[sdk(count = "declared_row_range_count")]
+    pub row_ranges: Vec<Ref8U>,
+    pub declared_column_range_count: u16,
+    #[sdk(count = "declared_column_range_count")]
+    pub column_ranges: Vec<Ref8U>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1347,10 +1416,11 @@ pub struct CfDataBar {
     pub maximum: CfVo,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(size_prefix = "u16", validate_at = "validate_cf_filter")]
 pub struct CfFilter {
-    pub declared_size: u16,
     pub reserved: u8,
+    #[sdk(bitflags = "u8")]
     pub flags: CfFilterFlags,
     pub parameter: u16,
 }
@@ -1466,7 +1536,8 @@ pub struct NameRecord {
     pub physical_segment_lengths: Vec<u16>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_name_fn_grp12")]
 pub struct NameFnGrp12Record {
     pub header: FrtHeader,
     pub declared_name_character_count: u16,
@@ -1483,82 +1554,34 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_name_publish")]
 pub struct NamePublishRecord {
     pub header: FrtHeader,
+    #[sdk(bitflags = "u16")]
     pub flags: NamePublishFlags,
     pub name: XlUnicodeString,
 }
 
-impl NameFnGrp12Record {
-    fn validate(&self, position: u64) -> Result<()> {
-        let count = self.name.text.character_count();
-        if self.header.record_type != NAME_FN_GRP12
-            || !(1..=255).contains(&count)
-            || usize::from(self.declared_name_character_count) != count
-            || !(32..=255).contains(&self.function_category_index)
-        {
-            return Err(Error::invalid(position, "NameFnGrp12 fields are invalid"));
-        }
-        Ok(())
+fn validate_name_fn_grp12(value: &NameFnGrp12Record, offset: u64) -> Result<()> {
+    let count = value.name.text.character_count();
+    if value.header.record_type != NAME_FN_GRP12
+        || !(1..=255).contains(&count)
+        || usize::from(value.declared_name_character_count) != count
+        || !(32..=255).contains(&value.function_category_index)
+    {
+        return Err(Error::invalid(offset, "NameFnGrp12 fields are invalid"));
     }
+    Ok(())
 }
 
-impl SdkRead for NameFnGrp12Record {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let position = reader.position()?;
-        let value = Self {
-            header: FrtHeader::read_from(reader)?,
-            declared_name_character_count: reader.read_u16()?,
-            function_category_index: reader.read_u16()?,
-            name: XlUnicodeString::read_from(reader)?,
-        };
-        value.validate(position)?;
-        Ok(value)
+fn validate_name_publish(value: &NamePublishRecord, offset: u64) -> Result<()> {
+    if value.header.record_type != NAME_PUBLISH
+        || !(1..=255).contains(&value.name.text.character_count())
+    {
+        return Err(Error::invalid(offset, "NamePublish fields are invalid"));
     }
-}
-
-impl SdkWrite for NameFnGrp12Record {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        self.validate(writer.position()?)?;
-        self.header.write_to(writer)?;
-        writer.write_u16(self.declared_name_character_count)?;
-        writer.write_u16(self.function_category_index)?;
-        self.name.write_to(writer)
-    }
-}
-
-impl NamePublishRecord {
-    fn validate(&self, position: u64) -> Result<()> {
-        if self.header.record_type != NAME_PUBLISH
-            || !(1..=255).contains(&self.name.text.character_count())
-        {
-            return Err(Error::invalid(position, "NamePublish fields are invalid"));
-        }
-        Ok(())
-    }
-}
-
-impl SdkRead for NamePublishRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let position = reader.position()?;
-        let value = Self {
-            header: FrtHeader::read_from(reader)?,
-            flags: NamePublishFlags::from_bits_retain(reader.read_u16()?),
-            name: XlUnicodeString::read_from(reader)?,
-        };
-        value.validate(position)?;
-        Ok(value)
-    }
-}
-
-impl SdkWrite for NamePublishRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        self.validate(writer.position()?)?;
-        self.header.write_to(writer)?;
-        writer.write_u16(self.flags.bits())?;
-        self.name.write_to(writer)
-    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2191,7 +2214,7 @@ pub struct CellHeader {
     pub format_index: u16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct DimensionsRecord {
     pub first_row: u32,
     pub last_row_exclusive: u32,
@@ -2199,6 +2222,7 @@ pub struct DimensionsRecord {
     pub last_column_exclusive: u16,
     pub reserved: u16,
     /// POI-61045 compatibility field found after the specified payload.
+    #[sdk(optional_remaining)]
     pub compatibility_extra: Option<u16>,
 }
 
@@ -2314,8 +2338,9 @@ pub struct CountryRecord {
     pub current_country: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct PaletteRecord {
+    #[sdk(count_prefix = "u16")]
     pub colors: Vec<u32>,
 }
 
@@ -2407,8 +2432,9 @@ pub struct SxviRecord {
     pub name: Option<BiffUnicodeString>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct SxIvdRecord {
+    #[sdk(remaining)]
     pub field_indices: Vec<i16>,
 }
 
@@ -2470,8 +2496,9 @@ pub struct SxPiItem {
     pub object_id: i16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct SxPiRecord {
+    #[sdk(remaining(element_size = 6))]
     pub items: Vec<SxPiItem>,
 }
 
@@ -2953,8 +2980,9 @@ pub struct SxDtrRecord {
     pub second: u8,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct SxIsxoperRecord {
+    #[sdk(remaining)]
     pub item_indices: Vec<u16>,
 }
 
@@ -2991,8 +3019,9 @@ impl SxTblRecord {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct SxTbpgRecord {
+    #[sdk(remaining)]
     pub item_indices: Vec<i16>,
 }
 
@@ -3024,76 +3053,9 @@ pub struct SxFdbTypeRecord {
     pub odbc_type: u16,
 }
 
-impl SdkRead for SxIsxoperRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let remaining = reader.remaining()?;
-        if remaining % 2 != 0 {
-            return Err(Error::invalid(
-                reader.position()?,
-                "SxIsxoper item array has an odd byte length",
-            ));
-        }
-        let count = usize::try_from(remaining / 2)
-            .map_err(|_| Error::Limit("SxIsxoper item count exceeds usize".into()))?;
-        let mut item_indices = Vec::with_capacity(count);
-        for _ in 0..count {
-            item_indices.push(reader.read_u16()?);
-        }
-        Ok(Self { item_indices })
-    }
-}
-
-impl SdkWrite for SxIsxoperRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        for value in &self.item_indices {
-            writer.write_u16(*value)?;
-        }
-        Ok(())
-    }
-}
-
-impl SdkSize for SxIsxoperRecord {
-    fn sdk_size(&self) -> u64 {
-        self.item_indices.len() as u64 * 2
-    }
-}
-
-impl SdkRead for SxTbpgRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let remaining = reader.remaining()?;
-        if remaining % 2 != 0 {
-            return Err(Error::invalid(
-                reader.position()?,
-                "SxTbpg item array has an odd byte length",
-            ));
-        }
-        let count = usize::try_from(remaining / 2)
-            .map_err(|_| Error::Limit("SxTbpg item count exceeds usize".into()))?;
-        let mut item_indices = Vec::with_capacity(count);
-        for _ in 0..count {
-            item_indices.push(reader.read_i16()?);
-        }
-        Ok(Self { item_indices })
-    }
-}
-
-impl SdkWrite for SxTbpgRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        for value in &self.item_indices {
-            writer.write_i16(*value)?;
-        }
-        Ok(())
-    }
-}
-
-impl SdkSize for SxTbpgRecord {
-    fn sdk_size(&self) -> u64 {
-        self.item_indices.len() as u64 * 2
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct RrTabIdRecord {
+    #[sdk(remaining)]
     pub sheet_ids: Vec<u16>,
 }
 
@@ -3225,8 +3187,9 @@ pub struct SxDxfRecord {
     pub format: DxfN12List,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct SxItmRecord {
+    #[sdk(remaining)]
     pub item_indices: Vec<u16>,
 }
 
@@ -3676,30 +3639,17 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u16")]
 pub struct DbQueryParameterFlags {
+    #[sdk(bits = 0..=2)]
     pub parameter_type: u8,
+    #[sdk(bit = 3)]
     pub auto_refresh: bool,
+    #[sdk(bit = 4)]
     pub need_refresh: bool,
+    #[sdk(bits = 5..=15)]
     pub reserved: u16,
-}
-
-impl DbQueryParameterFlags {
-    fn from_bits(bits: u16) -> Self {
-        Self {
-            parameter_type: (bits & 0x0007) as u8,
-            auto_refresh: bits & (1 << 3) != 0,
-            need_refresh: bits & (1 << 4) != 0,
-            reserved: bits >> 5,
-        }
-    }
-
-    fn bits(self) -> u16 {
-        u16::from(self.parameter_type & 0x07)
-            | (u16::from(self.auto_refresh) << 3)
-            | (u16::from(self.need_refresh) << 4)
-            | (self.reserved << 5)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3730,24 +3680,29 @@ pub struct FrtRefHeaderNoGrbit {
     pub range: CellRange,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct HyperlinkTooltipRecord {
     pub header: FrtRefHeaderNoGrbit,
     /// UTF-16 tooltip characters including the terminating NUL.
+    #[sdk(remaining)]
     pub tooltip: Vec<u16>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_continue_frt")]
 pub struct ContinueFrtRecord {
     pub header: FrtHeaderOld,
     /// Continuation bytes whose schema belongs to the preceding future record.
+    #[sdk(remaining)]
     pub continuation: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_continue_frt11")]
 pub struct ContinueFrt11Record {
     pub header: FrtHeader,
     /// Continuation bytes whose schema belongs to the preceding future record.
+    #[sdk(remaining)]
     pub continuation: Vec<u8>,
 }
 
@@ -3759,10 +3714,12 @@ pub struct ContinueFrt12Record {
     pub continuation: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_crt_ml_frt_continue")]
 pub struct CrtMlFrtContinueRecord {
     pub header: FrtHeader,
     /// Continuation of the owning CrtMlFrt XML token chain.
+    #[sdk(remaining)]
     pub xml_token_chain: Vec<u8>,
 }
 
@@ -3773,11 +3730,22 @@ pub struct SxAddlHeader {
     pub data_type: u8,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_sx_addl_string")]
 pub struct SxAddlString {
     pub total_character_count: u32,
     pub reserved: u16,
     pub segment: XlUnicodeString,
+}
+
+fn validate_sx_addl_string(value: &SxAddlString, offset: u64) -> Result<()> {
+    if value.total_character_count > u32::from(u16::MAX) {
+        return Err(Error::invalid(
+            offset,
+            "SXAddl_SXString cchTotal exceeds 65535",
+        ));
+    }
+    Ok(())
 }
 
 bitflags::bitflags! {
@@ -4154,15 +4122,18 @@ pub enum WebScreenSize {
     Pixels1920x1200 = 10,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_w_opt")]
 pub struct WOptRecord {
     pub header: FrtHeaderOld,
+    #[sdk(bitflags = "u16")]
     pub flags: WOptFlags,
     pub screen_size: WebScreenSize,
     pub reserved: u8,
     pub pixels_per_inch: u32,
     pub code_page: u32,
     pub component_location: LpWideString,
+    #[sdk(remaining)]
     pub future: Vec<u8>,
 }
 
@@ -4174,14 +4145,22 @@ pub struct TableRange {
     pub last_column: u8,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u16")]
 pub struct TableOptions {
+    #[sdk(bit = 0)]
     pub always_calculate: bool,
+    #[sdk(bit = 1)]
     pub reserved1: bool,
+    #[sdk(bit = 2)]
     pub row_input: bool,
+    #[sdk(bit = 3)]
     pub two_variable: bool,
+    #[sdk(bit = 4)]
     pub first_input_deleted: bool,
+    #[sdk(bit = 5)]
     pub second_input_deleted: bool,
+    #[sdk(bits = 6..=15)]
     pub reserved2: u16,
 }
 
@@ -4191,13 +4170,14 @@ pub struct TableInputReference {
     pub column: i16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct TableRecord {
     pub range: TableRange,
     pub options: TableOptions,
     pub row_input: TableInputReference,
     pub column_input: TableInputReference,
     /// Two-byte padding emitted by one legacy producer in the corpus.
+    #[sdk(optional_remaining)]
     pub compatibility_padding: Option<u16>,
 }
 
@@ -4236,10 +4216,12 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct QsiRecord {
+    #[sdk(bitflags = "u16")]
     pub flags: QsiFlags,
     pub auto_format_index: u16,
+    #[sdk(bitflags = "u16")]
     pub formatting_flags: QsiFormattingFlags,
     pub reserved: u32,
     pub name: XlUnicodeString,
@@ -4282,22 +4264,31 @@ pub enum PaneType {
     TopLeft = 3,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u16")]
 pub struct SxSelectOptions {
+    #[sdk(bits = 0..=4)]
     pub click_count: u8,
+    #[sdk(bit = 5)]
     pub label_only: bool,
+    #[sdk(bit = 6)]
     pub data_only: bool,
+    #[sdk(bit = 7)]
     pub toggle_data_header: bool,
+    #[sdk(bit = 8)]
     pub selection_click: bool,
+    #[sdk(bit = 9)]
     pub extendable: bool,
+    #[sdk(bits = 10..=15)]
     pub unused: u8,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct SxSelectRecord {
     pub reserved1: u16,
     pub pane: PaneType,
     pub reserved2: u8,
+    #[sdk(bitflags = "u16")]
     pub axis: SxAxis,
     pub active_dimension: u16,
     pub line_start: u16,
@@ -4339,21 +4330,35 @@ pub enum MsoDrawingSelectionMode {
     Crop = 7,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_mso_drawing_selection")]
 pub struct MsoDrawingSelectionRecord {
     pub header: OfficeArtRecordHeader,
     pub shape_count_unused: u32,
     pub mode: MsoDrawingSelectionMode,
     pub focus_shape_id: u32,
+    #[sdk(remaining)]
     pub selected_shape_ids: Vec<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+fn validate_mso_drawing_selection(value: &MsoDrawingSelectionRecord, position: u64) -> Result<()> {
+    if value.header.version != 0 || value.header.instance != 0 || value.header.record_type != 0xf119
+    {
+        return Err(Error::invalid(
+            position,
+            "MsoDrawingSelection OfficeArtFDGSL header is invalid",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct ScenManRecord {
     pub scenario_count: i16,
     pub current_scenario_index: i16,
     pub shown_scenario_index: i16,
     pub result_reference_count: i16,
+    #[sdk(count = "result_reference_count")]
     pub result_references: Vec<CellRange>,
 }
 
@@ -4383,12 +4388,20 @@ pub struct ScenarioRecord {
     pub unused: Vec<u16>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_cusr_record")]
 pub struct CUsrRecord {
     pub user_count: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+fn validate_cusr_record(value: &CUsrRecord, offset: u64) -> Result<()> {
+    if value.user_count > 255 {
+        return Err(Error::invalid(offset, "CUsr user count exceeds 255"));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct CbUsrRecord {
     /// One byte count for each of the 256 possible user slots.
     pub user_record_sizes: [u16; 256],
@@ -4498,11 +4511,13 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_rrd")]
 pub struct Rrd {
     pub memory_size: u32,
     pub revision_id: i32,
     pub revision_type: RevisionType,
+    #[sdk(bitflags = "u16")]
     pub flags: RrdFlags,
     pub sheet_id: u16,
 }
@@ -4530,7 +4545,8 @@ pub struct RrdRenSheetRecord {
     pub new_name: BiffUnicodeString,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_ref8u")]
 pub struct Ref8U {
     pub first_row: u16,
     pub last_row: u16,
@@ -5110,7 +5126,8 @@ pub struct RrInsertShRecord {
     pub name: BiffUnicodeString,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_rrd_conflict")]
 pub struct RrdConflictRecord {
     pub revision: Rrd,
 }
@@ -5565,21 +5582,24 @@ pub struct Feat11CellStruct {
     pub field_id: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct Feat11RgSharepointIdDel {
     pub declared_id_count: u16,
+    #[sdk(count = "declared_id_count")]
     pub row_ids: Vec<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct Feat11RgSharepointIdChange {
     pub declared_id_count: u16,
+    #[sdk(count = "declared_id_count")]
     pub row_ids: Vec<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct Feat11RgInvalidCells {
     pub declared_cell_count: u16,
+    #[sdk(count = "declared_cell_count")]
     pub cells: Vec<Feat11CellStruct>,
 }
 
@@ -5749,9 +5769,10 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct ChartDataLabelExtContentsRecord {
     pub header: FrtHeader,
+    #[sdk(bitflags = "u16")]
     pub flags: ChartDataLabelExtContentsFlags,
     pub separator: XlUnicodeStringMin2,
 }
@@ -5970,6 +5991,387 @@ pub struct FrtHeaderOld {
     pub flags: FrtFlags,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u16")]
+pub enum DocumentRoutingDelivery {
+    Sequential = 0,
+    AllRecipients = 1,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct DocRouteFlags: u16 {
+        const ROUTED = 0x0001;
+        const RETURN_ORIGINAL = 0x0002;
+        const TRACK_STATUS = 0x0004;
+        const CUSTOM_RECIPIENT_TYPE = 0x0008;
+        const SAVE_ROUTING_INFORMATION = 0x0080;
+    }
+}
+
+/// MS-XLS DocRoute together with the RecipName collection it owns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocRouteRecord {
+    pub stage_index: u16,
+    pub declared_recipient_count: u16,
+    pub delivery: DocumentRoutingDelivery,
+    pub flags: DocRouteFlags,
+    pub subject: Vec<u8>,
+    pub message: Vec<u8>,
+    pub route_id: Vec<u8>,
+    pub custom_recipient_type: Vec<u8>,
+    pub workbook_title: Vec<u8>,
+    pub organization: Vec<u8>,
+    pub entry_id: Vec<u8>,
+    pub recipients: Vec<RecipNameRecord>,
+}
+
+/// A complete BIFF record embedded by MS-XLS FrtWrapper.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrtWrapperRecord {
+    pub header: FrtHeaderOld,
+    pub wrapped: Box<BiffRecordData>,
+    pub padding: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrErrRecord {
+    pub header: FrtHeader,
+    pub declared_size: u32,
+    pub declared_character_count: u16,
+    pub chunks: Vec<ContinuedStringChunk>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SxViewLinkRecord {
+    pub record_type: u16,
+    pub unused: u16,
+    pub reserved: u16,
+    pub pivot_table_name: BiffUnicodeString,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u32", validate = validate_qsif_flags)]
+pub struct QsifFlags {
+    #[sdk(bit = 0)]
+    pub user_inserted: bool,
+    #[sdk(bit = 1)]
+    pub fill_down: bool,
+    #[sdk(bit = 2)]
+    pub descending: bool,
+    #[sdk(bits = 3..=10)]
+    pub sort_key: u8,
+    #[sdk(bit = 11)]
+    pub row_numbers: bool,
+    #[sdk(bit = 13)]
+    pub sorted: bool,
+    #[sdk(bit = 16)]
+    pub clipped: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QsifRecord {
+    pub header: FrtHeaderOld,
+    pub flags: QsifFlags,
+    pub field_id: u32,
+    pub list_id: Option<u32>,
+    pub title: XlUnicodeString,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u32", validate = validate_qsir_flags)]
+pub struct QsirFlags {
+    #[sdk(bit = 0)]
+    pub persist: bool,
+    #[sdk(bit = 1)]
+    pub persist_sort: bool,
+    #[sdk(bit = 2)]
+    pub persist_auto_filter: bool,
+    #[sdk(bit = 20)]
+    pub sorted: bool,
+    #[sdk(bit = 21)]
+    pub case_sensitive: bool,
+    #[sdk(bit = 22)]
+    pub has_header_row: bool,
+    #[sdk(bit = 23)]
+    pub id_wrapped: bool,
+    #[sdk(bit = 25)]
+    pub titles_old: bool,
+    #[sdk(bits = 26..=30)]
+    pub version_before_refresh_alert: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QsirRecord {
+    pub header: FrtRefHeaderU,
+    pub saved_query_size: u16,
+    pub saved_field_size: u16,
+    pub flags: QsirFlags,
+    pub custom_sort_index: u32,
+    pub declared_field_count: u32,
+    pub next_field_id: u32,
+    pub extra_columns_left: u16,
+    pub extra_columns_right: u16,
+    pub list_id: Option<u32>,
+    pub deleted_titles: Vec<XlUnicodeString>,
+    pub fields: Vec<QsifRecord>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u8")]
+pub enum WebPublishSourceType {
+    Workbook = 0,
+    Sheet = 1,
+    PrintArea = 2,
+    AutoFilter = 3,
+    CellRange = 4,
+    Chart = 5,
+    PivotTable = 6,
+    QueryTable = 7,
+    NamedRange = 8,
+    Undefined = 0xff,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u8")]
+pub enum WebPublishDestinationType {
+    NonInteractive = 0,
+    Workbook = 1,
+    PivotTable = 2,
+    Chart = 3,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct WebPubFlags: u16 {
+        const UNUSED = 0x0001;
+        const AUTO_REPUBLISH = 0x0002;
+        const MHTML = 0x0008;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebPubString {
+    pub text: BiffUnicodeString,
+    pub padding: Option<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebPubRecord {
+    pub header: FrtRefHeaderU,
+    pub source_type: WebPublishSourceType,
+    pub destination_type: WebPublishDestinationType,
+    pub flags: WebPubFlags,
+    pub reserved: u16,
+    pub unused: u16,
+    pub style_id: u32,
+    pub source_name: Option<WebPubString>,
+    pub destination_file: WebPubString,
+    pub division_id: WebPubString,
+    pub title: WebPubString,
+    pub chart_id: Option<u32>,
+    pub future_bytes: Vec<u8>,
+    pub trailing_unused: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u16")]
+pub struct AutoFilter12Flags {
+    #[sdk(bit = 3)]
+    pub worksheet: bool,
+    #[sdk(bits = 4..=15)]
+    pub unused: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u32")]
+pub enum AutoFilter12DynamicFilter {
+    None = 0x00,
+    AboveAverage = 0x01,
+    BelowAverage = 0x02,
+    Tomorrow = 0x08,
+    Today = 0x09,
+    Yesterday = 0x0a,
+    NextWeek = 0x0b,
+    ThisWeek = 0x0c,
+    LastWeek = 0x0d,
+    NextMonth = 0x0e,
+    ThisMonth = 0x0f,
+    LastMonth = 0x10,
+    NextQuarter = 0x11,
+    ThisQuarter = 0x12,
+    LastQuarter = 0x13,
+    NextYear = 0x14,
+    ThisYear = 0x15,
+    LastYear = 0x16,
+    YearToDate = 0x17,
+    Quarter1 = 0x18,
+    Quarter2 = 0x19,
+    Quarter3 = 0x1a,
+    Quarter4 = 0x1b,
+    Month1 = 0x1c,
+    Month2 = 0x1d,
+    Month3 = 0x1e,
+    Month4 = 0x1f,
+    Month5 = 0x20,
+    Month6 = 0x21,
+    Month7 = 0x22,
+    Month8 = 0x23,
+    Month9 = 0x24,
+    Month10 = 0x25,
+    Month11 = 0x26,
+    Month12 = 0x27,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u32")]
+#[repr(u32)]
+pub enum KpiSet {
+    None = 0xffff_ffff,
+    ThreeArrows = 0,
+    ThreeArrowsGray = 1,
+    ThreeFlags = 2,
+    ThreeTrafficLights1 = 3,
+    ThreeTrafficLights2 = 4,
+    ThreeSigns = 5,
+    ThreeSymbols = 6,
+    ThreeSymbols2 = 7,
+    FourArrows = 8,
+    FourArrowsGray = 9,
+    FourRedToBlack = 10,
+    FourRating = 11,
+    FourTrafficLights = 12,
+    FiveArrows = 13,
+    FiveArrowsGray = 14,
+    FiveRating = 15,
+    FiveQuarters = 16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AutoFilter12Filter {
+    Criteria,
+    CellColor(DxfN12List),
+    FontColor(DxfN12List),
+    Icon { icon_set: KpiSet, icon_index: u32 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutoFilter12Continuation<T> {
+    pub header: FrtRefHeaderU,
+    pub value: T,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutoFilter12Criterion {
+    pub operand: AutoFilterOperand,
+    /// AFDOperStr.unused3, present only for AutoFilter12 string criteria.
+    pub string_unused: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u32")]
+pub enum AutoFilter12DateGroupingLevel {
+    Year = 0,
+    Month = 1,
+    Day = 2,
+    Hour = 3,
+    Minute = 4,
+    Second = 5,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AutoFilter12DateGrouping {
+    pub year: u16,
+    pub month: u16,
+    pub day: u32,
+    pub hour: u16,
+    pub minute: u16,
+    pub second: u16,
+    pub unused: u16,
+    pub reserved: u32,
+    pub level: AutoFilter12DateGroupingLevel,
+}
+
+/// MS-XLS AutoFilter12. ContinueFrt12 payloads remain explicitly bounded
+/// future-record values until their operand/date subtypes are selected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutoFilter12Record {
+    pub header: FrtRefHeaderU,
+    pub entry_index: u16,
+    pub hide_arrow: bool,
+    pub dynamic_filter_type: AutoFilter12DynamicFilter,
+    pub declared_criteria_count: u32,
+    pub declared_date_grouping_count: u32,
+    pub flags: AutoFilter12Flags,
+    pub unused: u32,
+    pub list_id: u32,
+    pub user_view_guid: [u8; 16],
+    pub filter: AutoFilter12Filter,
+    pub criteria: Vec<AutoFilter12Continuation<AutoFilter12Criterion>>,
+    pub date_groupings: Vec<AutoFilter12Continuation<AutoFilter12DateGrouping>>,
+}
+
+/// MS-XLS ExtString: one OLE DB connection-string segment.
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_ext_string")]
+pub struct ExtStringRecord {
+    pub header: FrtHeaderOld,
+    pub string: XlUnicodeString,
+    /// Specified minimum-size padding. Its bytes are undefined and preserved.
+    #[sdk(remaining)]
+    pub unused: Vec<u8>,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct OleDbConnFlags: u16 {
+        const PASSWORD_STRIPPED = 0x0001;
+        const ALTERNATE_CONNECTION = 0x0002;
+    }
+}
+
+/// MS-XLS OleDbConn and its declared following ExtString count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct OleDbConnRecord {
+    pub header: FrtHeaderOld,
+    #[sdk(bitflags = "u16")]
+    pub flags: OleDbConnFlags,
+    pub declared_string_count: u16,
+    pub reserved: u32,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct FontInfoFlags: u16 {
+        const SCALED = 0x0001;
+    }
+}
+
+/// MS-XLS FontInfo used by FrtFontList.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct FontInfo {
+    #[sdk(bitflags = "u16")]
+    pub flags: FontInfoFlags,
+    pub font_index: u16,
+}
+
+/// MS-XLS FrtFontList and its statically typed FontInfo array.
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+pub struct FrtFontListRecord {
+    pub header: FrtHeaderOld,
+    pub excel_version: u8,
+    pub reserved: u8,
+    pub declared_font_count: u16,
+    #[sdk(count = "declared_font_count")]
+    pub fonts: Vec<FontInfo>,
+}
+
+/// MS-XLS DataLabExt collection marker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct DataLabExtRecord {
+    pub header: FrtHeader,
+}
+
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct MdtInfoFlags: u32 {
@@ -6004,14 +6406,39 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_mdt_info")]
 pub struct MdtInfoRecord {
     pub header: FrtHeader,
+    #[sdk(bitflags = "u32")]
     pub flags: MdtInfoFlags,
     pub name: LpWideString,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One-based index of an MDTInfo record in the workbook globals substream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct MdtInfoIndex {
+    pub index: i32,
+}
+
+/// MS-XLS MDir structure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct MDir {
+    pub metadata_type: MdtInfoIndex,
+    pub metadata_record_index: u32,
+}
+
+/// MS-XLS MDB: a block of metadata-directory entries.
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_mdb")]
+pub struct MdbRecord {
+    pub header: FrtHeader,
+    #[sdk(remaining(element_size = 8))]
+    pub entries: Vec<MDir>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_mdx_string_index")]
 pub struct MdxStringIndex {
     pub index: i32,
 }
@@ -6051,22 +6478,26 @@ pub enum MdxSetSortOrder {
     NaturalDescending = 0x06,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_mdx_str")]
 pub struct MdxStrRecord {
     pub header: FrtHeader,
     pub value: LpWideString,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_mdx_tuple")]
 pub struct MdxTupleRecord {
     pub header: FrtHeader,
     pub connection_name: MdxStringIndex,
     pub source_function: MdxFunction,
     pub declared_string_count: i32,
+    #[sdk(count = "declared_string_count")]
     pub strings: Vec<MdxStringIndex>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_mdx_set")]
 pub struct MdxSetRecord {
     pub header: FrtHeader,
     pub connection_name: MdxStringIndex,
@@ -6074,10 +6505,12 @@ pub struct MdxSetRecord {
     pub sort_order: MdxSetSortOrder,
     pub set_definition: MdxStringIndex,
     pub declared_string_count: i32,
+    #[sdk(count = "declared_string_count")]
     pub strings: Vec<MdxStringIndex>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_mdx_prop")]
 pub struct MdxPropRecord {
     pub header: FrtHeader,
     pub connection_name: MdxStringIndex,
@@ -6086,7 +6519,8 @@ pub struct MdxPropRecord {
     pub property_name: MdxStringIndex,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_mdx_kpi")]
 pub struct MdxKpiRecord {
     pub header: FrtHeader,
     pub connection_name: MdxStringIndex,
@@ -6112,51 +6546,23 @@ pub struct ChartFrtInfoRecord {
     pub record_type_ranges: Vec<CFrtId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate = "validate_pivot_chart_bits")]
 pub struct PivotChartBitsRecord {
     pub header: FrtHeaderOld,
     /// Zero to three producer-preserved optional reserved words.
+    #[sdk(remaining)]
     pub reserved: Vec<u16>,
 }
 
-impl SdkRead for PivotChartBitsRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let header = FrtHeaderOld::read_from(reader)?;
-        let remaining = reader.remaining()?;
-        if remaining % 2 != 0 || remaining > 6 {
-            return Err(Error::invalid(
-                reader.position()?,
-                "PivotChartBits optional reserved tail must contain zero to three words",
-            ));
-        }
-        let mut reserved = Vec::with_capacity((remaining / 2) as usize);
-        while reader.remaining()? != 0 {
-            reserved.push(reader.read_u16()?);
-        }
-        Ok(Self { header, reserved })
+fn validate_pivot_chart_bits(value: &PivotChartBitsRecord) -> Result<()> {
+    if value.reserved.len() > 3 {
+        return Err(Error::invalid(
+            0,
+            "PivotChartBits optional reserved tail must contain zero to three words",
+        ));
     }
-}
-
-impl SdkWrite for PivotChartBitsRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.reserved.len() > 3 {
-            return Err(Error::invalid(
-                0,
-                "PivotChartBits has more than three optional reserved words",
-            ));
-        }
-        self.header.write_to(writer)?;
-        for value in &self.reserved {
-            writer.write_u16(*value)?;
-        }
-        Ok(())
-    }
-}
-
-impl SdkSize for PivotChartBitsRecord {
-    fn sdk_size(&self) -> u64 {
-        4 + self.reserved.len() as u64 * 2
-    }
+    Ok(())
 }
 
 bitflags::bitflags! {
@@ -6185,14 +6591,28 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_chart_cat_lab")]
 pub struct ChartCatLabRecord {
     pub header: FrtHeaderOld,
     pub offset_percent: u16,
     pub alignment: u16,
+    #[sdk(bitflags = "u16")]
     pub flags: ChartCatLabFlags,
     /// Older producers omit the final reserved word.
+    #[sdk(optional_remaining)]
     pub reserved: Option<u16>,
+}
+
+fn validate_chart_cat_lab(value: &ChartCatLabRecord, position: u64) -> Result<()> {
+    validate_frt_header_old(value.header, CHART_CAT_LAB, position, "CatLab")?;
+    if value.offset_percent > 1000
+        || !matches!(value.alignment, 1..=3)
+        || value.reserved.is_some_and(|reserved| reserved != 0)
+    {
+        return Err(Error::invalid(position, "CatLab fields are invalid"));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
@@ -6204,12 +6624,21 @@ pub struct ChartStartObjectRecord {
     pub object_instance2: u16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_chart_end_object")]
 pub struct ChartEndObjectRecord {
     pub header: FrtHeaderOld,
     pub object_kind: u16,
-    /// Older producers sometimes omit all three unused words.
-    pub unused: Option<[u16; 3]>,
+    #[sdk(optional)]
+    pub unused1: Option<u16>,
+    #[sdk(optional)]
+    pub unused2: Option<u16>,
+    #[sdk(optional)]
+    pub unused3: Option<u16>,
+}
+
+fn validate_chart_end_object(value: &ChartEndObjectRecord, position: u64) -> Result<()> {
+    validate_frt_header_old(value.header, CHART_END_OBJECT, position, "EndObject")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
@@ -6282,12 +6711,14 @@ bitflags::bitflags! {
 }
 
 /// Chart series color options written by Mac Office 11.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct CrtCoOptRecord {
     pub header: FrtHeader,
     pub color_scheme: u32,
+    #[sdk(bitflags = "u16")]
     pub flags: CrtCoOptFlags,
     /// Two-byte zero padding emitted by one Mac producer in the corpus.
+    #[sdk(optional_remaining)]
     pub compatibility_padding: Option<u16>,
 }
 
@@ -6379,10 +6810,11 @@ pub struct LhGraphViewCore {
     pub skip_factor: u16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct LhGraphViewRecord {
     pub core: LhGraphViewCore,
     /// Three producer-specific words appended after the specified WKS GRAPH tail.
+    #[sdk(optional_remaining)]
     pub compatibility_extension: Option<[u16; 3]>,
 }
 
@@ -6550,11 +6982,28 @@ pub struct StartBlockRecord {
     pub object_instance2: u16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_end_block")]
 pub struct EndBlockRecord {
     pub header: FrtHeaderOld,
     pub object_kind: u16,
-    pub optional_unused: Option<[u16; 3]>,
+    #[sdk(optional)]
+    pub unused1: Option<u16>,
+    #[sdk(optional)]
+    pub unused2: Option<u16>,
+    #[sdk(optional)]
+    pub unused3: Option<u16>,
+}
+
+fn validate_end_block(value: &EndBlockRecord, position: u64) -> Result<()> {
+    validate_frt_header_old(value.header, END_BLOCK, position, "EndBlock")?;
+    if !matches!(
+        value.object_kind,
+        0x0000 | 0x0002 | 0x0004..=0x0007 | 0x0009..=0x000a | 0x000c..=0x000f
+    ) {
+        return Err(Error::invalid(position, "EndBlock object kind is invalid"));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
@@ -6587,12 +7036,15 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_table_style")]
 pub struct TableStyleRecord {
     pub header: FrtHeader,
+    #[sdk(bitflags = "u16")]
     pub flags: TableStyleFlags,
     pub element_count: u32,
     pub declared_name_character_count: u16,
+    #[sdk(count = "declared_name_character_count")]
     pub name: Vec<u16>,
 }
 
@@ -6629,7 +7081,8 @@ pub enum TableStyleElementType {
     PageFieldValues = 0x1b,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_table_style_element")]
 pub struct TableStyleElementRecord {
     pub header: FrtHeader,
     pub element_type: TableStyleElementType,
@@ -6637,93 +7090,26 @@ pub struct TableStyleElementRecord {
     pub dxf_index: u32,
 }
 
-impl TableStyleRecord {
-    fn validate(&self, position: u64) -> Result<()> {
-        if self.header.record_type != TABLE_STYLE
-            || self.flags.intersects(TableStyleFlags::RESERVED)
-            || self.element_count > 28
-            || !(1..=255).contains(&self.name.len())
-            || usize::from(self.declared_name_character_count) != self.name.len()
-        {
-            return Err(Error::invalid(position, "TableStyle fields are invalid"));
-        }
-        Ok(())
+fn validate_table_style(value: &TableStyleRecord, offset: u64) -> Result<()> {
+    if value.header.record_type != TABLE_STYLE
+        || value.flags.intersects(TableStyleFlags::RESERVED)
+        || value.element_count > 28
+        || !(1..=255).contains(&value.name.len())
+        || usize::from(value.declared_name_character_count) != value.name.len()
+    {
+        return Err(Error::invalid(offset, "TableStyle fields are invalid"));
     }
+    Ok(())
 }
 
-impl SdkRead for TableStyleRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let position = reader.position()?;
-        let header = FrtHeader::read_from(reader)?;
-        let flags = TableStyleFlags::from_bits_retain(reader.read_u16()?);
-        let element_count = reader.read_u32()?;
-        let declared_name_character_count = reader.read_u16()?;
-        let count = usize::from(declared_name_character_count);
-        reader.ensure_allocation(count, 2)?;
-        let mut name = Vec::with_capacity(count);
-        for _ in 0..count {
-            name.push(reader.read_u16()?);
-        }
-        let value = Self {
-            header,
-            flags,
-            element_count,
-            declared_name_character_count,
-            name,
-        };
-        value.validate(position)?;
-        Ok(value)
+fn validate_table_style_element(value: &TableStyleElementRecord, offset: u64) -> Result<()> {
+    if value.header.record_type != TABLE_STYLE_ELEMENT || !(1..=9).contains(&value.stripe_size) {
+        return Err(Error::invalid(
+            offset,
+            "TableStyleElement fields are invalid",
+        ));
     }
-}
-
-impl SdkWrite for TableStyleRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        self.validate(writer.position()?)?;
-        self.header.write_to(writer)?;
-        writer.write_u16(self.flags.bits())?;
-        writer.write_u32(self.element_count)?;
-        writer.write_u16(self.declared_name_character_count)?;
-        for character in &self.name {
-            writer.write_u16(*character)?;
-        }
-        Ok(())
-    }
-}
-
-impl TableStyleElementRecord {
-    fn validate(&self, position: u64) -> Result<()> {
-        if self.header.record_type != TABLE_STYLE_ELEMENT || !(1..=9).contains(&self.stripe_size) {
-            return Err(Error::invalid(
-                position,
-                "TableStyleElement fields are invalid",
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl SdkRead for TableStyleElementRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let position = reader.position()?;
-        let value = Self {
-            header: FrtHeader::read_from(reader)?,
-            element_type: TableStyleElementType::read_from(reader)?,
-            stripe_size: reader.read_u32()?,
-            dxf_index: reader.read_u32()?,
-        };
-        value.validate(position)?;
-        Ok(value)
-    }
-}
-
-impl SdkWrite for TableStyleElementRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        self.validate(writer.position()?)?;
-        self.header.write_to(writer)?;
-        self.element_type.write_to(writer)?;
-        writer.write_u32(self.stripe_size)?;
-        writer.write_u32(self.dxf_index)
-    }
+    Ok(())
 }
 
 bitflags::bitflags! {
@@ -6833,35 +7219,6 @@ bitflags::bitflags! {
         const PIVOT_TABLES = 1 << 13;
         const SELECT_UNLOCKED_CELLS = 1 << 14;
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PbStringCharacters {
-    Ansi(Vec<u8>),
-    Unicode(Vec<u16>),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PbString {
-    /// Includes the terminating NUL as stored by MS-OSHARED.
-    pub characters: PbStringCharacters,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FactoidType {
-    pub id: u32,
-    pub uri: PbString,
-    pub tag: PbString,
-    pub download_url: PbString,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PropertyBagStore {
-    pub factoid_types: Vec<FactoidType>,
-    pub header_size: u16,
-    pub version: u16,
-    pub factoid_count: u32,
-    pub strings: Vec<PbString>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -7040,8 +7397,9 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct FactoidData {
+    #[sdk(bitflags = "u8")]
     pub flags: FactoidDataFlags,
     pub property_bag: SmartTagPropertyBag,
 }
@@ -7111,14 +7469,16 @@ pub struct BookExtRecord {
     pub conditional12: Option<BookExtConditional12Flags>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct ExtSstRecord {
     pub strings_per_bucket: u16,
-    pub buckets: Vec<ExtSstBucket>,
+    #[sdk(remaining(element_size = 8))]
+    pub buckets: Vec<IsstInf>,
 }
 
+/// MS-XLS ISSTInf: the stream and record-relative location of one SST bucket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
-pub struct ExtSstBucket {
+pub struct IsstInf {
     pub stream_offset: u32,
     pub record_offset: u16,
     pub reserved: u16,
@@ -7419,8 +7779,9 @@ pub struct ChartLinkedDataRecord {
     pub formula: FormulaTokenStream,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct ChartSeriesListRecord {
+    #[sdk(count_prefix = "u16")]
     pub series_numbers: Vec<u16>,
 }
 
@@ -7931,282 +8292,91 @@ pub struct LpWideString {
     pub characters: Vec<u16>,
 }
 
-fn validate_frt_record_header(header: FrtHeader, expected: u16, context: &str) -> Result<()> {
+fn validate_frt_record_header(
+    header: FrtHeader,
+    expected: u16,
+    context: &str,
+    offset: u64,
+) -> Result<()> {
     if header.record_type != expected {
         return Err(Error::invalid(
-            0,
+            offset,
             format!("{context} FRT record type mismatch"),
         ));
     }
     Ok(())
 }
 
-impl MdxStringIndex {
-    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let position = reader.position()?;
-        let index = reader.read_i32()?;
-        if index < 0 {
-            return Err(Error::invalid(position, "MDX string index is negative"));
-        }
-        Ok(Self { index })
-    }
-
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
-        if self.index < 0 {
-            return Err(Error::invalid(
-                writer.position()?,
-                "MDX string index is negative",
-            ));
-        }
-        writer.write_i32(self.index)
-    }
-}
-
-fn read_mdx_string_indexes<R: Read + Seek>(
-    reader: &mut Reader<R>,
-    declared_count: i32,
-) -> Result<Vec<MdxStringIndex>> {
-    let position = reader.position()?;
-    let count = usize::try_from(declared_count)
-        .map_err(|_| Error::invalid(position, "MDX string count is negative"))?;
-    reader.ensure_allocation(count, 4)?;
-    (0..count).map(|_| MdxStringIndex::read(reader)).collect()
-}
-
-fn validate_mdx_string_count(declared_count: i32, strings: &[MdxStringIndex]) -> Result<()> {
-    if usize::try_from(declared_count).ok() != Some(strings.len()) {
-        return Err(Error::invalid(0, "MDX string count mismatch"));
+fn validate_mdx_string_index(value: &MdxStringIndex, offset: u64) -> Result<()> {
+    if value.index < 0 {
+        return Err(Error::invalid(offset, "MDX string index is negative"));
     }
     Ok(())
 }
 
-impl SdkRead for MdtInfoRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let header = FrtHeader::read_from(reader)?;
-        validate_frt_record_header(header, MDT_INFO, "MDTInfo")?;
-        let flags = MdtInfoFlags::from_bits_retain(reader.read_u32()?);
-        let paste_flags = MdtInfoFlags::PASTE_ALL
-            | MdtInfoFlags::PASTE_FORMULAS
-            | MdtInfoFlags::PASTE_VALUES
-            | MdtInfoFlags::PASTE_FORMATS
-            | MdtInfoFlags::PASTE_COMMENTS
-            | MdtInfoFlags::PASTE_DATA_VALIDATION
-            | MdtInfoFlags::PASTE_BORDERS
-            | MdtInfoFlags::PASTE_COLUMN_WIDTHS
-            | MdtInfoFlags::PASTE_NUMBER_FORMATS;
-        if flags.intersects(paste_flags) && !flags.contains(MdtInfoFlags::COPY) {
-            return Err(Error::invalid(0, "MDTInfo flags violate metadata rules"));
-        }
-        Ok(Self {
-            header,
-            flags,
-            name: LpWideString::read_from(reader)?,
-        })
+fn validate_mdt_info(value: &MdtInfoRecord, offset: u64) -> Result<()> {
+    validate_frt_record_header(value.header, MDT_INFO, "MDTInfo", offset)?;
+    let paste_flags = MdtInfoFlags::PASTE_ALL
+        | MdtInfoFlags::PASTE_FORMULAS
+        | MdtInfoFlags::PASTE_VALUES
+        | MdtInfoFlags::PASTE_FORMATS
+        | MdtInfoFlags::PASTE_COMMENTS
+        | MdtInfoFlags::PASTE_DATA_VALIDATION
+        | MdtInfoFlags::PASTE_BORDERS
+        | MdtInfoFlags::PASTE_COLUMN_WIDTHS
+        | MdtInfoFlags::PASTE_NUMBER_FORMATS;
+    if value.flags.intersects(paste_flags) && !value.flags.contains(MdtInfoFlags::COPY) {
+        return Err(Error::invalid(
+            offset,
+            "MDTInfo flags violate metadata rules",
+        ));
     }
+    Ok(())
 }
 
-impl SdkWrite for MdtInfoRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        validate_frt_record_header(self.header, MDT_INFO, "MDTInfo")?;
-        let paste_flags = MdtInfoFlags::PASTE_ALL
-            | MdtInfoFlags::PASTE_FORMULAS
-            | MdtInfoFlags::PASTE_VALUES
-            | MdtInfoFlags::PASTE_FORMATS
-            | MdtInfoFlags::PASTE_COMMENTS
-            | MdtInfoFlags::PASTE_DATA_VALIDATION
-            | MdtInfoFlags::PASTE_BORDERS
-            | MdtInfoFlags::PASTE_COLUMN_WIDTHS
-            | MdtInfoFlags::PASTE_NUMBER_FORMATS;
-        if self.flags.intersects(paste_flags) && !self.flags.contains(MdtInfoFlags::COPY) {
-            return Err(Error::invalid(0, "MDTInfo flags violate metadata rules"));
-        }
-        self.header.write_to(writer)?;
-        writer.write_u32(self.flags.bits())?;
-        self.name.write_to(writer)
-    }
+fn validate_mdx_str(value: &MdxStrRecord, offset: u64) -> Result<()> {
+    validate_frt_record_header(value.header, MDX_STR, "MDXStr", offset)
 }
 
-impl SdkRead for MdxStrRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let header = FrtHeader::read_from(reader)?;
-        validate_frt_record_header(header, MDX_STR, "MDXStr")?;
-        Ok(Self {
-            header,
-            value: LpWideString::read_from(reader)?,
-        })
+fn validate_mdx_tuple(value: &MdxTupleRecord, offset: u64) -> Result<()> {
+    validate_frt_record_header(value.header, MDX_TUPLE, "MDXTuple", offset)?;
+    if !matches!(
+        value.source_function,
+        MdxFunction::CubeMember | MdxFunction::CubeValue | MdxFunction::CubeRankedMember
+    ) {
+        return Err(Error::invalid(
+            offset,
+            "MDXTuple source function is invalid",
+        ));
     }
+    Ok(())
 }
 
-impl SdkWrite for MdxStrRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        validate_frt_record_header(self.header, MDX_STR, "MDXStr")?;
-        self.header.write_to(writer)?;
-        self.value.write_to(writer)
+fn validate_mdx_set(value: &MdxSetRecord, offset: u64) -> Result<()> {
+    validate_frt_record_header(value.header, MDX_SET, "MDXSet", offset)?;
+    if !matches!(
+        value.source_function,
+        MdxFunction::CubeSet | MdxFunction::CubeSetCount
+    ) {
+        return Err(Error::invalid(offset, "MDXSet source function is invalid"));
     }
+    Ok(())
 }
 
-impl SdkRead for MdxTupleRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let header = FrtHeader::read_from(reader)?;
-        validate_frt_record_header(header, MDX_TUPLE, "MDXTuple")?;
-        let connection_name = MdxStringIndex::read(reader)?;
-        let source_function = MdxFunction::read_from(reader)?;
-        if !matches!(
-            source_function,
-            MdxFunction::CubeMember | MdxFunction::CubeValue | MdxFunction::CubeRankedMember
-        ) {
-            return Err(Error::invalid(0, "MDXTuple source function is invalid"));
-        }
-        let declared_string_count = reader.read_i32()?;
-        let strings = read_mdx_string_indexes(reader, declared_string_count)?;
-        Ok(Self {
-            header,
-            connection_name,
-            source_function,
-            declared_string_count,
-            strings,
-        })
+fn validate_mdx_prop(value: &MdxPropRecord, offset: u64) -> Result<()> {
+    validate_frt_record_header(value.header, MDX_PROP, "MDXProp", offset)?;
+    if value.source_function != MdxFunction::CubeMemberProperty {
+        return Err(Error::invalid(offset, "MDXProp source function is invalid"));
     }
+    Ok(())
 }
 
-impl SdkWrite for MdxTupleRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        validate_frt_record_header(self.header, MDX_TUPLE, "MDXTuple")?;
-        if !matches!(
-            self.source_function,
-            MdxFunction::CubeMember | MdxFunction::CubeValue | MdxFunction::CubeRankedMember
-        ) {
-            return Err(Error::invalid(0, "MDXTuple source function is invalid"));
-        }
-        validate_mdx_string_count(self.declared_string_count, &self.strings)?;
-        self.header.write_to(writer)?;
-        self.connection_name.write(writer)?;
-        self.source_function.write_to(writer)?;
-        writer.write_i32(self.declared_string_count)?;
-        for value in &self.strings {
-            value.write(writer)?;
-        }
-        Ok(())
+fn validate_mdx_kpi(value: &MdxKpiRecord, offset: u64) -> Result<()> {
+    validate_frt_record_header(value.header, MDX_KPI, "MDXKPI", offset)?;
+    if value.source_function != MdxFunction::CubeKpiProperty {
+        return Err(Error::invalid(offset, "MDXKPI source function is invalid"));
     }
-}
-
-impl SdkRead for MdxSetRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let header = FrtHeader::read_from(reader)?;
-        validate_frt_record_header(header, MDX_SET, "MDXSet")?;
-        let connection_name = MdxStringIndex::read(reader)?;
-        let source_function = MdxFunction::read_from(reader)?;
-        if !matches!(
-            source_function,
-            MdxFunction::CubeSet | MdxFunction::CubeSetCount
-        ) {
-            return Err(Error::invalid(0, "MDXSet source function is invalid"));
-        }
-        let sort_order = MdxSetSortOrder::read_from(reader)?;
-        let set_definition = MdxStringIndex::read(reader)?;
-        let declared_string_count = reader.read_i32()?;
-        let strings = read_mdx_string_indexes(reader, declared_string_count)?;
-        Ok(Self {
-            header,
-            connection_name,
-            source_function,
-            sort_order,
-            set_definition,
-            declared_string_count,
-            strings,
-        })
-    }
-}
-
-impl SdkWrite for MdxSetRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        validate_frt_record_header(self.header, MDX_SET, "MDXSet")?;
-        if !matches!(
-            self.source_function,
-            MdxFunction::CubeSet | MdxFunction::CubeSetCount
-        ) {
-            return Err(Error::invalid(0, "MDXSet source function is invalid"));
-        }
-        validate_mdx_string_count(self.declared_string_count, &self.strings)?;
-        self.header.write_to(writer)?;
-        self.connection_name.write(writer)?;
-        self.source_function.write_to(writer)?;
-        self.sort_order.write_to(writer)?;
-        self.set_definition.write(writer)?;
-        writer.write_i32(self.declared_string_count)?;
-        for value in &self.strings {
-            value.write(writer)?;
-        }
-        Ok(())
-    }
-}
-
-impl SdkRead for MdxPropRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let header = FrtHeader::read_from(reader)?;
-        validate_frt_record_header(header, MDX_PROP, "MDXProp")?;
-        let connection_name = MdxStringIndex::read(reader)?;
-        let source_function = MdxFunction::read_from(reader)?;
-        if source_function != MdxFunction::CubeMemberProperty {
-            return Err(Error::invalid(0, "MDXProp source function is invalid"));
-        }
-        Ok(Self {
-            header,
-            connection_name,
-            source_function,
-            member_name: MdxStringIndex::read(reader)?,
-            property_name: MdxStringIndex::read(reader)?,
-        })
-    }
-}
-
-impl SdkWrite for MdxPropRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        validate_frt_record_header(self.header, MDX_PROP, "MDXProp")?;
-        if self.source_function != MdxFunction::CubeMemberProperty {
-            return Err(Error::invalid(0, "MDXProp source function is invalid"));
-        }
-        self.header.write_to(writer)?;
-        self.connection_name.write(writer)?;
-        self.source_function.write_to(writer)?;
-        self.member_name.write(writer)?;
-        self.property_name.write(writer)
-    }
-}
-
-impl SdkRead for MdxKpiRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let header = FrtHeader::read_from(reader)?;
-        validate_frt_record_header(header, MDX_KPI, "MDXKPI")?;
-        let connection_name = MdxStringIndex::read(reader)?;
-        let source_function = MdxFunction::read_from(reader)?;
-        if source_function != MdxFunction::CubeKpiProperty {
-            return Err(Error::invalid(0, "MDXKPI source function is invalid"));
-        }
-        Ok(Self {
-            header,
-            connection_name,
-            source_function,
-            property: MdxKpiProperty::read_from(reader)?,
-            kpi_name: MdxStringIndex::read(reader)?,
-            kpi_member: MdxStringIndex::read(reader)?,
-        })
-    }
-}
-
-impl SdkWrite for MdxKpiRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        validate_frt_record_header(self.header, MDX_KPI, "MDXKPI")?;
-        if self.source_function != MdxFunction::CubeKpiProperty {
-            return Err(Error::invalid(0, "MDXKPI source function is invalid"));
-        }
-        self.header.write_to(writer)?;
-        self.connection_name.write(writer)?;
-        self.source_function.write_to(writer)?;
-        self.property.write_to(writer)?;
-        self.kpi_name.write(writer)?;
-        self.kpi_member.write(writer)
-    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
@@ -8276,9 +8446,10 @@ pub struct XfPropBorder {
     pub border_style: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct DbCellRecord {
     pub row_offset: u32,
+    #[sdk(remaining)]
     pub cell_offsets: Vec<u16>,
 }
 
@@ -8569,12 +8740,14 @@ pub struct SstSegmentLayout {
     pub continuation_encoding: Option<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct IndexRecord {
     pub reserved1: u32,
     pub first_row: u32,
     pub last_row_exclusive: u32,
-    pub reserved2: u32,
+    /// `ibXF`: absolute Workbook-stream position of this sheet's DefColWidth record.
+    pub def_col_width_offset: u32,
+    #[sdk(remaining)]
     pub dbcell_offsets: Vec<u32>,
 }
 
@@ -8604,34 +8777,6 @@ pub enum StyleData {
         /// None preserves the Crystal Reports zero-length form without an option byte.
         name: Option<BiffUnicodeString>,
     },
-}
-
-impl SdkRead for DimensionsRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let first_row = reader.read_u32()?;
-        let last_row_exclusive = reader.read_u32()?;
-        let first_column = reader.read_u16()?;
-        let last_column_exclusive = reader.read_u16()?;
-        let reserved = reader.read_u16()?;
-        let compatibility_extra = match reader.remaining()? {
-            0 => None,
-            2 => Some(reader.read_u16()?),
-            remaining => {
-                return Err(Error::invalid(
-                    reader.position()?,
-                    format!("Dimensions compatibility tail has {remaining} bytes"),
-                ));
-            }
-        };
-        Ok(Self {
-            first_row,
-            last_row_exclusive,
-            first_column,
-            last_column_exclusive,
-            reserved,
-            compatibility_extra,
-        })
-    }
 }
 
 impl SdkRead for FormulaRecord {
@@ -9528,36 +9673,6 @@ impl HyperlinkMoniker {
     }
 }
 
-impl DataValidationOptions {
-    fn from_bits(bits: u32) -> Self {
-        Self {
-            validation_type: (bits & 0x0f) as u8,
-            error_style: ((bits >> 4) & 0x07) as u8,
-            string_lookup: bits & (1 << 7) != 0,
-            allow_blank: bits & (1 << 8) != 0,
-            suppress_combo: bits & (1 << 9) != 0,
-            ime_mode: ((bits >> 10) & 0xff) as u8,
-            show_input_message: bits & (1 << 18) != 0,
-            show_error_message: bits & (1 << 19) != 0,
-            operator: ((bits >> 20) & 0x0f) as u8,
-            reserved: (bits >> 24) as u8,
-        }
-    }
-
-    fn bits(self) -> u32 {
-        u32::from(self.validation_type & 0x0f)
-            | (u32::from(self.error_style & 0x07) << 4)
-            | (u32::from(self.string_lookup) << 7)
-            | (u32::from(self.allow_blank) << 8)
-            | (u32::from(self.suppress_combo) << 9)
-            | (u32::from(self.ime_mode) << 10)
-            | (u32::from(self.show_input_message) << 18)
-            | (u32::from(self.show_error_message) << 19)
-            | (u32::from(self.operator & 0x0f) << 20)
-            | (u32::from(self.reserved) << 24)
-    }
-}
-
 impl SdkRead for XlUnicodeString {
     fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
         let character_count = usize::from(reader.read_u16()?);
@@ -9612,7 +9727,7 @@ impl SdkWrite for DataValidationFormula {
 
 impl SdkRead for DataValidationRecord {
     fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let options = DataValidationOptions::from_bits(reader.read_u32()?);
+        let options = DataValidationOptions::read_from(reader)?;
         let prompt_title = XlUnicodeString::read_from(reader)?;
         let error_title = XlUnicodeString::read_from(reader)?;
         let prompt = XlUnicodeString::read_from(reader)?;
@@ -9639,7 +9754,7 @@ impl SdkRead for DataValidationRecord {
 
 impl SdkWrite for DataValidationRecord {
     fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_u32(self.options.bits())?;
+        self.options.write_to(writer)?;
         self.prompt_title.write_to(writer)?;
         self.error_title.write_to(writer)?;
         self.prompt.write_to(writer)?;
@@ -10230,40 +10345,22 @@ impl SdkWrite for CfDataBar {
     }
 }
 
-impl SdkRead for CfFilter {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let declared_size = reader.read_u16()?;
-        let mut child = reader.sub_reader(u64::from(declared_size))?;
-        let value = Self {
-            declared_size,
-            reserved: child.read_u8()?,
-            flags: CfFilterFlags::from_bits_retain(child.read_u8()?),
-            parameter: child.read_u16()?,
-        };
-        if child.remaining()? != 0 {
-            return Err(Error::invalid(
-                child.position()?,
-                "CFFilter has trailing bytes",
-            ));
-        }
-        Ok(value)
+fn validate_cf_filter(value: &CfFilter, offset: u64) -> Result<()> {
+    let maximum = if value.flags.contains(CfFilterFlags::PERCENT) {
+        100
+    } else {
+        1000
+    };
+    if value.reserved != 0
+        || value.flags.bits() & !(CfFilterFlags::TOP | CfFilterFlags::PERCENT).bits() != 0
+        || value.parameter > maximum
+    {
+        return Err(Error::invalid(
+            offset,
+            "CFFilter fields violate MS-XLS 2.5.30",
+        ));
     }
-}
-
-impl SdkWrite for CfFilter {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.declared_size != 4 {
-            return Err(Error::invalid(
-                writer.position()?,
-                "CFFilter cbFilter is not 4",
-            ));
-        }
-        writer.write_u16(self.declared_size)?;
-        writer.write_u8(self.reserved)?;
-        writer.write_u8(self.flags.bits())?;
-        writer.write_u16(self.parameter)?;
-        Ok(())
-    }
+    Ok(())
 }
 
 impl SdkRead for CfMultistate {
@@ -10494,30 +10591,6 @@ impl SdkWrite for ChartLinkedDataRecord {
     }
 }
 
-impl SdkRead for ChartSeriesListRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let count = usize::from(reader.read_u16()?);
-        let mut series_numbers = Vec::with_capacity(count);
-        for _ in 0..count {
-            series_numbers.push(reader.read_u16()?);
-        }
-        Ok(Self { series_numbers })
-    }
-}
-
-impl SdkWrite for ChartSeriesListRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_u16(
-            u16::try_from(self.series_numbers.len())
-                .map_err(|_| Error::Limit("SeriesList count exceeds u16".into()))?,
-        )?;
-        for number in &self.series_numbers {
-            writer.write_u16(*number)?;
-        }
-        Ok(())
-    }
-}
-
 impl FormulaCachedResult {
     fn from_bits(bits: u64) -> Result<Self> {
         if bits & 0xffff_0000_0000_0000 != 0xffff_0000_0000_0000 {
@@ -10627,20 +10700,6 @@ impl SdkWrite for HeaderFooterRecord {
                 Ok(())
             }
         }
-    }
-}
-
-impl SdkWrite for DimensionsRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_u32(self.first_row)?;
-        writer.write_u32(self.last_row_exclusive)?;
-        writer.write_u16(self.first_column)?;
-        writer.write_u16(self.last_column_exclusive)?;
-        writer.write_u16(self.reserved)?;
-        if let Some(value) = self.compatibility_extra {
-            writer.write_u16(value)?;
-        }
-        Ok(())
     }
 }
 
@@ -10980,162 +11039,6 @@ impl SdkWrite for HfPictureRecord {
             MsoDrawingData::Complete(stream) => writer.write_all(&stream.to_bytes()?)?,
             MsoDrawingData::Partial(stream) => writer.write_all(&stream.to_bytes()?)?,
             MsoDrawingData::Incomplete { bytes, .. } => writer.write_all(bytes)?,
-        }
-        Ok(())
-    }
-}
-
-impl SdkRead for PbString {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let header = reader.read_u16()?;
-        let count = usize::from(header & 0x7fff);
-        let characters = if header & 0x8000 != 0 {
-            PbStringCharacters::Ansi(reader.read_vec(count)?)
-        } else {
-            let byte_count = count
-                .checked_mul(2)
-                .ok_or_else(|| Error::Limit("PBString byte count overflow".into()))?;
-            let bytes = reader.read_vec(byte_count)?;
-            PbStringCharacters::Unicode(
-                bytes
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                    .collect(),
-            )
-        };
-        Ok(Self { characters })
-    }
-}
-
-impl SdkWrite for PbString {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        match &self.characters {
-            PbStringCharacters::Ansi(values) => {
-                let count = u16::try_from(values.len())
-                    .map_err(|_| Error::Limit("ANSI PBString exceeds u16".into()))?;
-                if count > 0x7fff {
-                    return Err(Error::Limit("ANSI PBString exceeds 15-bit count".into()));
-                }
-                writer.write_u16(count | 0x8000)?;
-                writer.write_all(values)?;
-            }
-            PbStringCharacters::Unicode(values) => {
-                let count = u16::try_from(values.len())
-                    .map_err(|_| Error::Limit("Unicode PBString exceeds u16".into()))?;
-                if count > 0x7fff {
-                    return Err(Error::Limit("Unicode PBString exceeds 15-bit count".into()));
-                }
-                writer.write_u16(count)?;
-                for value in values {
-                    writer.write_u16(*value)?;
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-impl SdkRead for FactoidType {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let payload_size = reader.read_u32()?;
-        let mut child = reader.sub_reader(u64::from(payload_size))?;
-        let id = child.read_u32()?;
-        let uri = PbString::read_from(&mut child)?;
-        let tag = PbString::read_from(&mut child)?;
-        let download_url = PbString::read_from(&mut child)?;
-        if child.remaining()? != 0 {
-            return Err(Error::invalid(
-                child.position()?,
-                "FactoidType has trailing bytes",
-            ));
-        }
-        Ok(Self {
-            id,
-            uri,
-            tag,
-            download_url,
-        })
-    }
-}
-
-impl SdkWrite for FactoidType {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        let mut payload_writer = Writer::new(Cursor::new(Vec::new()));
-        payload_writer.write_u32(self.id)?;
-        self.uri.write_to(&mut payload_writer)?;
-        self.tag.write_to(&mut payload_writer)?;
-        self.download_url.write_to(&mut payload_writer)?;
-        let payload = payload_writer.into_inner().into_inner();
-        writer.write_u32(
-            u32::try_from(payload.len())
-                .map_err(|_| Error::Limit("FactoidType exceeds u32 bytes".into()))?,
-        )?;
-        writer.write_all(&payload)?;
-        Ok(())
-    }
-}
-
-impl SdkRead for PropertyBagStore {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let factoid_type_count = usize::try_from(reader.read_u32()?)
-            .map_err(|_| Error::Limit("FactoidType count exceeds usize".into()))?;
-        let maximum_count = usize::try_from(reader.remaining()? / 10)
-            .map_err(|_| Error::Limit("PropertyBagStore length exceeds usize".into()))?;
-        if factoid_type_count > maximum_count {
-            return Err(Error::invalid(
-                reader.position()?,
-                "FactoidType count exceeds remaining bytes",
-            ));
-        }
-        let mut factoid_types = Vec::with_capacity(factoid_type_count);
-        for _ in 0..factoid_type_count {
-            factoid_types.push(FactoidType::read_from(reader)?);
-        }
-        let header_size = reader.read_u16()?;
-        let version = reader.read_u16()?;
-        let factoid_count = reader.read_u32()?;
-        let string_count = usize::try_from(reader.read_u32()?)
-            .map_err(|_| Error::Limit("PropertyBagStore string count exceeds usize".into()))?;
-        let maximum_strings = usize::try_from(reader.remaining()? / 2)
-            .map_err(|_| Error::Limit("PropertyBagStore length exceeds usize".into()))?;
-        if string_count > maximum_strings {
-            return Err(Error::invalid(
-                reader.position()?,
-                "PropertyBagStore string count exceeds remaining bytes",
-            ));
-        }
-        let mut strings = Vec::with_capacity(string_count);
-        for _ in 0..string_count {
-            strings.push(PbString::read_from(reader)?);
-        }
-        Ok(Self {
-            factoid_types,
-            header_size,
-            version,
-            factoid_count,
-            strings,
-        })
-    }
-}
-
-impl SdkWrite for PropertyBagStore {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_u32(
-            u32::try_from(self.factoid_types.len())
-                .map_err(|_| Error::Limit("FactoidType count exceeds u32".into()))?,
-        )?;
-        for value in &self.factoid_types {
-            value.write_to(writer)?;
-        }
-        writer.write_u16(self.header_size)?;
-        writer.write_u16(self.version)?;
-        writer.write_u32(self.factoid_count)?;
-        writer.write_u32(
-            u32::try_from(self.strings.len())
-                .map_err(|_| Error::Limit("PropertyBagStore string count exceeds u32".into()))?,
-        )?;
-        for value in &self.strings {
-            value.write_to(writer)?;
         }
         Ok(())
     }
@@ -11716,22 +11619,6 @@ impl SdkWrite for FeatureProtection {
             value.write_to(writer)?;
         }
         Ok(())
-    }
-}
-
-impl SdkRead for FactoidData {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        Ok(Self {
-            flags: FactoidDataFlags::from_bits_retain(reader.read_u8()?),
-            property_bag: SmartTagPropertyBag::read_from(reader)?,
-        })
-    }
-}
-
-impl SdkWrite for FactoidData {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_u8(self.flags.bits())?;
-        self.property_bag.write_to(writer)
     }
 }
 
@@ -12542,7 +12429,7 @@ impl SdkRead for DbQueryExtRecord {
         }
         let mut parameters = Vec::with_capacity(count);
         for _ in 0..count {
-            parameters.push(DbQueryParameterFlags::from_bits(reader.read_u16()?));
+            parameters.push(DbQueryParameterFlags::read_from(reader)?);
         }
         let future_bytes = reader.read_vec(usize::from(future_byte_count))?;
         Ok(Self {
@@ -12591,58 +12478,10 @@ impl SdkWrite for DbQueryExtRecord {
         writer.write_u16(self.html_format)?;
         writer.write_u16(self.parameter_count)?;
         for value in &self.parameters {
-            writer.write_u16(value.bits())?;
+            value.write_to(writer)?;
         }
         writer.write_all(&self.future_bytes)?;
         Ok(())
-    }
-}
-
-impl SdkRead for HyperlinkTooltipRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let header = FrtRefHeaderNoGrbit::read_from(reader)?;
-        let remaining = reader.remaining()?;
-        if remaining % 2 != 0 {
-            return Err(Error::invalid(
-                reader.position()?,
-                "HLinkTooltip UTF-16 payload has an odd byte count",
-            ));
-        }
-        let count = usize::try_from(remaining / 2)
-            .map_err(|_| Error::Limit("HLinkTooltip length exceeds usize".into()))?;
-        let mut tooltip = Vec::with_capacity(count);
-        for _ in 0..count {
-            tooltip.push(reader.read_u16()?);
-        }
-        Ok(Self { header, tooltip })
-    }
-}
-
-impl SdkWrite for HyperlinkTooltipRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        self.header.write_to(writer)?;
-        for value in &self.tooltip {
-            writer.write_u16(*value)?;
-        }
-        Ok(())
-    }
-}
-
-impl SdkRead for SxAddlString {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        Ok(Self {
-            total_character_count: reader.read_u32()?,
-            reserved: reader.read_u16()?,
-            segment: XlUnicodeString::read_from(reader)?,
-        })
-    }
-}
-
-impl SdkWrite for SxAddlString {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_u32(self.total_character_count)?;
-        writer.write_u16(self.reserved)?;
-        self.segment.write_to(writer)
     }
 }
 
@@ -13069,40 +12908,6 @@ impl SdkWrite for CrtMlFrtRecord {
     }
 }
 
-impl SdkRead for ExtSstRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let strings_per_bucket = reader.read_u16()?;
-        let remaining = usize::try_from(reader.remaining()?)
-            .map_err(|_| Error::Limit("ExtSST bucket bytes exceed usize".into()))?;
-        if !remaining.is_multiple_of(8) {
-            return Err(Error::invalid(
-                reader.position()?,
-                "ExtSST bucket array is not 8-byte aligned",
-            ));
-        }
-        let count = remaining / 8;
-        reader.ensure_allocation(count, 8)?;
-        let mut buckets = Vec::with_capacity(count);
-        for _ in 0..count {
-            buckets.push(ExtSstBucket::read_from(reader)?);
-        }
-        Ok(Self {
-            strings_per_bucket,
-            buckets,
-        })
-    }
-}
-
-impl SdkWrite for ExtSstRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_u16(self.strings_per_bucket)?;
-        for bucket in &self.buckets {
-            bucket.write_to(writer)?;
-        }
-        Ok(())
-    }
-}
-
 impl SdkWrite for ExtendedHeaderFooterRecord {
     fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.header.write_to(writer)?;
@@ -13300,40 +13105,6 @@ impl SdkSize for XfProperty {
     }
 }
 
-impl SdkRead for DbCellRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let row_offset = reader.read_u32()?;
-        let remaining = reader.remaining()?;
-        if remaining % 2 != 0 {
-            return Err(Error::invalid(
-                reader.position()?,
-                "DBCell offset array has an odd byte length",
-            ));
-        }
-        let count = usize::try_from(remaining / 2)
-            .map_err(|_| Error::Limit("DBCell offset count exceeds usize".into()))?;
-        reader.ensure_allocation(count, 2)?;
-        let mut cell_offsets = Vec::with_capacity(count);
-        for _ in 0..count {
-            cell_offsets.push(reader.read_u16()?);
-        }
-        Ok(Self {
-            row_offset,
-            cell_offsets,
-        })
-    }
-}
-
-impl SdkWrite for DbCellRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_u32(self.row_offset)?;
-        for offset in &self.cell_offsets {
-            writer.write_u16(*offset)?;
-        }
-        Ok(())
-    }
-}
-
 impl BiffUnicodeString {
     fn read<R: Read + Seek>(reader: &mut Reader<R>, count: usize) -> Result<Self> {
         let flags = reader.read_u8()?;
@@ -13487,35 +13258,6 @@ impl SdkWrite for SxviRecord {
     }
 }
 
-impl SdkRead for SxIvdRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let remaining = reader.remaining()?;
-        if remaining % 2 != 0 {
-            return Err(Error::invalid(
-                reader.position()?,
-                "SxIvd field-index array has an odd byte length",
-            ));
-        }
-        let count = usize::try_from(remaining / 2)
-            .map_err(|_| Error::Limit("SxIvd field count exceeds usize".into()))?;
-        reader.ensure_allocation(count, 2)?;
-        let mut field_indices = Vec::with_capacity(count);
-        for _ in 0..count {
-            field_indices.push(reader.read_i16()?);
-        }
-        Ok(Self { field_indices })
-    }
-}
-
-impl SdkWrite for SxIvdRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        for field_index in &self.field_indices {
-            writer.write_u16(*field_index as u16)?;
-        }
-        Ok(())
-    }
-}
-
 impl SxLiRecord {
     fn read_with_axis_dimension<R: Read + Seek>(
         reader: &mut Reader<R>,
@@ -13591,35 +13333,6 @@ impl SdkWrite for SxLiRecord {
             for item_index in &item.item_indices {
                 writer.write_u16(*item_index as u16)?;
             }
-        }
-        Ok(())
-    }
-}
-
-impl SdkRead for SxPiRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let remaining = reader.remaining()?;
-        if remaining % 6 != 0 {
-            return Err(Error::invalid(
-                reader.position()?,
-                "SXPI item array is not a multiple of six bytes",
-            ));
-        }
-        let count = usize::try_from(remaining / 6)
-            .map_err(|_| Error::Limit("SXPI item count exceeds usize".into()))?;
-        reader.ensure_allocation(count, 6)?;
-        let mut items = Vec::with_capacity(count);
-        for _ in 0..count {
-            items.push(SxPiItem::read_from(reader)?);
-        }
-        Ok(Self { items })
-    }
-}
-
-impl SdkWrite for SxPiRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        for item in &self.items {
-            item.write_to(writer)?;
         }
         Ok(())
     }
@@ -13716,35 +13429,6 @@ impl SdkWrite for SxStringRecord {
         writer.write_u16(self.declared_character_count)?;
         if let Some(segment) = &self.segment {
             segment.write(writer)?;
-        }
-        Ok(())
-    }
-}
-
-impl SdkRead for RrTabIdRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let remaining = reader.remaining()?;
-        if remaining % 2 != 0 {
-            return Err(Error::invalid(
-                reader.position()?,
-                "RRTabId sheet identifier array has an odd byte length",
-            ));
-        }
-        let count = usize::try_from(remaining / 2)
-            .map_err(|_| Error::Limit("RRTabId sheet count exceeds usize".into()))?;
-        reader.ensure_allocation(count, 2)?;
-        let mut sheet_ids = Vec::with_capacity(count);
-        for _ in 0..count {
-            sheet_ids.push(reader.read_u16()?);
-        }
-        Ok(Self { sheet_ids })
-    }
-}
-
-impl SdkWrite for RrTabIdRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        for sheet_id in &self.sheet_ids {
-            writer.write_u16(*sheet_id)?;
         }
         Ok(())
     }
@@ -13996,35 +13680,6 @@ impl SdkWrite for SxDxfRecord {
     }
 }
 
-impl SdkRead for SxItmRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let remaining = reader.remaining()?;
-        if remaining % 2 != 0 {
-            return Err(Error::invalid(
-                reader.position()?,
-                "SxItm index array has an odd byte length",
-            ));
-        }
-        let count = usize::try_from(remaining / 2)
-            .map_err(|_| Error::Limit("SxItm item count exceeds usize".into()))?;
-        reader.ensure_allocation(count, 2)?;
-        let mut item_indices = Vec::with_capacity(count);
-        for _ in 0..count {
-            item_indices.push(reader.read_u16()?);
-        }
-        Ok(Self { item_indices })
-    }
-}
-
-impl SdkWrite for SxItmRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        for item_index in &self.item_indices {
-            writer.write_u16(*item_index)?;
-        }
-        Ok(())
-    }
-}
-
 fn dcon_file_is_self_reference(file: &BiffUnicodeString) -> bool {
     match &file.characters {
         XlStringCharacters::Compressed(characters) => characters.first().copied() == Some(0x02),
@@ -14271,109 +13926,6 @@ impl SdkWrite for FileSharingRecord {
     }
 }
 
-impl SdkRead for MsoDrawingSelectionRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let version_and_instance = reader.read_u16()?;
-        let header = OfficeArtRecordHeader {
-            version: (version_and_instance & 0x000f) as u8,
-            instance: version_and_instance >> 4,
-            record_type: reader.read_u16()?,
-            declared_length: reader.read_u32()?,
-        };
-        let shape_count_unused = reader.read_u32()?;
-        let mode = MsoDrawingSelectionMode::read_from(reader)?;
-        let focus_shape_id = reader.read_u32()?;
-        let remaining = reader.remaining()?;
-        if remaining % 4 != 0 {
-            return Err(Error::invalid(
-                reader.position()?,
-                "MsoDrawingSelection shape list has a partial shape identifier",
-            ));
-        }
-        let count = usize::try_from(remaining / 4)
-            .map_err(|_| Error::Limit("drawing selection shape count exceeds usize".into()))?;
-        reader.ensure_allocation(count, 4)?;
-        let mut selected_shape_ids = Vec::with_capacity(count);
-        for _ in 0..count {
-            selected_shape_ids.push(reader.read_u32()?);
-        }
-        Ok(Self {
-            header,
-            shape_count_unused,
-            mode,
-            focus_shape_id,
-            selected_shape_ids,
-        })
-    }
-}
-
-impl SdkWrite for MsoDrawingSelectionRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.header.version > 0x0f || self.header.instance > 0x0fff {
-            return Err(Error::invalid(
-                writer.position()?,
-                "MsoDrawingSelection OfficeArt header bit field exceeds its width",
-            ));
-        }
-        writer.write_u16(u16::from(self.header.version) | (self.header.instance << 4))?;
-        writer.write_u16(self.header.record_type)?;
-        writer.write_u32(self.header.declared_length)?;
-        writer.write_u32(self.shape_count_unused)?;
-        self.mode.write_to(writer)?;
-        writer.write_u32(self.focus_shape_id)?;
-        for shape_id in &self.selected_shape_ids {
-            writer.write_u32(*shape_id)?;
-        }
-        Ok(())
-    }
-}
-
-impl SdkRead for ScenManRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let scenario_count = reader.read_i16()?;
-        let current_scenario_index = reader.read_i16()?;
-        let shown_scenario_index = reader.read_i16()?;
-        let result_reference_count = reader.read_i16()?;
-        let count_position = reader.position()?.saturating_sub(2);
-        let count = usize::try_from(result_reference_count).map_err(|_| {
-            Error::invalid(count_position, "ScenMan result reference count is negative")
-        })?;
-        reader.ensure_allocation(count, 8)?;
-        let mut result_references = Vec::with_capacity(count);
-        for _ in 0..count {
-            result_references.push(CellRange::read_from(reader)?);
-        }
-        Ok(Self {
-            scenario_count,
-            current_scenario_index,
-            shown_scenario_index,
-            result_reference_count,
-            result_references,
-        })
-    }
-}
-
-impl SdkWrite for ScenManRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        let expected_count = i16::try_from(self.result_references.len())
-            .map_err(|_| Error::Limit("ScenMan result reference count exceeds i16".into()))?;
-        if self.result_reference_count != expected_count {
-            return Err(Error::invalid(
-                writer.position()?,
-                "ScenMan result reference count does not match its static array",
-            ));
-        }
-        writer.write_u16(self.scenario_count as u16)?;
-        writer.write_u16(self.current_scenario_index as u16)?;
-        writer.write_u16(self.shown_scenario_index as u16)?;
-        writer.write_u16(self.result_reference_count as u16)?;
-        for reference in &self.result_references {
-            reference.write_to(writer)?;
-        }
-        Ok(())
-    }
-}
-
 impl ScenarioCellReference {
     fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
         let row = reader.read_u16()?;
@@ -14560,48 +14112,6 @@ impl SdkWrite for ScenarioRecord {
         }
         for value in &self.unused {
             writer.write_u16(*value)?;
-        }
-        Ok(())
-    }
-}
-
-impl SdkRead for CUsrRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let position = reader.position()?;
-        let user_count = reader.read_u16()?;
-        if user_count > 255 {
-            return Err(Error::invalid(position, "CUsr user count exceeds 255"));
-        }
-        Ok(Self { user_count })
-    }
-}
-
-impl SdkWrite for CUsrRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.user_count > 255 {
-            return Err(Error::invalid(
-                writer.position()?,
-                "CUsr user count exceeds 255",
-            ));
-        }
-        writer.write_u16(self.user_count)
-    }
-}
-
-impl SdkRead for CbUsrRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let mut user_record_sizes = [0; 256];
-        for value in &mut user_record_sizes {
-            *value = reader.read_u16()?;
-        }
-        Ok(Self { user_record_sizes })
-    }
-}
-
-impl SdkWrite for CbUsrRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        for value in self.user_record_sizes {
-            writer.write_u16(value)?;
         }
         Ok(())
     }
@@ -14843,26 +14353,16 @@ impl Rrd {
     }
 
     fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let position = reader.position()?;
-        let value = Self {
-            memory_size: reader.read_u32()?,
-            revision_id: reader.read_i32()?,
-            revision_type: RevisionType::read_from(reader)?,
-            flags: RrdFlags::from_bits_retain(reader.read_u16()?),
-            sheet_id: reader.read_u16()?,
-        };
-        value.validate(position)?;
-        Ok(value)
+        Self::read_from(reader)
     }
 
     fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
-        self.validate(writer.position()?)?;
-        writer.write_u32(self.memory_size)?;
-        writer.write_i32(self.revision_id)?;
-        self.revision_type.write_to(writer)?;
-        writer.write_u16(self.flags.bits())?;
-        writer.write_u16(self.sheet_id)
+        self.write_to(writer)
     }
+}
+
+fn validate_rrd(value: &Rrd, position: u64) -> Result<()> {
+    value.validate(position)
 }
 
 fn read_fixed_biff_unicode<R: Read + Seek>(
@@ -15049,24 +14549,16 @@ impl Ref8U {
     }
 
     fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let position = reader.position()?;
-        let value = Self {
-            first_row: reader.read_u16()?,
-            last_row: reader.read_u16()?,
-            first_column: reader.read_u16()?,
-            last_column: reader.read_u16()?,
-        };
-        value.validate(position)?;
-        Ok(value)
+        Self::read_from(reader)
     }
 
     fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
-        self.validate(writer.position()?)?;
-        writer.write_u16(self.first_row)?;
-        writer.write_u16(self.last_row)?;
-        writer.write_u16(self.first_column)?;
-        writer.write_u16(self.last_column)
+        self.write_to(writer)
     }
+}
+
+fn validate_ref8u(value: &Ref8U, position: u64) -> Result<()> {
+    value.validate(position)
 }
 
 impl Ref8U2007 {
@@ -17116,27 +16608,11 @@ impl SdkWrite for RrInsertShRecord {
     }
 }
 
-impl SdkRead for RrdConflictRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let position = reader.position()?;
-        let revision = Rrd::read(reader)?;
-        if revision.revision_type != RevisionType::Conflict || revision.revision_id <= 0 {
-            return Err(Error::invalid(position, "RRDConflict RRD is invalid"));
-        }
-        Ok(Self { revision })
+fn validate_rrd_conflict(value: &RrdConflictRecord, position: u64) -> Result<()> {
+    if value.revision.revision_type != RevisionType::Conflict || value.revision.revision_id <= 0 {
+        return Err(Error::invalid(position, "RRDConflict RRD is invalid"));
     }
-}
-
-impl SdkWrite for RrdConflictRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.revision.revision_type != RevisionType::Conflict || self.revision.revision_id <= 0 {
-            return Err(Error::invalid(
-                writer.position()?,
-                "RRDConflict RRD is invalid",
-            ));
-        }
-        self.revision.write(writer)
-    }
+    Ok(())
 }
 
 impl RrdInfoRecord {
@@ -17247,117 +16723,1518 @@ impl SdkWrite for RrdUserViewRecord {
     }
 }
 
-impl SdkRead for ContinueFrtRecord {
+fn validate_frt_header_old(
+    header: FrtHeaderOld,
+    expected_record_type: u16,
+    position: u64,
+    context: &str,
+) -> Result<()> {
+    if header.record_type != expected_record_type || !header.flags.is_empty() {
+        return Err(Error::invalid(
+            position,
+            format!("{context} future-record header is invalid"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_frt_header(
+    header: FrtHeader,
+    expected_record_type: u16,
+    position: u64,
+    context: &str,
+) -> Result<()> {
+    if header.record_type != expected_record_type
+        || !header.flags.is_empty()
+        || header.reserved != 0
+    {
+        return Err(Error::invalid(
+            position,
+            format!("{context} future-record header is invalid"),
+        ));
+    }
+    Ok(())
+}
+
+fn read_bounded_bytes<R: Read + Seek>(
+    reader: &mut Reader<R>,
+    count: u16,
+    name: &str,
+) -> Result<Vec<u8>> {
+    if count > 256 {
+        return Err(Error::invalid(
+            reader.position()?,
+            format!("{name} exceeds 256 bytes"),
+        ));
+    }
+    reader.read_vec(usize::from(count))
+}
+
+impl DocRouteRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        let strings = [
+            &self.subject,
+            &self.message,
+            &self.route_id,
+            &self.custom_recipient_type,
+            &self.workbook_title,
+            &self.organization,
+        ];
+        if usize::from(self.declared_recipient_count) != self.recipients.len()
+            || self.stage_index > self.declared_recipient_count.saturating_add(1)
+            || strings
+                .iter()
+                .any(|value| value.len() > 256 || (!value.is_empty() && value.last() != Some(&0)))
+            || strings.iter().map(|value| value.len()).sum::<usize>() > 8202
+            || (!self.flags.contains(DocRouteFlags::CUSTOM_RECIPIENT_TYPE)
+                && !self.custom_recipient_type.is_empty())
+            || !self.flags.contains(DocRouteFlags::SAVE_ROUTING_INFORMATION)
+        {
+            return Err(Error::invalid(position, "DocRoute fields are invalid"));
+        }
+        Ok(())
+    }
+
+    fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
+        self.validate(0)?;
+        let mut records = vec![EncodedBiffRecord {
+            record_type: DOC_ROUTE,
+            payload: encode_sdk(self)?,
+        }];
+        for recipient in &self.recipients {
+            recipient.validate()?;
+            records.push(EncodedBiffRecord {
+                record_type: RECIP_NAME,
+                payload: encode_sdk(recipient)?,
+            });
+        }
+        Ok(records)
+    }
+}
+
+impl SdkRead for DocRouteRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let stage_index = reader.read_u16()?;
+        let declared_recipient_count = reader.read_u16()?;
+        let delivery = DocumentRoutingDelivery::from_raw(reader.read_u16()?)
+            .ok_or_else(|| Error::invalid(position, "DocRoute delivery option is invalid"))?;
+        let flags = DocRouteFlags::from_bits(reader.read_u16()?)
+            .ok_or_else(|| Error::invalid(position, "DocRoute flags contain reserved bits"))?;
+        let counts = [
+            reader.read_u16()?,
+            reader.read_u16()?,
+            reader.read_u16()?,
+            reader.read_u16()?,
+            reader.read_u16()?,
+            reader.read_u16()?,
+        ];
+        let entry_id_size = reader.read_u32()?;
+        let value = Self {
+            stage_index,
+            declared_recipient_count,
+            delivery,
+            flags,
+            subject: read_bounded_bytes(reader, counts[0], "DocRoute subject")?,
+            message: read_bounded_bytes(reader, counts[1], "DocRoute message")?,
+            route_id: read_bounded_bytes(reader, counts[2], "DocRoute route ID")?,
+            custom_recipient_type: read_bounded_bytes(reader, counts[3], "DocRoute custom type")?,
+            workbook_title: read_bounded_bytes(reader, counts[4], "DocRoute workbook title")?,
+            organization: read_bounded_bytes(reader, counts[5], "DocRoute organization")?,
+            entry_id: reader.read_vec(
+                usize::try_from(entry_id_size)
+                    .map_err(|_| Error::Limit("DocRoute entry ID exceeds usize".into()))?,
+            )?,
+            recipients: Vec::new(),
+        };
+        if value.stage_index > value.declared_recipient_count.saturating_add(1) {
+            return Err(Error::invalid(position, "DocRoute stage index is invalid"));
+        }
+        Ok(value)
+    }
+}
+
+impl SdkWrite for DocRouteRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        let counts = [
+            self.subject.len(),
+            self.message.len(),
+            self.route_id.len(),
+            self.custom_recipient_type.len(),
+            self.workbook_title.len(),
+            self.organization.len(),
+        ];
+        writer.write_u16(self.stage_index)?;
+        writer.write_u16(self.declared_recipient_count)?;
+        writer.write_u16(self.delivery.raw())?;
+        writer.write_u16(self.flags.bits())?;
+        for count in counts {
+            writer.write_u16(
+                u16::try_from(count)
+                    .map_err(|_| Error::Limit("DocRoute string exceeds u16".into()))?,
+            )?;
+        }
+        writer.write_u32(
+            u32::try_from(self.entry_id.len())
+                .map_err(|_| Error::Limit("DocRoute entry ID exceeds u32".into()))?,
+        )?;
+        for value in [
+            &self.subject,
+            &self.message,
+            &self.route_id,
+            &self.custom_recipient_type,
+            &self.workbook_title,
+            &self.organization,
+            &self.entry_id,
+        ] {
+            writer.write_all(value)?;
+        }
+        Ok(())
+    }
+}
+
+fn is_frt_wrapper_record_type(record_type: u16) -> bool {
+    matches!(
+        record_type,
+        FONT | CONTINUE
+            | CHART_LINE_FORMAT
+            | CHART_AREA_FORMAT
+            | CHART_SERIES_TEXT
+            | CHART_DEFAULT_TEXT
+            | CHART_TEXT
+            | CHART_FONT
+            | CHART_OBJECT_LINK
+            | CHART_FRAME
+            | 0x1033
+            | 0x1034
+            | CHART_PIC_F
+            | CHART_POSITION
+            | CHART_AL_RUNS
+            | CHART_LINKED_DATA
+            | CHART_FONT_BASIS
+            | GEL_FRAME
+    )
+}
+
+impl SdkRead for FrtWrapperRecord {
     fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
         let position = reader.position()?;
         let header = FrtHeaderOld::read_from(reader)?;
-        if header.record_type != CONTINUE_FRT {
+        validate_frt_header_old(header, FRT_WRAPPER, position, "FrtWrapper")?;
+        let record_type = reader.read_u16()?;
+        let size = usize::from(reader.read_u16()?);
+        if !is_frt_wrapper_record_type(record_type) || size > MAX_BIFF_RECORD_DATA {
             return Err(Error::invalid(
                 position,
-                "ContinueFrt header record type is not 0x0812",
+                "FrtWrapper wrapped record is invalid",
             ));
         }
-        let len = usize::try_from(reader.remaining()?)
-            .map_err(|_| Error::Limit("ContinueFrt payload exceeds usize".into()))?;
-        if len >= 8221 {
-            return Err(Error::invalid(position, "ContinueFrt rgb is too large"));
+        let payload = reader.read_vec(size)?;
+        let padding_len = 8usize.saturating_sub(size + 4);
+        let padding = reader.read_vec(padding_len)?;
+        if padding.iter().any(|value| *value != 0) {
+            return Err(Error::invalid(position, "FrtWrapper padding is nonzero"));
         }
         Ok(Self {
             header,
-            continuation: reader.read_vec(len)?,
+            wrapped: Box::new(decode_record(record_type, &payload, false, true, 0)?),
+            padding,
         })
     }
 }
 
-impl SdkWrite for ContinueFrtRecord {
+impl SdkWrite for FrtWrapperRecord {
     fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.header.record_type != CONTINUE_FRT || self.continuation.len() >= 8221 {
+        validate_frt_header_old(self.header, FRT_WRAPPER, writer.position()?, "FrtWrapper")?;
+        let (record_type, payload) = self.wrapped.encode()?;
+        if !is_frt_wrapper_record_type(record_type) || payload.len() > MAX_BIFF_RECORD_DATA {
             return Err(Error::invalid(
                 writer.position()?,
-                "ContinueFrt header or continuation length is invalid",
+                "FrtWrapper wrapped record is invalid",
+            ));
+        }
+        let expected_padding = 8usize.saturating_sub(payload.len() + 4);
+        if self.padding.len() != expected_padding || self.padding.iter().any(|value| *value != 0) {
+            return Err(Error::invalid(
+                writer.position()?,
+                "FrtWrapper padding is invalid",
             ));
         }
         self.header.write_to(writer)?;
-        writer.write_all(&self.continuation)?;
+        writer.write_u16(record_type)?;
+        writer.write_u16(payload.len() as u16)?;
+        writer.write_all(&payload)?;
+        writer.write_all(&self.padding)?;
         Ok(())
     }
 }
 
-impl SdkRead for ContinueFrt11Record {
+impl SdkRead for SxViewLinkRecord {
     fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
         let position = reader.position()?;
-        let header = FrtHeader::read_from(reader)?;
-        if header.record_type != CONTINUE_FRT11 {
-            return Err(Error::invalid(
-                position,
-                "ContinueFrt11 header record type is not 0x0875",
-            ));
-        }
-        let len = usize::try_from(reader.remaining()?)
-            .map_err(|_| Error::Limit("ContinueFrt11 payload exceeds usize".into()))?;
-        if len >= 8213 {
-            return Err(Error::invalid(position, "ContinueFrt11 rgb is too large"));
+        let record_type = reader.read_u16()?;
+        let unused = reader.read_u16()?;
+        let reserved = reader.read_u16()?;
+        let count = usize::from(reader.read_u8()?);
+        if record_type != SX_VIEW_LINK || reserved != 0 {
+            return Err(Error::invalid(position, "SXViewLink header is invalid"));
         }
         Ok(Self {
-            header,
-            continuation: reader.read_vec(len)?,
+            record_type,
+            unused,
+            reserved,
+            pivot_table_name: BiffUnicodeString::read(reader, count)?,
         })
     }
 }
 
-impl SdkWrite for ContinueFrt11Record {
+impl SdkWrite for SxViewLinkRecord {
     fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.header.record_type != CONTINUE_FRT11 || self.continuation.len() >= 8213 {
-            return Err(Error::invalid(
-                writer.position()?,
-                "ContinueFrt11 header or continuation length is invalid",
-            ));
-        }
-        self.header.write_to(writer)?;
-        writer.write_all(&self.continuation)?;
-        Ok(())
-    }
-}
-
-impl SdkRead for CrtMlFrtContinueRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let position = reader.position()?;
-        let header = FrtHeader::read_from(reader)?;
-        if header.record_type != CRT_ML_FRT_CONTINUE {
-            return Err(Error::invalid(
-                position,
-                "CrtMlFrtContinue header record type is not 0x089f",
-            ));
-        }
-        let len = usize::try_from(reader.remaining()?)
-            .map_err(|_| Error::Limit("CrtMlFrtContinue payload exceeds usize".into()))?;
-        if len > MAX_BIFF_RECORD_DATA - 12 {
-            return Err(Error::invalid(
-                position,
-                "CrtMlFrtContinue XML token chain is too large",
-            ));
-        }
-        Ok(Self {
-            header,
-            xml_token_chain: reader.read_vec(len)?,
-        })
-    }
-}
-
-impl SdkWrite for CrtMlFrtContinueRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.header.record_type != CRT_ML_FRT_CONTINUE
-            || self.xml_token_chain.len() > MAX_BIFF_RECORD_DATA - 12
+        if self.record_type != SX_VIEW_LINK
+            || self.reserved != 0
+            || self.pivot_table_name.character_count() > 255
         {
             return Err(Error::invalid(
                 writer.position()?,
-                "CrtMlFrtContinue header or token-chain length is invalid",
+                "SXViewLink fields are invalid",
+            ));
+        }
+        writer.write_u16(self.record_type)?;
+        writer.write_u16(self.unused)?;
+        writer.write_u16(self.reserved)?;
+        writer.write_u8(self.pivot_table_name.character_count() as u8)?;
+        self.pivot_table_name.write(writer)
+    }
+}
+
+fn validate_qsif_flags(value: &QsifFlags, position: u64) -> Result<()> {
+    if value.sort_key > 3 || value.user_inserted && value.clipped {
+        return Err(Error::invalid(position, "Qsif flags are invalid"));
+    }
+    Ok(())
+}
+
+fn parse_qsif_tail(bytes: &[u8], has_list_id: bool) -> Result<(Option<u32>, XlUnicodeString)> {
+    let mut reader = Reader::new(Cursor::new(bytes))?;
+    let list_id = has_list_id.then(|| reader.read_u32()).transpose()?;
+    let title = XlUnicodeString::read_from(&mut reader)?;
+    if title.text.character_count() > 255 || reader.remaining()? != 0 {
+        return Err(Error::invalid(
+            0,
+            "Qsif title or trailing bytes are invalid",
+        ));
+    }
+    Ok((list_id, title))
+}
+
+fn parse_qsif_payload(payload: &[u8], has_list_id: bool) -> Result<QsifRecord> {
+    let mut reader = Reader::new(Cursor::new(payload))?;
+    let position = reader.position()?;
+    let header = FrtHeaderOld::read_from(&mut reader)?;
+    validate_frt_header_old(header, QSIF, position, "Qsif")?;
+    let flags = QsifFlags::read_from(&mut reader)?;
+    let field_id = reader.read_u32()?;
+    if !(1..=0xffff).contains(&field_id) {
+        return Err(Error::invalid(position, "Qsif field ID is invalid"));
+    }
+    let list_id = has_list_id.then(|| reader.read_u32()).transpose()?;
+    let title = XlUnicodeString::read_from(&mut reader)?;
+    if title.text.character_count() > 255 || reader.remaining()? != 0 {
+        return Err(Error::invalid(
+            position,
+            "Qsif title or trailing bytes are invalid",
+        ));
+    }
+    Ok(QsifRecord {
+        header,
+        flags,
+        field_id,
+        list_id,
+        title,
+    })
+}
+
+impl SdkRead for QsifRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let header = FrtHeaderOld::read_from(reader)?;
+        validate_frt_header_old(header, QSIF, position, "Qsif")?;
+        let flags = QsifFlags::read_from(reader)?;
+        let field_id = reader.read_u32()?;
+        if !(1..=0xffff).contains(&field_id) {
+            return Err(Error::invalid(position, "Qsif field ID is invalid"));
+        }
+        let remaining = usize::try_from(reader.remaining()?)
+            .map_err(|_| Error::Limit("Qsif tail exceeds usize".into()))?;
+        let tail = reader.read_vec(remaining)?;
+        let (list_id, title) =
+            parse_qsif_tail(&tail, false).or_else(|_| parse_qsif_tail(&tail, true))?;
+        Ok(Self {
+            header,
+            flags,
+            field_id,
+            list_id,
+            title,
+        })
+    }
+}
+
+impl SdkWrite for QsifRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        validate_frt_header_old(self.header, QSIF, writer.position()?, "Qsif")?;
+        if !(1..=0xffff).contains(&self.field_id) || self.title.text.character_count() > 255 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Qsif fields are invalid",
             ));
         }
         self.header.write_to(writer)?;
-        writer.write_all(&self.xml_token_chain)?;
+        self.flags.write_to(writer)?;
+        writer.write_u32(self.field_id)?;
+        if let Some(list_id) = self.list_id {
+            writer.write_u32(list_id)?;
+        }
+        self.title.write_to(writer)
+    }
+}
+
+fn validate_qsir_flags(value: &QsirFlags, position: u64) -> Result<()> {
+    if value.persist_sort != value.persist || value.persist_auto_filter != value.persist {
+        return Err(Error::invalid(position, "Qsir persistence flags disagree"));
+    }
+    if !matches!(value.version_before_refresh_alert, 8..=12) {
+        return Err(Error::invalid(
+            position,
+            "Qsir refresh-alert version is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_qsir_titles(
+    bytes: &[u8],
+    count: usize,
+    has_list_id: bool,
+) -> Result<(Option<u32>, Vec<XlUnicodeString>)> {
+    let mut reader = Reader::new(Cursor::new(bytes))?;
+    let list_id = has_list_id.then(|| reader.read_u32()).transpose()?;
+    reader.ensure_allocation(count, 3)?;
+    let mut titles = Vec::with_capacity(count);
+    for _ in 0..count {
+        let title = XlUnicodeString::read_from(&mut reader)?;
+        if !(1..=255).contains(&title.text.character_count()) {
+            return Err(Error::invalid(0, "Qsir deleted title length is invalid"));
+        }
+        titles.push(title);
+    }
+    if reader.remaining()? != 0 {
+        return Err(Error::invalid(0, "Qsir has trailing bytes"));
+    }
+    Ok((list_id, titles))
+}
+
+fn parse_qsir_payload(payload: &[u8], has_list_id: bool) -> Result<QsirRecord> {
+    let mut reader = Reader::new(Cursor::new(payload))?;
+    let position = reader.position()?;
+    let header = FrtRefHeaderU::read_from(&mut reader)?;
+    if header.record_type != QSIR || header.flags != FrtFlags::HAS_CELL_RANGE {
+        return Err(Error::invalid(
+            position,
+            "Qsir future-record header is invalid",
+        ));
+    }
+    let saved_query_size = reader.read_u16()?;
+    let saved_field_size = reader.read_u16()?;
+    let flags = QsirFlags::read_from(&mut reader)?;
+    let custom_sort_index = reader.read_u32()?;
+    let declared_field_count = reader.read_u32()?;
+    let deleted_count = usize::try_from(reader.read_u32()?)
+        .map_err(|_| Error::Limit("Qsir deleted-title count exceeds usize".into()))?;
+    let next_field_id = reader.read_u32()?;
+    let extra_columns_left = reader.read_u16()?;
+    let extra_columns_right = reader.read_u16()?;
+    if !(1..=0xffff).contains(&next_field_id) {
+        return Err(Error::invalid(position, "Qsir next field ID is invalid"));
+    }
+    let list_id = has_list_id.then(|| reader.read_u32()).transpose()?;
+    reader.ensure_allocation(deleted_count, 3)?;
+    let mut deleted_titles = Vec::with_capacity(deleted_count);
+    for _ in 0..deleted_count {
+        let title = XlUnicodeString::read_from(&mut reader)?;
+        if !(1..=255).contains(&title.text.character_count()) {
+            return Err(Error::invalid(
+                position,
+                "Qsir deleted title length is invalid",
+            ));
+        }
+        deleted_titles.push(title);
+    }
+    if reader.remaining()? != 0 {
+        return Err(Error::invalid(position, "Qsir has trailing bytes"));
+    }
+    Ok(QsirRecord {
+        header,
+        saved_query_size,
+        saved_field_size,
+        flags,
+        custom_sort_index,
+        declared_field_count,
+        next_field_id,
+        extra_columns_left,
+        extra_columns_right,
+        list_id,
+        deleted_titles,
+        fields: Vec::new(),
+    })
+}
+
+impl SdkRead for QsirRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let header = FrtRefHeaderU::read_from(reader)?;
+        if header.record_type != QSIR || header.flags != FrtFlags::HAS_CELL_RANGE {
+            return Err(Error::invalid(
+                position,
+                "Qsir future-record header is invalid",
+            ));
+        }
+        let saved_query_size = reader.read_u16()?;
+        let saved_field_size = reader.read_u16()?;
+        let flags = QsirFlags::read_from(reader)?;
+        let custom_sort_index = reader.read_u32()?;
+        let declared_field_count = reader.read_u32()?;
+        let deleted_count = usize::try_from(reader.read_u32()?)
+            .map_err(|_| Error::Limit("Qsir deleted-title count exceeds usize".into()))?;
+        let next_field_id = reader.read_u32()?;
+        let extra_columns_left = reader.read_u16()?;
+        let extra_columns_right = reader.read_u16()?;
+        if !(1..=0xffff).contains(&next_field_id) {
+            return Err(Error::invalid(position, "Qsir next field ID is invalid"));
+        }
+        let remaining = usize::try_from(reader.remaining()?)
+            .map_err(|_| Error::Limit("Qsir tail exceeds usize".into()))?;
+        let tail = reader.read_vec(remaining)?;
+        let (list_id, deleted_titles) = parse_qsir_titles(&tail, deleted_count, false)
+            .or_else(|_| parse_qsir_titles(&tail, deleted_count, true))?;
+        Ok(Self {
+            header,
+            saved_query_size,
+            saved_field_size,
+            flags,
+            custom_sort_index,
+            declared_field_count,
+            next_field_id,
+            extra_columns_left,
+            extra_columns_right,
+            list_id,
+            deleted_titles,
+            fields: Vec::new(),
+        })
+    }
+}
+
+impl SdkWrite for QsirRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if self.header.record_type != QSIR
+            || self.header.flags != FrtFlags::HAS_CELL_RANGE
+            || usize::try_from(self.declared_field_count).ok() != Some(self.fields.len())
+            || !(1..=0xffff).contains(&self.next_field_id)
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "Qsir fields are invalid",
+            ));
+        }
+        self.header.write_to(writer)?;
+        writer.write_u16(self.saved_query_size)?;
+        writer.write_u16(self.saved_field_size)?;
+        self.flags.write_to(writer)?;
+        writer.write_u32(self.custom_sort_index)?;
+        writer.write_u32(self.declared_field_count)?;
+        writer.write_u32(
+            u32::try_from(self.deleted_titles.len())
+                .map_err(|_| Error::Limit("Qsir deleted-title count exceeds u32".into()))?,
+        )?;
+        writer.write_u32(self.next_field_id)?;
+        writer.write_u16(self.extra_columns_left)?;
+        writer.write_u16(self.extra_columns_right)?;
+        if let Some(list_id) = self.list_id {
+            writer.write_u32(list_id)?;
+        }
+        for title in &self.deleted_titles {
+            title.write_to(writer)?;
+        }
         Ok(())
     }
+}
+
+impl WebPubString {
+    fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let count = usize::from(reader.read_u16()?);
+        if count > 255 {
+            return Err(Error::invalid(
+                reader.position()?,
+                "WebPubString exceeds 255 characters",
+            ));
+        }
+        let text = BiffUnicodeString::read(reader, count)?;
+        let encoded_len = text.to_bytes()?.len();
+        let padding = if encoded_len % 2 != 0 {
+            Some(reader.read_u8()?)
+        } else {
+            None
+        };
+        Ok(Self { text, padding })
+    }
+
+    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        let count = self.text.character_count();
+        if count > 255 {
+            return Err(Error::invalid(
+                writer.position()?,
+                "WebPubString exceeds 255 characters",
+            ));
+        }
+        let bytes = self.text.to_bytes()?;
+        if self.padding.is_some() != (bytes.len() % 2 != 0) {
+            return Err(Error::invalid(
+                writer.position()?,
+                "WebPubString padding mismatch",
+            ));
+        }
+        writer.write_u16(count as u16)?;
+        writer.write_all(&bytes)?;
+        if let Some(padding) = self.padding {
+            writer.write_u8(padding)?;
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for WebPubRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let header = FrtRefHeaderU::read_from(reader)?;
+        let source_type = WebPublishSourceType::from_raw(reader.read_u8()?)
+            .ok_or_else(|| Error::invalid(position, "WebPub source type is invalid"))?;
+        let destination_type = WebPublishDestinationType::from_raw(reader.read_u8()?)
+            .ok_or_else(|| Error::invalid(position, "WebPub destination type is invalid"))?;
+        let flags = WebPubFlags::from_bits(reader.read_u16()?)
+            .ok_or_else(|| Error::invalid(position, "WebPub flags contain reserved bits"))?;
+        let reserved = reader.read_u16()?;
+        let unused = reader.read_u16()?;
+        let style_id = reader.read_u32()?;
+        let byte_count = reader.read_u32()?;
+        let expected_header_flags = if source_type == WebPublishSourceType::CellRange {
+            FrtFlags::HAS_CELL_RANGE
+        } else {
+            FrtFlags::empty()
+        };
+        if header.record_type != WEB_PUB
+            || reserved != 0
+            || byte_count == 0
+            || header.flags != expected_header_flags
+        {
+            return Err(Error::invalid(position, "WebPub header fields are invalid"));
+        }
+        let mut child = reader.sub_reader(u64::from(byte_count))?;
+        let source_name = (source_type.raw() > 4)
+            .then(|| WebPubString::read(&mut child))
+            .transpose()?;
+        let destination_file = WebPubString::read(&mut child)?;
+        let division_id = WebPubString::read(&mut child)?;
+        let title = WebPubString::read(&mut child)?;
+        let chart_id = (source_type == WebPublishSourceType::Chart)
+            .then(|| child.read_u32())
+            .transpose()?;
+        let remaining = usize::try_from(child.remaining()?)
+            .map_err(|_| Error::Limit("WebPub future area exceeds usize".into()))?;
+        if remaining < 2 {
+            return Err(Error::invalid(position, "WebPub future area is truncated"));
+        }
+        let future_bytes = child.read_vec(remaining - 2)?;
+        let trailing_unused = child.read_u16()?;
+        Ok(Self {
+            header,
+            source_type,
+            destination_type,
+            flags,
+            reserved,
+            unused,
+            style_id,
+            source_name,
+            destination_file,
+            division_id,
+            title,
+            chart_id,
+            future_bytes,
+            trailing_unused,
+        })
+    }
+}
+
+impl SdkWrite for WebPubRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        let expected_header_flags = if self.source_type == WebPublishSourceType::CellRange {
+            FrtFlags::HAS_CELL_RANGE
+        } else {
+            FrtFlags::empty()
+        };
+        if self.header.record_type != WEB_PUB
+            || self.reserved != 0
+            || self.header.flags != expected_header_flags
+            || (self.source_type.raw() > 4) != self.source_name.is_some()
+            || (self.source_type == WebPublishSourceType::Chart) != self.chart_id.is_some()
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "WebPub fields are invalid",
+            ));
+        }
+        let mut content = Writer::new(Cursor::new(Vec::new()));
+        if let Some(source_name) = &self.source_name {
+            source_name.write(&mut content)?;
+        }
+        self.destination_file.write(&mut content)?;
+        self.division_id.write(&mut content)?;
+        self.title.write(&mut content)?;
+        if let Some(chart_id) = self.chart_id {
+            content.write_u32(chart_id)?;
+        }
+        content.write_all(&self.future_bytes)?;
+        content.write_u16(self.trailing_unused)?;
+        let content = content.into_inner().into_inner();
+        self.header.write_to(writer)?;
+        writer.write_u8(self.source_type.raw())?;
+        writer.write_u8(self.destination_type.raw())?;
+        writer.write_u16(self.flags.bits())?;
+        writer.write_u16(self.reserved)?;
+        writer.write_u16(self.unused)?;
+        writer.write_u32(self.style_id)?;
+        writer.write_u32(
+            u32::try_from(content.len())
+                .map_err(|_| Error::Limit("WebPub content exceeds u32".into()))?,
+        )?;
+        writer.write_all(&content)?;
+        Ok(())
+    }
+}
+
+impl CrErrRecord {
+    fn from_sequence(first: &[u8], continues: &[&[u8]]) -> Result<Self> {
+        let mut reader = Reader::new(Cursor::new(first))?;
+        let header = FrtHeader::read_from(&mut reader)?;
+        validate_frt_header(header, CR_ERR, 0, "CrErr")?;
+        let declared_size = reader.read_u32()?;
+        let declared_character_count = reader.read_u16()?;
+        if declared_size != 0x13 || declared_character_count == 0 {
+            return Err(Error::invalid(0, "CrErr fixed fields are invalid"));
+        }
+        let mut chunks = Vec::with_capacity(continues.len() + 1);
+        let mut remaining = usize::from(declared_character_count);
+        for (index, payload) in std::iter::once(first)
+            .chain(continues.iter().copied())
+            .enumerate()
+        {
+            let start = if index == 0 { 18 } else { 0 };
+            let flags = *payload
+                .get(start)
+                .ok_or_else(|| Error::invalid(0, "CrErr string segment is empty"))?;
+            let (chunk, consumed) =
+                ContinuedStringChunk::parse(payload, start + 1, flags, remaining)?;
+            if !chunk.trailing.is_empty() {
+                return Err(Error::invalid(0, "CrErr segment has trailing bytes"));
+            }
+            chunks.push(chunk);
+            remaining = remaining.saturating_sub(consumed);
+            if remaining == 0 {
+                break;
+            }
+        }
+        Ok(Self {
+            header,
+            declared_size,
+            declared_character_count,
+            chunks,
+        })
+    }
+
+    fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
+        if self.declared_size != 0x13
+            || self.declared_character_count == 0
+            || self
+                .chunks
+                .iter()
+                .map(ContinuedStringChunk::character_count)
+                .sum::<usize>()
+                != usize::from(self.declared_character_count)
+            || self.chunks.is_empty()
+        {
+            return Err(Error::invalid(0, "CrErr fields are invalid"));
+        }
+        let mut records = Vec::with_capacity(self.chunks.len());
+        for (index, chunk) in self.chunks.iter().enumerate() {
+            let mut payload = Vec::new();
+            if index == 0 {
+                payload.extend_from_slice(&encode_sdk(&self.header)?);
+                payload.extend_from_slice(&self.declared_size.to_le_bytes());
+                payload.extend_from_slice(&self.declared_character_count.to_le_bytes());
+            }
+            payload.push(chunk.flags);
+            chunk.write_characters(&mut payload)?;
+            records.push(EncodedBiffRecord {
+                record_type: if index == 0 { CR_ERR } else { CONTINUE },
+                payload,
+            });
+        }
+        Ok(records)
+    }
+}
+
+impl SdkRead for CrErrRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let remaining = usize::try_from(reader.remaining()?)
+            .map_err(|_| Error::Limit("CrErr exceeds usize".into()))?;
+        Self::from_sequence(&reader.read_vec(remaining)?, &[])
+    }
+}
+
+impl SdkWrite for CrErrRecord {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        let first = self
+            .encode_physical()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::invalid(0, "CrErr has no first segment"))?;
+        writer.write_all(&first.payload)?;
+        Ok(())
+    }
+}
+
+impl QsirRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        let title_bytes = self.deleted_titles.iter().try_fold(0u64, |total, title| {
+            total
+                .checked_add(title.sdk_size())
+                .ok_or_else(|| Error::Limit("Qsir title size overflow".into()))
+        })?;
+        let expected_saved_size = 24u64
+            .checked_add(u64::from(self.list_id.is_some()) * 4)
+            .and_then(|size| size.checked_add(title_bytes))
+            .ok_or_else(|| Error::Limit("Qsir saved size overflow".into()))?;
+        if u64::from(self.saved_query_size) != expected_saved_size
+            || usize::try_from(self.declared_field_count).ok() != Some(self.fields.len())
+            || self
+                .deleted_titles
+                .iter()
+                .any(|title| !(1..=255).contains(&title.text.character_count()))
+        {
+            return Err(Error::invalid(
+                position,
+                "Qsir saved sizes or collection are invalid",
+            ));
+        }
+        let mut field_ids = BTreeSet::new();
+        for field in &self.fields {
+            let payload = encode_sdk(field)?;
+            if !field_ids.insert(field.field_id)
+                || payload
+                    .len()
+                    .checked_sub(4)
+                    .is_none_or(|size| usize::from(self.saved_field_size) >= size)
+            {
+                return Err(Error::invalid(
+                    position,
+                    "Qsir saved field size or field ID is invalid",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
+        self.validate(0)?;
+        let mut records = vec![EncodedBiffRecord {
+            record_type: QSIR,
+            payload: encode_sdk(self)?,
+        }];
+        for field in &self.fields {
+            records.push(EncodedBiffRecord {
+                record_type: QSIF,
+                payload: encode_sdk(field)?,
+            });
+        }
+        Ok(records)
+    }
+}
+
+impl SdkRead for AutoFilter12Criterion {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let mut operand = AutoFilterOperand::read_fixed(reader)?;
+        if matches!(operand.value, AutoFilterOperandValue::Rk { .. }) {
+            return Err(Error::invalid(
+                reader.position()?,
+                "AutoFilter12 criterion cannot use an RK operand",
+            ));
+        }
+        if !matches!(operand.value, AutoFilterOperandValue::Unused { .. })
+            && !(1..=6).contains(&operand.comparison)
+        {
+            return Err(Error::invalid(
+                reader.position()?,
+                "AutoFilter12 criterion comparison is invalid",
+            ));
+        }
+        if matches!(
+            operand.value,
+            AutoFilterOperandValue::Blanks { reserved }
+                | AutoFilterOperandValue::NonBlanks { reserved }
+                if reserved != 0
+        ) {
+            return Err(Error::invalid(
+                reader.position()?,
+                "AutoFilter12 blank criterion reserved bytes are nonzero",
+            ));
+        }
+        let string_unused = matches!(operand.value, AutoFilterOperandValue::String { .. })
+            .then(|| reader.read_u32())
+            .transpose()?;
+        if let AutoFilterOperandValue::String {
+            declared_character_count,
+            compare_without_wildcards,
+            reserved,
+            ..
+        } = operand.value
+        {
+            if declared_character_count == 0 || compare_without_wildcards > 1 || reserved != 0 {
+                return Err(Error::invalid(
+                    reader.position()?,
+                    "AutoFilter12 criterion string fields are invalid",
+                ));
+            }
+            operand.string = Some(BiffUnicodeString::read(
+                reader,
+                usize::from(declared_character_count),
+            )?);
+        }
+        Ok(Self {
+            operand,
+            string_unused,
+        })
+    }
+}
+
+impl SdkWrite for AutoFilter12Criterion {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if matches!(self.operand.value, AutoFilterOperandValue::Rk { .. }) {
+            return Err(Error::invalid(
+                writer.position()?,
+                "AutoFilter12 criterion cannot use an RK operand",
+            ));
+        }
+        if self.string_unused.is_some()
+            != matches!(self.operand.value, AutoFilterOperandValue::String { .. })
+            || (!matches!(self.operand.value, AutoFilterOperandValue::Unused { .. })
+                && !(1..=6).contains(&self.operand.comparison))
+            || matches!(
+                self.operand.value,
+                AutoFilterOperandValue::Blanks { reserved }
+                    | AutoFilterOperandValue::NonBlanks { reserved }
+                    if reserved != 0
+            )
+            || matches!(
+                self.operand.value,
+                AutoFilterOperandValue::String {
+                    declared_character_count: 0,
+                    ..
+                } | AutoFilterOperandValue::String {
+                    compare_without_wildcards: 2..=u8::MAX,
+                    ..
+                } | AutoFilterOperandValue::String {
+                    reserved: 1..=u8::MAX,
+                    ..
+                }
+            )
+        {
+            return Err(Error::invalid(
+                writer.position()?,
+                "AutoFilter12 criterion string extension presence is invalid",
+            ));
+        }
+        self.operand.write_fixed(writer)?;
+        if let Some(unused) = self.string_unused {
+            writer.write_u32(unused)?;
+        }
+        if let Some(string) = &self.operand.string {
+            string.write(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl AutoFilter12DateGrouping {
+    fn validate(&self, position: u64) -> Result<()> {
+        if !(1..=12).contains(&self.month)
+            || !(1..=31).contains(&self.day)
+            || self.hour > 23
+            || self.minute > 59
+            || self.second > 59
+            || self.reserved != 0
+        {
+            return Err(Error::invalid(
+                position,
+                "AutoFilter12 date grouping fields are invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for AutoFilter12DateGrouping {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let value = Self {
+            year: reader.read_u16()?,
+            month: reader.read_u16()?,
+            day: reader.read_u32()?,
+            hour: reader.read_u16()?,
+            minute: reader.read_u16()?,
+            second: reader.read_u16()?,
+            unused: reader.read_u16()?,
+            reserved: reader.read_u32()?,
+            level: AutoFilter12DateGroupingLevel::from_raw(reader.read_u32()?).ok_or_else(
+                || Error::invalid(position, "AutoFilter12 date grouping level is invalid"),
+            )?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for AutoFilter12DateGrouping {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_u16(self.year)?;
+        writer.write_u16(self.month)?;
+        writer.write_u32(self.day)?;
+        writer.write_u16(self.hour)?;
+        writer.write_u16(self.minute)?;
+        writer.write_u16(self.second)?;
+        writer.write_u16(self.unused)?;
+        writer.write_u32(self.reserved)?;
+        writer.write_u32(self.level.raw())?;
+        Ok(())
+    }
+}
+
+impl AutoFilter12Record {
+    fn validate(&self, position: u64) -> Result<()> {
+        if self.header.record_type != AUTO_FILTER12
+            || self.header.flags != FrtFlags::HAS_CELL_RANGE
+            || self.entry_index > 255
+            || self.flags.unused > 0x0fff
+            || self.flags.worksheet != (self.list_id == u32::MAX)
+            || (matches!(self.filter, AutoFilter12Filter::Criteria)
+                && (self.criteria.is_empty() && self.date_groupings.is_empty()
+                    || usize::try_from(self.declared_criteria_count).ok()
+                        != Some(self.criteria.len())
+                    || usize::try_from(self.declared_date_grouping_count).ok()
+                        != Some(self.date_groupings.len())))
+            || (!matches!(self.filter, AutoFilter12Filter::Criteria)
+                && (!self.criteria.is_empty() || !self.date_groupings.is_empty()))
+        {
+            return Err(Error::invalid(position, "AutoFilter12 fields are invalid"));
+        }
+        if let AutoFilter12Filter::Icon {
+            icon_set,
+            icon_index,
+        } = self.filter
+        {
+            let maximum = match icon_set {
+                KpiSet::None if icon_index == u32::MAX => None,
+                KpiSet::None => {
+                    return Err(Error::invalid(
+                        position,
+                        "AutoFilter12 icon index is invalid",
+                    ));
+                }
+                KpiSet::ThreeArrows
+                | KpiSet::ThreeArrowsGray
+                | KpiSet::ThreeFlags
+                | KpiSet::ThreeTrafficLights1
+                | KpiSet::ThreeTrafficLights2
+                | KpiSet::ThreeSigns
+                | KpiSet::ThreeSymbols
+                | KpiSet::ThreeSymbols2 => Some(2),
+                KpiSet::FourArrows
+                | KpiSet::FourArrowsGray
+                | KpiSet::FourRedToBlack
+                | KpiSet::FourRating
+                | KpiSet::FourTrafficLights => Some(3),
+                KpiSet::FiveArrows
+                | KpiSet::FiveArrowsGray
+                | KpiSet::FiveRating
+                | KpiSet::FiveQuarters => Some(4),
+            };
+            if maximum.is_some_and(|maximum| icon_index > maximum) {
+                return Err(Error::invalid(
+                    position,
+                    "AutoFilter12 icon index is invalid",
+                ));
+            }
+        }
+        let range = self.header.range;
+        if self.criteria.iter().any(|item| {
+            item.header.record_type != CONTINUE_FRT12
+                || item.header.flags != FrtFlags::HAS_CELL_RANGE
+                || item.header.range != range
+        }) || self.date_groupings.iter().any(|item| {
+            item.header.record_type != CONTINUE_FRT12
+                || item.header.flags != FrtFlags::HAS_CELL_RANGE
+                || item.header.range != range
+        }) {
+            return Err(Error::invalid(
+                position,
+                "AutoFilter12 continuation header is invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
+        self.validate(0)?;
+        let mut records = vec![EncodedBiffRecord {
+            record_type: AUTO_FILTER12,
+            payload: encode_sdk(self)?,
+        }];
+        for value in &self.criteria {
+            let mut payload = encode_sdk(&value.header)?;
+            payload.extend_from_slice(&encode_sdk(&value.value)?);
+            records.push(EncodedBiffRecord {
+                record_type: CONTINUE_FRT12,
+                payload,
+            });
+        }
+        for value in &self.date_groupings {
+            let mut payload = encode_sdk(&value.header)?;
+            payload.extend_from_slice(&encode_sdk(&value.value)?);
+            records.push(EncodedBiffRecord {
+                record_type: CONTINUE_FRT12,
+                payload,
+            });
+        }
+        Ok(records)
+    }
+}
+
+impl SdkRead for AutoFilter12Record {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let header = FrtRefHeaderU::read_from(reader)?;
+        let entry_index = reader.read_u16()?;
+        let hide_arrow_raw = reader.read_u32()?;
+        if hide_arrow_raw > 1 {
+            return Err(Error::invalid(
+                position,
+                "AutoFilter12 hide-arrow Boolean is invalid",
+            ));
+        }
+        let filter_type = reader.read_u32()?;
+        let dynamic_filter_type = AutoFilter12DynamicFilter::from_raw(reader.read_u32()?)
+            .ok_or_else(|| {
+                Error::invalid(position, "AutoFilter12 dynamic filter type is invalid")
+            })?;
+        let declared_criteria_count = reader.read_u32()?;
+        let declared_date_grouping_count = reader.read_u32()?;
+        let flags = AutoFilter12Flags::read_from(reader)?;
+        let unused = reader.read_u32()?;
+        let list_id = reader.read_u32()?;
+        let user_view_guid = reader.read_array()?;
+        let remaining = u32::try_from(reader.remaining()?)
+            .map_err(|_| Error::Limit("AutoFilter12 filter data exceeds u32".into()))?;
+        let filter = match filter_type {
+            0 if remaining == 0 => AutoFilter12Filter::Criteria,
+            1 => AutoFilter12Filter::CellColor(DxfN12List::read_sized(reader, remaining)?),
+            2 => AutoFilter12Filter::FontColor(DxfN12List::read_sized(reader, remaining)?),
+            3 if remaining == 8 => AutoFilter12Filter::Icon {
+                icon_set: KpiSet::from_raw(reader.read_u32()?)
+                    .ok_or_else(|| Error::invalid(position, "AutoFilter12 icon set is invalid"))?,
+                icon_index: reader.read_u32()?,
+            },
+            _ => {
+                return Err(Error::invalid(
+                    position,
+                    "AutoFilter12 filter payload is invalid",
+                ));
+            }
+        };
+        let value = Self {
+            header,
+            entry_index,
+            hide_arrow: hide_arrow_raw != 0,
+            dynamic_filter_type,
+            declared_criteria_count,
+            declared_date_grouping_count,
+            flags,
+            unused,
+            list_id,
+            user_view_guid,
+            filter,
+            criteria: Vec::new(),
+            date_groupings: Vec::new(),
+        };
+        if header.record_type != AUTO_FILTER12
+            || header.flags != FrtFlags::HAS_CELL_RANGE
+            || entry_index > 255
+            || flags.worksheet != (list_id == u32::MAX)
+        {
+            return Err(Error::invalid(
+                position,
+                "AutoFilter12 header fields are invalid",
+            ));
+        }
+        Ok(value)
+    }
+}
+
+impl SdkWrite for AutoFilter12Record {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        self.header.write_to(writer)?;
+        writer.write_u16(self.entry_index)?;
+        writer.write_u32(u32::from(self.hide_arrow))?;
+        let filter_type = match &self.filter {
+            AutoFilter12Filter::Criteria => 0,
+            AutoFilter12Filter::CellColor(_) => 1,
+            AutoFilter12Filter::FontColor(_) => 2,
+            AutoFilter12Filter::Icon { .. } => 3,
+        };
+        writer.write_u32(filter_type)?;
+        writer.write_u32(self.dynamic_filter_type.raw())?;
+        writer.write_u32(self.declared_criteria_count)?;
+        writer.write_u32(self.declared_date_grouping_count)?;
+        self.flags.write_to(writer)?;
+        writer.write_u32(self.unused)?;
+        writer.write_u32(self.list_id)?;
+        writer.write_all(&self.user_view_guid)?;
+        match &self.filter {
+            AutoFilter12Filter::Criteria => {}
+            AutoFilter12Filter::CellColor(value) | AutoFilter12Filter::FontColor(value) => {
+                writer.write_all(&value.to_bytes()?)?
+            }
+            AutoFilter12Filter::Icon {
+                icon_set,
+                icon_index,
+            } => {
+                writer.write_u32(icon_set.raw())?;
+                writer.write_u32(*icon_index)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl BigNameRecord {
+    fn validate_base_segment(&self, position: u64) -> Result<usize> {
+        if self.reserved != 0x1000 {
+            return Err(Error::invalid(
+                position,
+                "BigName reserved field is not 0x1000",
+            ));
+        }
+        let declared_data_byte_count = usize::try_from(self.declared_data_byte_count)
+            .map_err(|_| Error::invalid(position, "BigName data byte count is negative"))?;
+        if usize::from(self.declared_name_byte_count) != self.name.len() {
+            return Err(Error::invalid(position, "BigName name byte count mismatch"));
+        }
+        if self.data.len() > declared_data_byte_count {
+            return Err(Error::invalid(
+                position,
+                "BigName base data exceeds its declared byte count",
+            ));
+        }
+        let prefix_size = 7usize
+            .checked_add(self.name.len())
+            .ok_or_else(|| Error::Limit("BigName prefix size overflow".into()))?;
+        if prefix_size
+            .checked_add(
+                self.physical_segments
+                    .first()
+                    .map_or(self.data.len(), |layout| {
+                        usize::from(layout.data_byte_count)
+                    }),
+            )
+            .is_none_or(|size| size > MAX_BIFF_RECORD_DATA)
+        {
+            return Err(Error::invalid(
+                position,
+                "BigName base record exceeds 8224 bytes",
+            ));
+        }
+        Ok(declared_data_byte_count)
+    }
+
+    fn validate_complete(&self, position: u64) -> Result<()> {
+        let declared_data_byte_count = self.validate_base_segment(position)?;
+        if self.data.len() != declared_data_byte_count || self.physical_segments.is_empty() {
+            return Err(Error::invalid(
+                position,
+                "BigName data length or physical layout is incomplete",
+            ));
+        }
+        let physical_size = self
+            .physical_segments
+            .iter()
+            .try_fold(0usize, |total, segment| {
+                total
+                    .checked_add(usize::from(segment.data_byte_count))
+                    .ok_or_else(|| Error::Limit("BigName physical layout overflow".into()))
+            })?;
+        if physical_size != self.data.len()
+            || self
+                .physical_segments
+                .iter()
+                .skip(1)
+                .any(|segment| usize::from(segment.data_byte_count) > MAX_BIFF_RECORD_DATA)
+        {
+            return Err(Error::invalid(position, "BigName physical layout mismatch"));
+        }
+        Ok(())
+    }
+
+    fn stitch_continuations(
+        &mut self,
+        continuations: &[ContinueBigNameRecord],
+        limits: Limits,
+    ) -> Result<()> {
+        let declared_data_byte_count = self.validate_base_segment(0)?;
+        if declared_data_byte_count > limits.max_allocation {
+            return Err(Error::Limit(format!(
+                "BigName data exceeds {} bytes",
+                limits.max_allocation
+            )));
+        }
+        let mut data = Vec::with_capacity(declared_data_byte_count);
+        data.extend_from_slice(&self.data);
+        let mut physical_segments = vec![BigNameSegmentLayout {
+            data_byte_count: u16::try_from(self.data.len())
+                .map_err(|_| Error::Limit("BigName base segment exceeds u16".into()))?,
+        }];
+        for continuation in continuations {
+            let next_size = data
+                .len()
+                .checked_add(continuation.data.len())
+                .ok_or_else(|| Error::Limit("BigName data length overflow".into()))?;
+            if next_size > declared_data_byte_count {
+                return Err(Error::invalid(
+                    0,
+                    "ContinueBigName exceeds the declared BigName data length",
+                ));
+            }
+            data.extend_from_slice(&continuation.data);
+            physical_segments.push(BigNameSegmentLayout {
+                data_byte_count: u16::try_from(continuation.data.len())
+                    .map_err(|_| Error::Limit("ContinueBigName segment exceeds u16".into()))?,
+            });
+        }
+        self.data = data;
+        self.physical_segments = physical_segments;
+        self.validate_complete(0)
+    }
+
+    fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
+        self.validate_complete(0)?;
+        let mut offset = 0usize;
+        let mut encoded = Vec::with_capacity(self.physical_segments.len());
+        for (index, segment) in self.physical_segments.iter().enumerate() {
+            let end = offset
+                .checked_add(usize::from(segment.data_byte_count))
+                .ok_or_else(|| Error::Limit("BigName segment end overflow".into()))?;
+            let mut payload = Vec::new();
+            if index == 0 {
+                payload.extend_from_slice(&self.reserved.to_le_bytes());
+                payload.extend_from_slice(&self.declared_data_byte_count.to_le_bytes());
+                payload.push(self.declared_name_byte_count);
+                payload.extend_from_slice(&self.name);
+            }
+            payload.extend_from_slice(&self.data[offset..end]);
+            if payload.len() > MAX_BIFF_RECORD_DATA {
+                return Err(Error::invalid(
+                    0,
+                    "BigName physical segment exceeds 8224 bytes",
+                ));
+            }
+            encoded.push(EncodedBiffRecord {
+                record_type: if index == 0 {
+                    BIG_NAME
+                } else {
+                    CONTINUE_BIG_NAME
+                },
+                payload,
+            });
+            offset = end;
+        }
+        Ok(encoded)
+    }
+}
+
+impl SdkRead for BigNameRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let position = reader.position()?;
+        let reserved = reader.read_u16()?;
+        let declared_data_byte_count = reader.read_i32()?;
+        let declared_name_byte_count = reader.read_u8()?;
+        let name = reader.read_vec(usize::from(declared_name_byte_count))?;
+        let remaining = usize::try_from(reader.remaining()?)
+            .map_err(|_| Error::Limit("BigName base data exceeds usize".into()))?;
+        let data = reader.read_vec(remaining)?;
+        let value = Self {
+            reserved,
+            declared_data_byte_count,
+            declared_name_byte_count,
+            name,
+            data,
+            physical_segments: vec![BigNameSegmentLayout {
+                data_byte_count: u16::try_from(remaining)
+                    .map_err(|_| Error::Limit("BigName base segment exceeds u16".into()))?,
+            }],
+        };
+        value.validate_base_segment(position)?;
+        Ok(value)
+    }
+}
+
+impl LrngRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        if usize::from(self.declared_row_range_count) != self.row_ranges.len()
+            || usize::from(self.declared_column_range_count) != self.column_ranges.len()
+            || self
+                .row_ranges
+                .len()
+                .saturating_add(self.column_ranges.len())
+                >= 1028
+        {
+            return Err(Error::invalid(position, "LRng range counts are invalid"));
+        }
+        Ok(())
+    }
+}
+
+fn validate_lrng(value: &LrngRecord, position: u64) -> Result<()> {
+    value.validate(position)
+}
+
+impl ExtStringRecord {
+    fn expected_unused_length(&self) -> Result<usize> {
+        let used = 4u64
+            .checked_add(self.string.sdk_size())
+            .ok_or_else(|| Error::Limit("ExtString size overflow".into()))?;
+        Ok(usize::try_from(12u64.saturating_sub(used))
+            .expect("ExtString padding is at most twelve bytes"))
+    }
+
+    fn validate(&self, position: u64) -> Result<()> {
+        validate_frt_header_old(self.header, EXT_STRING, position, "ExtString")?;
+        if self.unused.len() != self.expected_unused_length()? {
+            return Err(Error::invalid(
+                position,
+                "ExtString padding length mismatch",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_ext_string(value: &ExtStringRecord, position: u64) -> Result<()> {
+    value.validate(position)
+}
+
+impl OleDbConnRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        validate_frt_header_old(self.header, OLE_DB_CONN, position, "OleDbConn")?;
+        if self.flags.bits() & !0x0003 != 0 || self.declared_string_count == 0 || self.reserved != 0
+        {
+            return Err(Error::invalid(position, "OleDbConn fields are invalid"));
+        }
+        Ok(())
+    }
+}
+
+impl FrtFontListRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        validate_frt_header_old(self.header, FRT_FONT_LIST, position, "FrtFontList")?;
+        if !matches!(self.excel_version, 0x09 | 0x0a)
+            || self.reserved != 0
+            || usize::from(self.declared_font_count) != self.fonts.len()
+            || self.fonts.iter().any(|font| font.flags.bits() & !1 != 0)
+        {
+            return Err(Error::invalid(position, "FrtFontList fields are invalid"));
+        }
+        Ok(())
+    }
+}
+
+impl DataLabExtRecord {
+    fn validate(&self, position: u64) -> Result<()> {
+        validate_frt_header(self.header, DATA_LAB_EXT, position, "DataLabExt")
+    }
+}
+
+fn validate_continue_big_name(value: &ContinueBigNameRecord, position: u64) -> Result<()> {
+    if value.data.len() >= 8225 {
+        return Err(Error::invalid(
+            position,
+            "ContinueBigName data is not shorter than 8225 bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_mdb(value: &MdbRecord, position: u64) -> Result<()> {
+    validate_frt_header(value.header, MDB, position, "MDB")?;
+    if value
+        .entries
+        .iter()
+        .any(|entry| entry.metadata_type.index <= 0)
+    {
+        return Err(Error::invalid(
+            position,
+            "MDB contains an invalid MDTInfoIndex",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_continue_frt(value: &ContinueFrtRecord, position: u64) -> Result<()> {
+    if value.header.record_type != CONTINUE_FRT || value.continuation.len() >= 8221 {
+        return Err(Error::invalid(
+            position,
+            "ContinueFrt header or continuation length is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_continue_frt11(value: &ContinueFrt11Record, position: u64) -> Result<()> {
+    if value.header.record_type != CONTINUE_FRT11 || value.continuation.len() >= 8213 {
+        return Err(Error::invalid(
+            position,
+            "ContinueFrt11 header or continuation length is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_crt_ml_frt_continue(value: &CrtMlFrtContinueRecord, position: u64) -> Result<()> {
+    if value.header.record_type != CRT_ML_FRT_CONTINUE
+        || value.xml_token_chain.len() > MAX_BIFF_RECORD_DATA - 12
+    {
+        return Err(Error::invalid(
+            position,
+            "CrtMlFrtContinue header or token-chain length is invalid",
+        ));
+    }
+    Ok(())
 }
 
 impl SdkRead for SxViewRecord {
@@ -18068,80 +18945,6 @@ impl SdkWrite for SxvdTExRecord {
     }
 }
 
-impl SdkRead for ChartCatLabRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let header = FrtHeaderOld::read_from(reader)?;
-        let offset_percent = reader.read_u16()?;
-        let alignment = reader.read_u16()?;
-        let flags = ChartCatLabFlags::from_bits_retain(reader.read_u16()?);
-        let reserved = match reader.remaining()? {
-            0 => None,
-            2 => Some(reader.read_u16()?),
-            remaining => {
-                return Err(Error::invalid(
-                    reader.position()?,
-                    format!("CatLab has {remaining} bytes after its fixed fields"),
-                ));
-            }
-        };
-        Ok(Self {
-            header,
-            offset_percent,
-            alignment,
-            flags,
-            reserved,
-        })
-    }
-}
-
-impl SdkWrite for ChartCatLabRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        self.header.write_to(writer)?;
-        writer.write_u16(self.offset_percent)?;
-        writer.write_u16(self.alignment)?;
-        writer.write_u16(self.flags.bits())?;
-        if let Some(reserved) = self.reserved {
-            writer.write_u16(reserved)?;
-        }
-        Ok(())
-    }
-}
-
-impl SdkRead for ChartEndObjectRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let header = FrtHeaderOld::read_from(reader)?;
-        let object_kind = reader.read_u16()?;
-        let unused = match reader.remaining()? {
-            0 => None,
-            6 => Some([reader.read_u16()?, reader.read_u16()?, reader.read_u16()?]),
-            remaining => {
-                return Err(Error::invalid(
-                    reader.position()?,
-                    format!("EndObject has {remaining} bytes after iObjectKind"),
-                ));
-            }
-        };
-        Ok(Self {
-            header,
-            object_kind,
-            unused,
-        })
-    }
-}
-
-impl SdkWrite for ChartEndObjectRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        self.header.write_to(writer)?;
-        writer.write_u16(self.object_kind)?;
-        if let Some(unused) = self.unused {
-            for value in unused {
-                writer.write_u16(value)?;
-            }
-        }
-        Ok(())
-    }
-}
-
 impl SheetExtColorIndex {
     fn from_bits(bits: u32) -> Self {
         Self {
@@ -18259,6 +19062,16 @@ impl SdkWrite for XlUnicodeStringMin2 {
     }
 }
 
+impl SdkSize for XlUnicodeStringMin2 {
+    fn sdk_size(&self) -> u64 {
+        2u64.saturating_add(
+            self.text
+                .as_ref()
+                .map_or(0, biff_unicode_string_payload_size),
+        )
+    }
+}
+
 impl SdkRead for NameCommentRecord {
     fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
         let header = FrtHeader::read_from(reader)?;
@@ -18295,24 +19108,6 @@ impl SdkWrite for NameCommentRecord {
     }
 }
 
-impl SdkRead for ChartDataLabelExtContentsRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        Ok(Self {
-            header: FrtHeader::read_from(reader)?,
-            flags: ChartDataLabelExtContentsFlags::from_bits_retain(reader.read_u16()?),
-            separator: XlUnicodeStringMin2::read_from(reader)?,
-        })
-    }
-}
-
-impl SdkWrite for ChartDataLabelExtContentsRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        self.header.write_to(writer)?;
-        writer.write_u16(self.flags.bits())?;
-        self.separator.write_to(writer)
-    }
-}
-
 impl DxfN12List {
     fn read_sized<R: Read + Seek>(reader: &mut Reader<R>, byte_count: u32) -> Result<Self> {
         let mut child = reader.sub_reader(u64::from(byte_count))?;
@@ -18338,97 +19133,6 @@ impl DxfN12List {
             extension.write_to(&mut writer)?;
         }
         Ok(writer.into_inner().into_inner())
-    }
-}
-
-fn read_feat11_row_ids<R: Read + Seek>(reader: &mut Reader<R>) -> Result<(u16, Vec<u32>)> {
-    let declared_id_count = reader.read_u16()?;
-    reader.ensure_allocation(usize::from(declared_id_count), 4)?;
-    let mut row_ids = Vec::with_capacity(usize::from(declared_id_count));
-    for _ in 0..declared_id_count {
-        row_ids.push(reader.read_u32()?);
-    }
-    Ok((declared_id_count, row_ids))
-}
-
-fn write_feat11_row_ids<W: Write + Seek>(
-    writer: &mut Writer<W>,
-    declared_id_count: u16,
-    row_ids: &[u32],
-) -> Result<()> {
-    if usize::from(declared_id_count) != row_ids.len() {
-        return Err(Error::invalid(
-            writer.position()?,
-            "Feat11 SharePoint row ID count mismatch",
-        ));
-    }
-    writer.write_u16(declared_id_count)?;
-    for row_id in row_ids {
-        writer.write_u32(*row_id)?;
-    }
-    Ok(())
-}
-
-impl SdkRead for Feat11RgSharepointIdDel {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let (declared_id_count, row_ids) = read_feat11_row_ids(reader)?;
-        Ok(Self {
-            declared_id_count,
-            row_ids,
-        })
-    }
-}
-
-impl SdkWrite for Feat11RgSharepointIdDel {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        write_feat11_row_ids(writer, self.declared_id_count, &self.row_ids)
-    }
-}
-
-impl SdkRead for Feat11RgSharepointIdChange {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let (declared_id_count, row_ids) = read_feat11_row_ids(reader)?;
-        Ok(Self {
-            declared_id_count,
-            row_ids,
-        })
-    }
-}
-
-impl SdkWrite for Feat11RgSharepointIdChange {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        write_feat11_row_ids(writer, self.declared_id_count, &self.row_ids)
-    }
-}
-
-impl SdkRead for Feat11RgInvalidCells {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let declared_cell_count = reader.read_u16()?;
-        reader.ensure_allocation(usize::from(declared_cell_count), 8)?;
-        let mut cells = Vec::with_capacity(usize::from(declared_cell_count));
-        for _ in 0..declared_cell_count {
-            cells.push(Feat11CellStruct::read_from(reader)?);
-        }
-        Ok(Self {
-            declared_cell_count,
-            cells,
-        })
-    }
-}
-
-impl SdkWrite for Feat11RgInvalidCells {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if usize::from(self.declared_cell_count) != self.cells.len() {
-            return Err(Error::invalid(
-                writer.position()?,
-                "Feat11 invalid cell count mismatch",
-            ));
-        }
-        writer.write_u16(self.declared_cell_count)?;
-        for cell in &self.cells {
-            cell.write_to(writer)?;
-        }
-        Ok(())
     }
 }
 
@@ -19826,30 +20530,6 @@ impl SdkRead for LabelRecord {
     }
 }
 
-impl SdkRead for PaletteRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let color_count = usize::from(reader.read_u16()?);
-        let mut colors = Vec::with_capacity(color_count);
-        for _ in 0..color_count {
-            colors.push(reader.read_u32()?);
-        }
-        Ok(Self { colors })
-    }
-}
-
-impl SdkWrite for PaletteRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_u16(
-            u16::try_from(self.colors.len())
-                .map_err(|_| Error::Limit("Palette color count exceeds u16".into()))?,
-        )?;
-        for color in &self.colors {
-            writer.write_u32(*color)?;
-        }
-        Ok(())
-    }
-}
-
 impl SdkWrite for LabelRecord {
     fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.cell.write_to(writer)?;
@@ -19882,41 +20562,6 @@ impl SdkWrite for ChartSeriesTextRecord {
                 .map_err(|_| Error::Limit("SeriesText exceeds u8 characters".into()))?,
         )?;
         self.text.write(writer)
-    }
-}
-
-impl SdkRead for EndBlockRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let header = FrtHeaderOld::read_from(reader)?;
-        let object_kind = reader.read_u16()?;
-        let optional_unused = match reader.remaining()? {
-            0 => None,
-            6 => Some([reader.read_u16()?, reader.read_u16()?, reader.read_u16()?]),
-            remaining => {
-                return Err(Error::invalid(
-                    reader.position()?,
-                    format!("EndBlock has {remaining} bytes after object kind; expected 0 or 6"),
-                ));
-            }
-        };
-        Ok(Self {
-            header,
-            object_kind,
-            optional_unused,
-        })
-    }
-}
-
-impl SdkWrite for EndBlockRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        self.header.write_to(writer)?;
-        writer.write_u16(self.object_kind)?;
-        if let Some(values) = self.optional_unused {
-            for value in values {
-                writer.write_u16(value)?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -20179,49 +20824,6 @@ impl SdkWrite for Window2Record {
                     writer.write_u32(value)?;
                 }
             }
-        }
-        Ok(())
-    }
-}
-
-impl SdkRead for IndexRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let reserved1 = reader.read_u32()?;
-        let first_row = reader.read_u32()?;
-        let last_row_exclusive = reader.read_u32()?;
-        let reserved2 = reader.read_u32()?;
-        let remaining = reader.remaining()?;
-        if remaining % 4 != 0 {
-            return Err(Error::invalid(
-                reader.position()?,
-                "Index DBCell pointer array has invalid byte length",
-            ));
-        }
-        let count = usize::try_from(remaining / 4)
-            .map_err(|_| Error::Limit("Index DBCell pointer count exceeds usize".into()))?;
-        reader.ensure_allocation(count, 4)?;
-        let mut dbcell_offsets = Vec::with_capacity(count);
-        for _ in 0..count {
-            dbcell_offsets.push(reader.read_u32()?);
-        }
-        Ok(Self {
-            reserved1,
-            first_row,
-            last_row_exclusive,
-            reserved2,
-            dbcell_offsets,
-        })
-    }
-}
-
-impl SdkWrite for IndexRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_u32(self.reserved1)?;
-        writer.write_u32(self.first_row)?;
-        writer.write_u32(self.last_row_exclusive)?;
-        writer.write_u32(self.reserved2)?;
-        for offset in &self.dbcell_offsets {
-            writer.write_u32(*offset)?;
         }
         Ok(())
     }
@@ -21573,172 +22175,8 @@ impl SdkWrite for SxFormatRecord {
     }
 }
 
-impl SdkRead for WOptRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let header = FrtHeaderOld::read_from(reader)?;
-        if header.record_type != W_OPT {
-            return Err(Error::invalid(0, "WOpt FRT record type mismatch"));
-        }
-        let flags = WOptFlags::from_bits_retain(reader.read_u16()?);
-        let screen_size = WebScreenSize::read_from(reader)?;
-        let reserved = reader.read_u8()?;
-        let pixels_per_inch = reader.read_u32()?;
-        let code_page = reader.read_u32()?;
-        let component_location = LpWideString::read_from(reader)?;
-        let future_length = usize::try_from(reader.remaining()?)
-            .map_err(|_| Error::Limit("WOpt future data exceeds usize".into()))?;
-        Ok(Self {
-            header,
-            flags,
-            screen_size,
-            reserved,
-            pixels_per_inch,
-            code_page,
-            component_location,
-            future: reader.read_vec(future_length)?,
-        })
-    }
-}
-
-impl SdkWrite for WOptRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.header.record_type != W_OPT {
-            return Err(Error::invalid(0, "WOpt FRT record type mismatch"));
-        }
-        self.header.write_to(writer)?;
-        writer.write_u16(self.flags.bits())?;
-        self.screen_size.write_to(writer)?;
-        writer.write_u8(self.reserved)?;
-        writer.write_u32(self.pixels_per_inch)?;
-        writer.write_u32(self.code_page)?;
-        self.component_location.write_to(writer)?;
-        writer.write_all(&self.future)?;
-        Ok(())
-    }
-}
-
-impl TableOptions {
-    fn from_bits(bits: u16) -> Self {
-        Self {
-            always_calculate: bits & 0x0001 != 0,
-            reserved1: bits & 0x0002 != 0,
-            row_input: bits & 0x0004 != 0,
-            two_variable: bits & 0x0008 != 0,
-            first_input_deleted: bits & 0x0010 != 0,
-            second_input_deleted: bits & 0x0020 != 0,
-            reserved2: bits >> 6,
-        }
-    }
-
-    fn bits(self) -> Result<u16> {
-        if self.reserved2 > 0x03ff {
-            return Err(Error::invalid(0, "Table reserved flags exceed 10 bits"));
-        }
-        Ok(u16::from(self.always_calculate)
-            | (u16::from(self.reserved1) << 1)
-            | (u16::from(self.row_input) << 2)
-            | (u16::from(self.two_variable) << 3)
-            | (u16::from(self.first_input_deleted) << 4)
-            | (u16::from(self.second_input_deleted) << 5)
-            | (self.reserved2 << 6))
-    }
-}
-
-impl SdkRead for TableRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let range = TableRange::read_from(reader)?;
-        let options = TableOptions::from_bits(reader.read_u16()?);
-        let row_input = TableInputReference::read_from(reader)?;
-        let column_input = TableInputReference::read_from(reader)?;
-        let compatibility_padding = match reader.remaining()? {
-            0 => None,
-            2 => Some(reader.read_u16()?),
-            _ => return Err(Error::invalid(0, "Table has invalid trailing data")),
-        };
-        Ok(Self {
-            range,
-            options,
-            row_input,
-            column_input,
-            compatibility_padding,
-        })
-    }
-}
-
-impl SdkWrite for TableRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        self.range.write_to(writer)?;
-        writer.write_u16(self.options.bits()?)?;
-        self.row_input.write_to(writer)?;
-        self.column_input.write_to(writer)?;
-        if let Some(value) = self.compatibility_padding {
-            writer.write_u16(value)?;
-        }
-        Ok(())
-    }
-}
-
-impl SdkRead for CrtCoOptRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let header = FrtHeader::read_from(reader)?;
-        let color_scheme = reader.read_u32()?;
-        let flags = CrtCoOptFlags::from_bits_retain(reader.read_u16()?);
-        let compatibility_padding = match reader.remaining()? {
-            0 => None,
-            2 => Some(reader.read_u16()?),
-            _ => return Err(Error::invalid(0, "CrtCoOpt has invalid trailing data")),
-        };
-        Ok(Self {
-            header,
-            color_scheme,
-            flags,
-            compatibility_padding,
-        })
-    }
-}
-
-impl SdkWrite for CrtCoOptRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        self.header.write_to(writer)?;
-        writer.write_u32(self.color_scheme)?;
-        writer.write_u16(self.flags.bits())?;
-        if let Some(value) = self.compatibility_padding {
-            writer.write_u16(value)?;
-        }
-        Ok(())
-    }
-}
-
-impl SdkRead for LhGraphViewRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let core = LhGraphViewCore::read_from(reader)?;
-        let compatibility_extension = match reader.remaining()? {
-            0 => None,
-            6 => Some([reader.read_u16()?, reader.read_u16()?, reader.read_u16()?]),
-            _ => {
-                return Err(Error::invalid(
-                    reader.position()?,
-                    "LH graph view has an invalid compatibility extension",
-                ));
-            }
-        };
-        Ok(Self {
-            core,
-            compatibility_extension,
-        })
-    }
-}
-
-impl SdkWrite for LhGraphViewRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        self.core.write_to(writer)?;
-        if let Some(words) = self.compatibility_extension {
-            for word in words {
-                writer.write_u16(word)?;
-            }
-        }
-        Ok(())
-    }
+fn validate_w_opt(value: &WOptRecord, position: u64) -> Result<()> {
+    validate_frt_header_old(value.header, W_OPT, position, "WOpt")
 }
 
 fn read_lh_reserved<R: Read + Seek>(
@@ -21873,30 +22311,6 @@ impl SdkWrite for LhRecord {
     }
 }
 
-impl SdkRead for QsiRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        Ok(Self {
-            flags: QsiFlags::from_bits_retain(reader.read_u16()?),
-            auto_format_index: reader.read_u16()?,
-            formatting_flags: QsiFormattingFlags::from_bits_retain(reader.read_u16()?),
-            reserved: reader.read_u32()?,
-            name: XlUnicodeString::read_from(reader)?,
-            unused: reader.read_u16()?,
-        })
-    }
-}
-
-impl SdkWrite for QsiRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_u16(self.flags.bits())?;
-        writer.write_u16(self.auto_format_index)?;
-        writer.write_u16(self.formatting_flags.bits())?;
-        writer.write_u32(self.reserved)?;
-        self.name.write_to(writer)?;
-        writer.write_u16(self.unused)
-    }
-}
-
 impl ParamQryFixed {
     fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
         let sql_type = reader.read_u16()?;
@@ -21997,76 +22411,6 @@ impl SdkWrite for ParamQryRecord {
             }
         }
         Ok(())
-    }
-}
-
-impl SxSelectOptions {
-    fn from_bits(bits: u16) -> Self {
-        Self {
-            click_count: (bits & 0x001f) as u8,
-            label_only: bits & 0x0020 != 0,
-            data_only: bits & 0x0040 != 0,
-            toggle_data_header: bits & 0x0080 != 0,
-            selection_click: bits & 0x0100 != 0,
-            extendable: bits & 0x0200 != 0,
-            unused: (bits >> 10) as u8,
-        }
-    }
-
-    fn bits(self) -> Result<u16> {
-        if self.click_count > 0x1f || self.unused > 0x3f {
-            return Err(Error::invalid(
-                0,
-                "SxSelect options exceed their bit widths",
-            ));
-        }
-        Ok(u16::from(self.click_count)
-            | (u16::from(self.label_only) << 5)
-            | (u16::from(self.data_only) << 6)
-            | (u16::from(self.toggle_data_header) << 7)
-            | (u16::from(self.selection_click) << 8)
-            | (u16::from(self.extendable) << 9)
-            | (u16::from(self.unused) << 10))
-    }
-}
-
-impl SdkRead for SxSelectRecord {
-    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        Ok(Self {
-            reserved1: reader.read_u16()?,
-            pane: PaneType::read_from(reader)?,
-            reserved2: reader.read_u8()?,
-            axis: SxAxis::from_bits_retain(reader.read_u16()?),
-            active_dimension: reader.read_u16()?,
-            line_start: reader.read_u16()?,
-            active_line: reader.read_u16()?,
-            minimum_line: reader.read_u16()?,
-            maximum_line: reader.read_u16()?,
-            clicked_row: reader.read_u16()?,
-            clicked_column: reader.read_u16()?,
-            previous_clicked_row: reader.read_u16()?,
-            previous_clicked_column: reader.read_u16()?,
-            options: SxSelectOptions::from_bits(reader.read_u16()?),
-        })
-    }
-}
-
-impl SdkWrite for SxSelectRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_u16(self.reserved1)?;
-        self.pane.write_to(writer)?;
-        writer.write_u8(self.reserved2)?;
-        writer.write_u16(self.axis.bits())?;
-        writer.write_u16(self.active_dimension)?;
-        writer.write_u16(self.line_start)?;
-        writer.write_u16(self.active_line)?;
-        writer.write_u16(self.minimum_line)?;
-        writer.write_u16(self.maximum_line)?;
-        writer.write_u16(self.clicked_row)?;
-        writer.write_u16(self.clicked_column)?;
-        writer.write_u16(self.previous_clicked_row)?;
-        writer.write_u16(self.previous_clicked_column)?;
-        writer.write_u16(self.options.bits()?)
     }
 }
 
@@ -23344,6 +23688,259 @@ impl SstRecord {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BiffLayoutRecordKind {
+    Bof,
+    DefColWidth,
+    DbCell,
+    Row,
+    Other,
+}
+
+#[derive(Clone, Debug)]
+struct BiffRecordLayout {
+    old_offset: u32,
+    new_offset: u32,
+    encoded_size: u32,
+    kind: BiffLayoutRecordKind,
+}
+
+#[derive(Clone, Debug)]
+struct BiffStreamLayout {
+    entries: Vec<BiffRecordLayout>,
+    record_offsets: BTreeMap<u32, Option<(u32, BiffLayoutRecordKind)>>,
+    physical_record_offsets: BTreeMap<u32, Option<(u32, u16)>>,
+}
+
+impl BiffStreamLayout {
+    fn new(records: &[BiffRecord]) -> Result<Self> {
+        let mut entries = Vec::with_capacity(records.len());
+        let mut record_offsets = BTreeMap::new();
+        let mut physical_record_offsets = BTreeMap::new();
+        let mut new_offset = 0u32;
+        for record in records {
+            let encoded = record.data.encode_physical()?;
+            let mut relative_offset = 0u32;
+            for physical in &encoded {
+                if physical.payload.len() > MAX_BIFF_RECORD_DATA {
+                    return Err(Error::invalid(
+                        u64::from(new_offset),
+                        "BIFF record data exceeds 8224 bytes",
+                    ));
+                }
+                let old_physical_offset = record
+                    .offset
+                    .checked_add(relative_offset)
+                    .ok_or_else(|| Error::Limit("BIFF physical record offset overflow".into()))?;
+                let new_physical_offset = new_offset
+                    .checked_add(relative_offset)
+                    .ok_or_else(|| Error::Limit("BIFF physical record offset overflow".into()))?;
+                insert_unique_offset(
+                    &mut physical_record_offsets,
+                    old_physical_offset,
+                    (new_physical_offset, physical.record_type),
+                );
+                let physical_size = u32::try_from(physical.payload.len())
+                    .map_err(|_| Error::Limit("BIFF physical record size exceeds u32".into()))?
+                    .checked_add(4)
+                    .ok_or_else(|| Error::Limit("BIFF physical record size overflow".into()))?;
+                relative_offset = relative_offset
+                    .checked_add(physical_size)
+                    .ok_or_else(|| Error::Limit("BIFF logical record size overflow".into()))?;
+            }
+            let kind = BiffLayoutRecordKind::from_data(&record.data);
+            insert_unique_offset(&mut record_offsets, record.offset, (new_offset, kind));
+            entries.push(BiffRecordLayout {
+                old_offset: record.offset,
+                new_offset,
+                encoded_size: relative_offset,
+                kind,
+            });
+            new_offset = new_offset
+                .checked_add(relative_offset)
+                .ok_or_else(|| Error::Limit("BIFF stream layout exceeds u32".into()))?;
+        }
+        Ok(Self {
+            entries,
+            record_offsets,
+            physical_record_offsets,
+        })
+    }
+
+    fn positions_changed(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.old_offset != entry.new_offset)
+    }
+
+    fn relocate_record(
+        &self,
+        old_offset: u32,
+        expected: BiffLayoutRecordKind,
+        message: &'static str,
+    ) -> Result<u32> {
+        let (new_offset, actual) =
+            relocate_unique_offset(&self.record_offsets, old_offset, message)?;
+        if actual != expected {
+            return Err(Error::invalid(u64::from(old_offset), message));
+        }
+        Ok(new_offset)
+    }
+
+    fn relocate_physical_record(&self, old_offset: u32, message: &'static str) -> Result<u32> {
+        let (new_offset, record_type) =
+            relocate_unique_offset(&self.physical_record_offsets, old_offset, message)?;
+        if !matches!(record_type, SST | CONTINUE) {
+            return Err(Error::invalid(u64::from(old_offset), message));
+        }
+        Ok(new_offset)
+    }
+
+    fn entry(&self, old_offset: u32, message: &'static str) -> Result<&BiffRecordLayout> {
+        let mut matches = self
+            .entries
+            .iter()
+            .filter(|entry| entry.old_offset == old_offset);
+        let entry = matches
+            .next()
+            .ok_or_else(|| Error::invalid(u64::from(old_offset), message))?;
+        if matches.next().is_some() {
+            return Err(Error::invalid(
+                u64::from(old_offset),
+                "BIFF reference target is ambiguous after record insertion",
+            ));
+        }
+        Ok(entry)
+    }
+}
+
+impl BiffLayoutRecordKind {
+    fn from_data(data: &BiffRecordData) -> Self {
+        match data {
+            BiffRecordData::Bof(_) | BiffRecordData::LegacyBof { .. } => Self::Bof,
+            BiffRecordData::FixedU16 {
+                kind: FixedU16RecordKind::DefaultColWidth,
+                ..
+            } => Self::DefColWidth,
+            BiffRecordData::DbCell(_) => Self::DbCell,
+            BiffRecordData::Row(_)
+            | BiffRecordData::Unknown {
+                record_type: ROW, ..
+            } => Self::Row,
+            _ => Self::Other,
+        }
+    }
+}
+
+fn insert_unique_offset<T: Copy>(
+    offsets: &mut BTreeMap<u32, Option<T>>,
+    old_offset: u32,
+    value: T,
+) {
+    offsets
+        .entry(old_offset)
+        .and_modify(|value| *value = None)
+        .or_insert(Some(value));
+}
+
+fn relocate_unique_offset<T: Copy>(
+    offsets: &BTreeMap<u32, Option<T>>,
+    old_offset: u32,
+    message: &'static str,
+) -> Result<T> {
+    offsets
+        .get(&old_offset)
+        .copied()
+        .flatten()
+        .ok_or_else(|| Error::invalid(u64::from(old_offset), message))
+}
+
+impl DbCellRecord {
+    fn relayout(&mut self, old_offset: u32, layout: &BiffStreamLayout) -> Result<()> {
+        if self.row_offset == 0 {
+            return Ok(());
+        }
+        let old_first_row = old_offset.checked_sub(self.row_offset).ok_or_else(|| {
+            Error::invalid(
+                u64::from(old_offset),
+                "DBCell.dbRtrw points before the Workbook stream",
+            )
+        })?;
+        let row_layout = layout.entry(
+            old_first_row,
+            "DBCell.dbRtrw does not reference a Row record",
+        )?;
+        if row_layout.kind != BiffLayoutRecordKind::Row {
+            return Err(Error::invalid(
+                u64::from(old_first_row),
+                "DBCell.dbRtrw does not reference a Row record",
+            ));
+        }
+        let new_dbcell = layout.relocate_record(
+            old_offset,
+            BiffLayoutRecordKind::DbCell,
+            "DBCell record position is ambiguous after record insertion",
+        )?;
+        self.row_offset = new_dbcell
+            .checked_sub(row_layout.new_offset)
+            .ok_or_else(|| {
+                Error::invalid(u64::from(old_offset), "DBCell precedes its row block")
+            })?;
+
+        let Some(first_offset) = self.cell_offsets.first_mut() else {
+            return Ok(());
+        };
+        let old_first_row_end = old_first_row
+            .checked_add(row_layout.encoded_size)
+            .ok_or_else(|| Error::Limit("DBCell first Row end overflow".into()))?;
+        let old_first_cell = old_first_row_end
+            .checked_add(u32::from(*first_offset))
+            .ok_or_else(|| Error::Limit("DBCell first cell offset overflow".into()))?;
+        let new_first_cell = layout.relocate_record(
+            old_first_cell,
+            BiffLayoutRecordKind::Other,
+            "DBCell.rgdb does not reference a cell record",
+        )?;
+        let new_first_row_end = row_layout
+            .new_offset
+            .checked_add(row_layout.encoded_size)
+            .ok_or_else(|| Error::Limit("DBCell first Row end overflow".into()))?;
+        *first_offset = u16::try_from(new_first_cell.checked_sub(new_first_row_end).ok_or_else(
+            || {
+                Error::invalid(
+                    u64::from(old_offset),
+                    "DBCell first cell precedes its row block",
+                )
+            },
+        )?)
+        .map_err(|_| Error::Limit("DBCell first cell offset exceeds u16".into()))?;
+
+        let mut old_previous_cell = old_first_cell;
+        let mut new_previous_cell = new_first_cell;
+        for relative_offset in &mut self.cell_offsets[1..] {
+            let old_cell = old_previous_cell
+                .checked_add(u32::from(*relative_offset))
+                .ok_or_else(|| Error::Limit("DBCell cell offset overflow".into()))?;
+            let new_cell = layout.relocate_record(
+                old_cell,
+                BiffLayoutRecordKind::Other,
+                "DBCell.rgdb does not reference a cell record",
+            )?;
+            *relative_offset =
+                u16::try_from(new_cell.checked_sub(new_previous_cell).ok_or_else(|| {
+                    Error::invalid(
+                        u64::from(old_offset),
+                        "DBCell cell records are out of order",
+                    )
+                })?)
+                .map_err(|_| Error::Limit("DBCell cell offset exceeds u16".into()))?;
+            old_previous_cell = old_cell;
+            new_previous_cell = new_cell;
+        }
+        Ok(())
+    }
+}
+
 impl BiffStream {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         Self::from_bytes_with_limits(bytes, Limits::default())
@@ -23375,6 +23972,7 @@ impl BiffStream {
         let mut rrd_rst_etxp_context: Option<RrdRstEtxpContext> = None;
         let mut rrd_info_version = None;
         let mut mdx_string_count = 0i32;
+        let mut last_saved_version = None;
         while cursor < bytes.len() {
             if bytes[cursor..].iter().all(|value| *value == 0) {
                 if rrd_rst_etxp_context.is_some() {
@@ -23387,6 +23985,7 @@ impl BiffStream {
                     stitch_continued_records(&mut records, limits)?;
                     validate_pivot_view_extensions(&records)?;
                     validate_function_groups_and_table_styles(&records)?;
+                    validate_remaining_static_record_context(&records)?;
                 }
                 return Ok(Self {
                     records,
@@ -23446,6 +24045,7 @@ impl BiffStream {
                 sx_li_dimensions = None;
                 sx_dbb_context = None;
                 rrd_info_version = None;
+                last_saved_version = None;
             }
             let data = if record_type == RRD_CHG_CELL
                 && biff8
@@ -23482,6 +24082,16 @@ impl BiffStream {
                     Error::invalid(offset as u64, "SXDBB has no preceding SXDB context")
                 })?;
                 BiffRecordData::SxDbb(SxDbbRecord::from_bytes(payload, context, offset + 4)?)
+            } else if record_type == QSIF && biff8 && !encrypted {
+                BiffRecordData::Qsif(parse_qsif_payload(
+                    payload,
+                    last_saved_version.is_some_and(|version| version >= 4),
+                )?)
+            } else if record_type == QSIR && biff8 && !encrypted {
+                BiffRecordData::Qsir(parse_qsir_payload(
+                    payload,
+                    last_saved_version.is_some_and(|version| version >= 3),
+                )?)
             } else {
                 decode_record(record_type, payload, encrypted, biff8, offset)?
             };
@@ -23496,6 +24106,9 @@ impl BiffStream {
             }
             if record_type == FILE_PASS {
                 encrypted = true;
+            }
+            if let BiffRecordData::Bof(value) = &data {
+                last_saved_version = Some(((value.lowest_version >> 8) & 0x0f) as u8);
             }
             if let BiffRecordData::SxView(view) = &data {
                 sx_li_dimensions = Some((view.row_field_count, view.column_field_count, 0));
@@ -23568,6 +24181,7 @@ impl BiffStream {
             stitch_continued_records(&mut records, limits)?;
             validate_pivot_view_extensions(&records)?;
             validate_function_groups_and_table_styles(&records)?;
+            validate_remaining_static_record_context(&records)?;
         }
         Ok(Self {
             records,
@@ -23575,14 +24189,98 @@ impl BiffStream {
         })
     }
 
+    /// Recomputes physical record positions and every MS-XLS file pointer that
+    /// is represented by the typed record tree.
+    ///
+    /// This is the BIFF layout layer: callers edit record values, while the
+    /// stream owns derived byte positions such as BoundSheet8 `lbPlyPos`,
+    /// Index `ibXF`/`rgibRw`, ExtSST bucket positions, and DBCell relative
+    /// row/cell offsets. The update is transactional: an invalid or ambiguous
+    /// reference leaves the original tree unchanged.
+    pub fn relayout(&mut self) -> Result<()> {
+        let mut rebuilt = self.clone();
+        rebuilt.relayout_in_place()?;
+        *self = rebuilt;
+        Ok(())
+    }
+
+    fn relayout_in_place(&mut self) -> Result<()> {
+        let layout = BiffStreamLayout::new(&self.records)?;
+        if !layout.positions_changed() {
+            return Ok(());
+        }
+
+        for (index, record) in self.records.iter_mut().enumerate() {
+            let old_record_offset = layout.entries[index].old_offset;
+            match &mut record.data {
+                BiffRecordData::BoundSheet8(value)
+                | BiffRecordData::BoundSheet8Compatibility { value, .. } => {
+                    value.sheet_bof_offset = layout.relocate_record(
+                        value.sheet_bof_offset,
+                        BiffLayoutRecordKind::Bof,
+                        "BoundSheet8.lbPlyPos does not reference a BOF record",
+                    )?;
+                }
+                BiffRecordData::Index(value) => {
+                    value.def_col_width_offset = layout.relocate_record(
+                        value.def_col_width_offset,
+                        BiffLayoutRecordKind::DefColWidth,
+                        "Index.ibXF does not reference a BIFF record",
+                    )?;
+                    for offset in &mut value.dbcell_offsets {
+                        *offset = layout.relocate_record(
+                            *offset,
+                            BiffLayoutRecordKind::DbCell,
+                            "Index.rgibRw does not reference a BIFF record",
+                        )?;
+                    }
+                }
+                BiffRecordData::ExtSst(value) => {
+                    for bucket in &mut value.buckets {
+                        let old_header = bucket
+                            .stream_offset
+                            .checked_sub(u32::from(bucket.record_offset))
+                            .ok_or_else(|| {
+                                Error::invalid(
+                                    u64::from(old_record_offset),
+                                    "ExtSST cbOffset exceeds ib",
+                                )
+                            })?;
+                        let new_header = layout.relocate_physical_record(
+                            old_header,
+                            "ExtSST bucket does not reference SST/Continue record framing",
+                        )?;
+                        bucket.stream_offset = new_header
+                            .checked_add(u32::from(bucket.record_offset))
+                            .ok_or_else(|| Error::Limit("ExtSST bucket offset overflow".into()))?;
+                    }
+                }
+                BiffRecordData::DbCell(value) => {
+                    value.relayout(old_record_offset, &layout)?;
+                }
+                _ => {}
+            }
+            record.offset = layout.entries[index].new_offset;
+        }
+        Ok(())
+    }
+
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let mut stream = self.clone();
+        stream.relayout_in_place()?;
+        stream.to_bytes_with_current_layout()
+    }
+
+    fn to_bytes_with_current_layout(&self) -> Result<Vec<u8>> {
         validate_pivot_view_extensions(&self.records)?;
         validate_function_groups_and_table_styles(&self.records)?;
+        validate_remaining_static_record_context(&self.records)?;
         let mut bytes = Vec::new();
         let mut sx_dbb_context: Option<SxDbbContext> = None;
         let mut rrd_rst_etxp_context: Option<RrdRstEtxpContext> = None;
         let mut rrd_info_version = None;
         let mut mdx_string_count = 0i32;
+        let mut last_saved_version = None;
         for record in &self.records {
             if usize::try_from(record.offset).ok() != Some(bytes.len()) {
                 return Err(Error::invalid(
@@ -23593,6 +24291,7 @@ impl BiffStream {
             if matches!(&record.data, BiffRecordData::Bof(_)) {
                 sx_dbb_context = None;
                 rrd_info_version = None;
+                last_saved_version = None;
             }
             if rrd_rst_etxp_context.is_some()
                 && !matches!(&record.data, BiffRecordData::RrdRstEtxp(_))
@@ -23623,6 +24322,22 @@ impl BiffStream {
                     record.offset as u64,
                     "RRDTQSIF range does not match RRDInfo wXLVer",
                 ));
+            }
+            if let BiffRecordData::Qsir(value) = &record.data {
+                let version = last_saved_version.ok_or_else(|| {
+                    Error::invalid(record.offset.into(), "Qsir has no preceding BOF version")
+                })?;
+                if value.list_id.is_some() != (version >= 3)
+                    || value
+                        .fields
+                        .iter()
+                        .any(|field| field.list_id.is_some() != (version >= 4))
+                {
+                    return Err(Error::invalid(
+                        record.offset.into(),
+                        "Qsir/Qsif optional list IDs do not match verLastXLSaved",
+                    ));
+                }
             }
             record
                 .data
@@ -23666,6 +24381,9 @@ impl BiffStream {
                     mdx_string_count = mdx_string_count
                         .checked_add(1)
                         .ok_or_else(|| Error::Limit("MDXStr record count exceeds i32".into()))?;
+                }
+                BiffRecordData::Bof(value) => {
+                    last_saved_version = Some(((value.lowest_version >> 8) & 0x0f) as u8);
                 }
                 _ => {}
             }
@@ -23727,6 +24445,17 @@ impl RevisionLogStream {
         Ok(())
     }
 
+    /// Recomputes derived physical offsets after revision-record edits.
+    pub fn relayout(&mut self) -> Result<()> {
+        let mut stream = BiffStream {
+            records: self.records.clone(),
+            trailing_padding: self.trailing_padding.clone(),
+        };
+        stream.relayout()?;
+        self.records = stream.records;
+        Ok(())
+    }
+
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         BiffStream {
             records: self.records.clone(),
@@ -23778,6 +24507,21 @@ impl BiffRecordData {
     }
 
     fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
+        if let Self::DocRoute(value) = self {
+            return value.encode_physical();
+        }
+        if let Self::Qsir(value) = self {
+            return value.encode_physical();
+        }
+        if let Self::CrErr(value) = self {
+            return value.encode_physical();
+        }
+        if let Self::AutoFilter12(value) = self {
+            return value.encode_physical();
+        }
+        if let Self::BigName(value) = self {
+            return value.encode_physical();
+        }
         if let Self::SxTh(value) = self {
             return value.encode_physical();
         }
@@ -23872,10 +24616,28 @@ impl BiffRecordData {
             }
             Self::FnGrp12(value) => (FN_GRP12, encode_sdk(value)?),
             Self::Lpr(value) => (LPR, encode_sdk(value)?),
+            Self::DocRoute(value) => {
+                let first = value
+                    .encode_physical()?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Error::invalid(0, "DocRoute has no first record"))?;
+                (DOC_ROUTE, first.payload)
+            }
             Self::RecipName(value) => {
                 value.validate()?;
                 (RECIP_NAME, encode_sdk(value)?)
             }
+            Self::BigName(value) => {
+                let first = value
+                    .encode_physical()?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Error::invalid(0, "BigName has no physical segments"))?;
+                (BIG_NAME, first.payload)
+            }
+            Self::ContinueBigName(value) => (CONTINUE_BIG_NAME, encode_sdk(value)?),
+            Self::Lrng(value) => (L_RNG, encode_sdk(value)?),
             Self::Lel(value) => {
                 value.validate()?;
                 (LEL, encode_sdk(value)?)
@@ -23915,6 +24677,21 @@ impl BiffRecordData {
             Self::DConName(value) => (DCON_NAME, encode_sdk(value)?),
             Self::DConBin(value) => (DCON_BIN, encode_sdk(value)?),
             Self::DConn(value) => (DCONN, encode_sdk(value)?),
+            Self::ExtString(value) => (EXT_STRING, encode_sdk(value)?),
+            Self::OleDbConn(value) => {
+                value.validate(0)?;
+                (OLE_DB_CONN, encode_sdk(value)?)
+            }
+            Self::WebPub(value) => (WEB_PUB, encode_sdk(value)?),
+            Self::Qsir(value) => {
+                let first = value
+                    .encode_physical()?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Error::invalid(0, "Qsir has no first record"))?;
+                (QSIR, first.payload)
+            }
+            Self::Qsif(value) => (QSIF, encode_sdk(value)?),
             Self::TextQuery(value) => (TXT_QRY, encode_sdk(value)?),
             Self::QsiSxTag(value) => (QSI_SX_TAG, encode_sdk(value)?),
             Self::SxViewEx9(value) => (SX_VIEW_EX9, encode_sdk(value)?),
@@ -23947,6 +24724,14 @@ impl BiffRecordData {
             Self::LhRecord(value) => (LH_RECORD, encode_sdk(value)?),
             Self::SortData(value) => (SORT_DATA, encode_sdk(value)?),
             Self::AutoFilter(value) => (AUTO_FILTER, encode_sdk(value)?),
+            Self::AutoFilter12(value) => {
+                let first = value
+                    .encode_physical()?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Error::invalid(0, "AutoFilter12 has no first record"))?;
+                (AUTO_FILTER12, first.payload)
+            }
             Self::SxFormat(value) => (SX_FORMAT, encode_sdk(value)?),
             Self::WOpt(value) => (W_OPT, encode_sdk(value)?),
             Self::Table(value) => (TABLE, encode_sdk(value)?),
@@ -24041,6 +24826,7 @@ impl BiffRecordData {
             Self::SxvdEx(value) => (SXVD_EX, encode_sdk(value)?),
             Self::Sxvd(value) => (SXVD, encode_sdk(value)?),
             Self::MdtInfo(value) => (MDT_INFO, encode_sdk(value)?),
+            Self::Mdb(value) => (MDB, encode_sdk(value)?),
             Self::MdxStr(value) => (MDX_STR, encode_sdk(value)?),
             Self::MdxTuple(value) => (MDX_TUPLE, encode_sdk(value)?),
             Self::MdxSet(value) => (MDX_SET, encode_sdk(value)?),
@@ -24108,7 +24894,25 @@ impl BiffRecordData {
             Self::ForceFullCalculation(value) => (FORCE_FULL_CALCULATION, encode_sdk(value)?),
             Self::CompressPictures(value) => (COMPRESS_PICTURES, encode_sdk(value)?),
             Self::CrtMlFrt(value) => (CRT_ML_FRT, encode_sdk(value)?),
+            Self::FrtWrapper(value) => (FRT_WRAPPER, encode_sdk(value)?),
+            Self::CrErr(value) => {
+                let first = value
+                    .encode_physical()?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Error::invalid(0, "CrErr has no first record"))?;
+                (CR_ERR, first.payload)
+            }
+            Self::SxViewLink(value) => (SX_VIEW_LINK, encode_sdk(value)?),
             Self::ChartFrtInfo(value) => (CHART_FRT_INFO, encode_sdk(value)?),
+            Self::FrtFontList(value) => {
+                value.validate(0)?;
+                (FRT_FONT_LIST, encode_sdk(value)?)
+            }
+            Self::DataLabExt(value) => {
+                value.validate(0)?;
+                (DATA_LAB_EXT, encode_sdk(value)?)
+            }
             Self::PivotChartBits(value) => (PIVOT_CHART_BITS, encode_sdk(value)?),
             Self::ChartYMult(value) => (CHART_YMULT, encode_sdk(value)?),
             Self::ChartCatLab(value) => (CHART_CAT_LAB, encode_sdk(value)?),
@@ -25576,6 +26380,163 @@ fn continue_payload<'a>(
 fn stitch_continued_records(records: &mut Vec<BiffRecord>, limits: Limits) -> Result<()> {
     let mut index = 0usize;
     while index < records.len() {
+        let recipient_count = match &records[index].data {
+            BiffRecordData::DocRoute(value) => usize::from(value.declared_recipient_count),
+            _ => 0,
+        };
+        if recipient_count != 0 {
+            let end = index
+                .checked_add(1 + recipient_count)
+                .ok_or_else(|| Error::Limit("DocRoute recipient range overflow".into()))?;
+            if end > records.len() {
+                return Err(Error::invalid(
+                    0,
+                    "DocRoute recipient collection is truncated",
+                ));
+            }
+            let recipients = records[index + 1..end]
+                .iter()
+                .map(|record| match &record.data {
+                    BiffRecordData::RecipName(value) => Ok(value.clone()),
+                    _ => Err(Error::invalid(
+                        record.offset.into(),
+                        "DocRoute recipient collection is out of order",
+                    )),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let BiffRecordData::DocRoute(value) = &mut records[index].data else {
+                unreachable!()
+            };
+            value.recipients = recipients;
+            records.drain(index + 1..end);
+        }
+
+        let field_count = match &records[index].data {
+            BiffRecordData::Qsir(value) => usize::try_from(value.declared_field_count)
+                .map_err(|_| Error::Limit("Qsir field count exceeds usize".into()))?,
+            _ => 0,
+        };
+        if field_count != 0 {
+            let end = index
+                .checked_add(1 + field_count)
+                .ok_or_else(|| Error::Limit("Qsir field range overflow".into()))?;
+            if end > records.len() {
+                return Err(Error::invalid(0, "Qsir field collection is truncated"));
+            }
+            let fields = records[index + 1..end]
+                .iter()
+                .map(|record| match &record.data {
+                    BiffRecordData::Qsif(value) => Ok(value.clone()),
+                    _ => Err(Error::invalid(
+                        record.offset.into(),
+                        "Qsir field collection is out of order",
+                    )),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let BiffRecordData::Qsir(value) = &mut records[index].data else {
+                unreachable!()
+            };
+            value.fields = fields;
+            records.drain(index + 1..end);
+        }
+
+        if let BiffRecordData::AutoFilter12(value) = &records[index].data {
+            let (criteria_count, date_count) =
+                if matches!(value.filter, AutoFilter12Filter::Criteria) {
+                    (
+                        usize::try_from(value.declared_criteria_count).map_err(|_| {
+                            Error::Limit("AutoFilter12 criteria count exceeds usize".into())
+                        })?,
+                        usize::try_from(value.declared_date_grouping_count).map_err(|_| {
+                            Error::Limit("AutoFilter12 date count exceeds usize".into())
+                        })?,
+                    )
+                } else {
+                    (0, 0)
+                };
+            let total = criteria_count
+                .checked_add(date_count)
+                .ok_or_else(|| Error::Limit("AutoFilter12 continuation count overflow".into()))?;
+            if total != 0 {
+                let end = index.checked_add(1 + total).ok_or_else(|| {
+                    Error::Limit("AutoFilter12 continuation range overflow".into())
+                })?;
+                if end > records.len() {
+                    return Err(Error::invalid(
+                        0,
+                        "AutoFilter12 continuation collection is truncated",
+                    ));
+                }
+                let physical = records[index + 1..end]
+                    .iter()
+                    .map(|record| match &record.data {
+                        BiffRecordData::ContinueFrt12(value) => {
+                            Ok((value.header, value.continuation.as_slice()))
+                        }
+                        _ => Err(Error::invalid(
+                            record.offset.into(),
+                            "AutoFilter12 continuation collection is out of order",
+                        )),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let criteria = physical[..criteria_count]
+                    .iter()
+                    .map(|(header, payload)| {
+                        Ok(AutoFilter12Continuation {
+                            header: *header,
+                            value: parse_sdk(payload, 0, CONTINUE_FRT12)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let date_groupings = physical[criteria_count..]
+                    .iter()
+                    .map(|(header, payload)| {
+                        Ok(AutoFilter12Continuation {
+                            header: *header,
+                            value: parse_sdk(payload, 0, CONTINUE_FRT12)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let BiffRecordData::AutoFilter12(value) = &mut records[index].data else {
+                    unreachable!()
+                };
+                value.criteria = criteria;
+                value.date_groupings = date_groupings;
+                records.drain(index + 1..end);
+            }
+        }
+
+        if let BiffRecordData::CrErr(value) = &records[index].data {
+            let mut remaining = usize::from(value.declared_character_count).saturating_sub(
+                value
+                    .chunks
+                    .iter()
+                    .map(ContinuedStringChunk::character_count)
+                    .sum(),
+            );
+            let mut consumed = 0usize;
+            let mut chunks = Vec::new();
+            while remaining != 0 {
+                let payload = continue_payload(records, index + 1 + consumed, "CrErr")?;
+                let flags = *payload
+                    .first()
+                    .ok_or_else(|| Error::invalid(0, "CrErr Continue is empty"))?;
+                let (chunk, count) = ContinuedStringChunk::parse(payload, 1, flags, remaining)?;
+                if !chunk.trailing.is_empty() {
+                    return Err(Error::invalid(0, "CrErr Continue has trailing bytes"));
+                }
+                chunks.push(chunk);
+                remaining = remaining.saturating_sub(count);
+                consumed += 1;
+            }
+            let BiffRecordData::CrErr(value) = &mut records[index].data else {
+                unreachable!()
+            };
+            value.chunks.extend(chunks);
+            if consumed != 0 {
+                records.drain(index + 1..index + 1 + consumed);
+            }
+        }
         let sort_condition_count = match &records[index].data {
             BiffRecordData::SortData(value) if value.conditions.is_empty() => {
                 usize::try_from(value.condition_count)
@@ -25608,6 +26569,26 @@ fn stitch_continued_records(records: &mut Vec<BiffRecord>, limits: Limits) -> Re
             };
             value.conditions = conditions;
             records.drain(index + 1..index + 1 + sort_condition_count);
+        }
+        if matches!(records[index].data, BiffRecordData::BigName(_)) {
+            let continuation_count = records[index + 1..]
+                .iter()
+                .take_while(|record| matches!(record.data, BiffRecordData::ContinueBigName(_)))
+                .count();
+            let continuations = records[index + 1..index + 1 + continuation_count]
+                .iter()
+                .map(|record| match &record.data {
+                    BiffRecordData::ContinueBigName(value) => value.clone(),
+                    _ => unreachable!("continuation_count only includes ContinueBigName"),
+                })
+                .collect::<Vec<_>>();
+            let BiffRecordData::BigName(value) = &mut records[index].data else {
+                unreachable!("BigName match came from this record")
+            };
+            value.stitch_continuations(&continuations, limits)?;
+            if continuation_count != 0 {
+                records.drain(index + 1..index + 1 + continuation_count);
+            }
         }
         let unknown = match &records[index].data {
             BiffRecordData::Unknown {
@@ -26285,6 +27266,213 @@ fn validate_function_groups_and_table_styles(records: &[BiffRecord]) -> Result<(
     Ok(())
 }
 
+fn validate_remaining_static_record_context(records: &[BiffRecord]) -> Result<()> {
+    let mut document_type = None;
+    let mut chart_object_depth = 0usize;
+    for (index, record) in records.iter().enumerate() {
+        let position = u64::from(record.offset);
+        if let BiffRecordData::Bof(value) = &record.data {
+            document_type = Some(value.document_type);
+            chart_object_depth = 0;
+        }
+        if matches!(record.data, BiffRecordData::ChartStartObject(_)) {
+            chart_object_depth = chart_object_depth
+                .checked_add(1)
+                .ok_or_else(|| Error::Limit("chart object nesting overflow".into()))?;
+        }
+        match &record.data {
+            BiffRecordData::DocRoute(value) if document_type == Some(0x0005) => {
+                value.validate(position)?
+            }
+            BiffRecordData::DocRoute(_) => {
+                return Err(Error::invalid(
+                    position,
+                    "DocRoute is outside workbook globals",
+                ));
+            }
+            BiffRecordData::RecipName(_) => {
+                return Err(Error::invalid(
+                    position,
+                    "RecipName is not aggregated into DocRoute",
+                ));
+            }
+            BiffRecordData::Qsir(value) if document_type == Some(0x0010) => {
+                value.validate(position)?
+            }
+            BiffRecordData::Qsir(_) => {
+                return Err(Error::invalid(
+                    position,
+                    "Qsir is outside a worksheet substream",
+                ));
+            }
+            BiffRecordData::Qsif(_) => {
+                return Err(Error::invalid(position, "Qsif is not aggregated into Qsir"));
+            }
+            BiffRecordData::CrErr(value)
+                if document_type == Some(0x0005)
+                    && value
+                        .chunks
+                        .iter()
+                        .map(ContinuedStringChunk::character_count)
+                        .sum::<usize>()
+                        == usize::from(value.declared_character_count) => {}
+            BiffRecordData::CrErr(_) if document_type != Some(0x0005) => {
+                return Err(Error::invalid(
+                    position,
+                    "CrErr is outside workbook globals",
+                ));
+            }
+            BiffRecordData::CrErr(value)
+                if value
+                    .chunks
+                    .iter()
+                    .map(ContinuedStringChunk::character_count)
+                    .sum::<usize>()
+                    != usize::from(value.declared_character_count) =>
+            {
+                return Err(Error::invalid(position, "CrErr string is incomplete"));
+            }
+            BiffRecordData::AutoFilter12(value)
+                if matches!(document_type, Some(0x0010 | 0x0040)) =>
+            {
+                value.validate(position)?;
+                if value.user_view_guid != [0; 16]
+                    && records[..index]
+                        .iter()
+                        .rev()
+                        .take_while(|record| !matches!(record.data, BiffRecordData::Bof(_)))
+                        .find_map(|record| match &record.data {
+                            BiffRecordData::UserSViewBegin(begin) => Some(begin.guid),
+                            _ => None,
+                        })
+                        != Some(value.user_view_guid)
+                {
+                    return Err(Error::invalid(
+                        position,
+                        "AutoFilter12 user-view GUID has no matching preceding UserSViewBegin",
+                    ));
+                }
+            }
+            BiffRecordData::AutoFilter12(_) => {
+                return Err(Error::invalid(
+                    position,
+                    "AutoFilter12 is outside a worksheet or macro-sheet substream",
+                ));
+            }
+            BiffRecordData::FrtWrapper(_)
+                if document_type != Some(0x0020) || chart_object_depth == 0 =>
+            {
+                return Err(Error::invalid(
+                    position,
+                    "FrtWrapper is outside a StartObject/EndObject collection",
+                ));
+            }
+            BiffRecordData::SxViewLink(_) if document_type != Some(0x0020) => {
+                return Err(Error::invalid(
+                    position,
+                    "SXViewLink is outside a chart-sheet substream",
+                ));
+            }
+            BiffRecordData::WebPub(_)
+                if !matches!(document_type, Some(0x0005 | 0x0010 | 0x0020)) =>
+            {
+                return Err(Error::invalid(
+                    position,
+                    "WebPub is outside an allowed substream",
+                ));
+            }
+            BiffRecordData::BigName(value) => value.validate_complete(position)?,
+            BiffRecordData::ContinueBigName(_) => {
+                return Err(Error::invalid(
+                    position,
+                    "ContinueBigName is not aggregated into a preceding BigName",
+                ));
+            }
+            BiffRecordData::Lrng(value) => value.validate(position)?,
+            BiffRecordData::ExtString(value) => value.validate(position)?,
+            BiffRecordData::OleDbConn(value) => {
+                value.validate(position)?;
+                let count = usize::from(value.declared_string_count);
+                let end = index
+                    .checked_add(1 + count)
+                    .ok_or_else(|| Error::Limit("OleDbConn string range overflow".into()))?;
+                if end > records.len()
+                    || records[index + 1..end]
+                        .iter()
+                        .any(|record| !matches!(record.data, BiffRecordData::ExtString(_)))
+                {
+                    return Err(Error::invalid(
+                        position,
+                        "OleDbConn is not followed by its declared ExtString records",
+                    ));
+                }
+            }
+            BiffRecordData::FrtFontList(value) => {
+                value.validate(position)?;
+                let Some(BiffRecord {
+                    data: BiffRecordData::ChartStartObject(start),
+                    ..
+                }) = records.get(index + 1)
+                else {
+                    return Err(Error::invalid(
+                        position,
+                        "FrtFontList is not followed by StartObject",
+                    ));
+                };
+                if start.object_instance1 != u16::from(value.excel_version) {
+                    return Err(Error::invalid(
+                        position,
+                        "FrtFontList version does not match StartObject",
+                    ));
+                }
+            }
+            BiffRecordData::DataLabExt(value) => value.validate(position)?,
+            BiffRecordData::Mdb(value) => {
+                validate_mdb(value, position)?;
+                let substream_start = records[..=index]
+                    .iter()
+                    .rposition(|record| {
+                        matches!(
+                            record.data,
+                            BiffRecordData::Bof(_) | BiffRecordData::LegacyBof { .. }
+                        )
+                    })
+                    .unwrap_or(0);
+                let substream_end = records[index + 1..]
+                    .iter()
+                    .position(|record| {
+                        matches!(
+                            record.data,
+                            BiffRecordData::Bof(_) | BiffRecordData::LegacyBof { .. }
+                        )
+                    })
+                    .map_or(records.len(), |relative| index + 1 + relative);
+                let metadata_type_count = records[substream_start..substream_end]
+                    .iter()
+                    .filter(|record| matches!(record.data, BiffRecordData::MdtInfo(_)))
+                    .count();
+                if value.entries.iter().any(|entry| {
+                    usize::try_from(entry.metadata_type.index)
+                        .ok()
+                        .is_none_or(|metadata_type| {
+                            metadata_type == 0 || metadata_type > metadata_type_count
+                        })
+                }) {
+                    return Err(Error::invalid(
+                        position,
+                        "MDB references an MDTInfo outside its globals collection",
+                    ));
+                }
+            }
+            _ => {}
+        }
+        if matches!(record.data, BiffRecordData::ChartEndObject(_)) {
+            chart_object_depth = chart_object_depth.saturating_sub(1);
+        }
+    }
+    Ok(())
+}
+
 impl BoundSheet8Record {
     fn from_bytes(bytes: &[u8], offset: usize) -> Result<Self> {
         let mut cursor = 0usize;
@@ -26483,11 +27671,31 @@ fn decode_record(
                     offset,
                     record_type,
                 )?)),
+                DOC_ROUTE => Some(BiffRecordData::DocRoute(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
                 RECIP_NAME => {
                     let value: RecipNameRecord = parse_sdk(payload, offset, record_type)?;
                     value.validate()?;
                     Some(BiffRecordData::RecipName(value))
                 }
+                BIG_NAME => Some(BiffRecordData::BigName(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                CONTINUE_BIG_NAME => Some(BiffRecordData::ContinueBigName(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                L_RNG => Some(BiffRecordData::Lrng(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
                 LEL => {
                     let value: LelRecord = parse_sdk(payload, offset, record_type)?;
                     value.validate()?;
@@ -26514,6 +27722,31 @@ fn decode_record(
                     record_type,
                 )?)),
                 DCONN => Some(BiffRecordData::DConn(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                EXT_STRING => Some(BiffRecordData::ExtString(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                OLE_DB_CONN => {
+                    let value: OleDbConnRecord = parse_sdk(payload, offset, record_type)?;
+                    value.validate(offset as u64)?;
+                    Some(BiffRecordData::OleDbConn(value))
+                }
+                WEB_PUB => Some(BiffRecordData::WebPub(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                QSIR => Some(BiffRecordData::Qsir(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                QSIF => Some(BiffRecordData::Qsif(parse_sdk(
                     payload,
                     offset,
                     record_type,
@@ -26604,6 +27837,11 @@ fn decode_record(
                     record_type,
                 )?)),
                 AUTO_FILTER => Some(BiffRecordData::AutoFilter(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                AUTO_FILTER12 => Some(BiffRecordData::AutoFilter12(parse_sdk(
                     payload,
                     offset,
                     record_type,
@@ -26995,6 +28233,11 @@ fn decode_record(
                     offset,
                     record_type,
                 )?)),
+                MDB => Some(BiffRecordData::Mdb(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
                 MDX_STR => Some(BiffRecordData::MdxStr(parse_sdk(
                     payload,
                     offset,
@@ -27316,11 +28559,36 @@ fn decode_record(
                     offset,
                     record_type,
                 )?)),
+                FRT_WRAPPER => Some(BiffRecordData::FrtWrapper(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                CR_ERR => Some(BiffRecordData::CrErr(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
+                SX_VIEW_LINK => Some(BiffRecordData::SxViewLink(parse_sdk(
+                    payload,
+                    offset,
+                    record_type,
+                )?)),
                 CHART_FRT_INFO => Some(BiffRecordData::ChartFrtInfo(parse_sdk(
                     payload,
                     offset,
                     record_type,
                 )?)),
+                FRT_FONT_LIST => {
+                    let value: FrtFontListRecord = parse_sdk(payload, offset, record_type)?;
+                    value.validate(offset as u64)?;
+                    Some(BiffRecordData::FrtFontList(value))
+                }
+                DATA_LAB_EXT => {
+                    let value: DataLabExtRecord = parse_sdk(payload, offset, record_type)?;
+                    value.validate(offset as u64)?;
+                    Some(BiffRecordData::DataLabExt(value))
+                }
                 PIVOT_CHART_BITS => Some(BiffRecordData::PivotChartBits(parse_sdk(
                     payload,
                     offset,
@@ -28159,6 +29427,96 @@ mod tests {
     }
 
     #[test]
+    fn property_bag_store_uses_bounded_derived_layout_and_spec_validation() {
+        let factoid = FactoidType {
+            id: 7,
+            uri: PbString {
+                characters: PbStringCharacters::Ansi(b"urn\0".to_vec()),
+            },
+            tag: PbString {
+                characters: PbStringCharacters::Unicode(vec![0x6807, 0]),
+            },
+            download_url: PbString {
+                characters: PbStringCharacters::Ansi(vec![0]),
+            },
+        };
+        let value = PropertyBagStore {
+            factoid_types: vec![factoid],
+            cb_hdr: 0x000c,
+            version: 0x0100,
+            reserved_factoid_count: 9,
+            string_table: vec![PbString {
+                characters: PbStringCharacters::Ansi(b"k\0".to_vec()),
+            }],
+        };
+
+        let bytes = encode_sdk(&value).unwrap();
+        assert_eq!(value.sdk_size(), bytes.len() as u64);
+        assert_eq!(bytes.len(), 43);
+        assert_eq!(&bytes[..8], &[1, 0, 0, 0, 19, 0, 0, 0]);
+        assert_eq!(&bytes[27..39], &[0x0c, 0, 0, 1, 9, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(
+            parse_sdk::<PropertyBagStore>(&bytes, 0, FEAT_HDR).unwrap(),
+            value
+        );
+        assert_eq!(
+            encode_sdk(&parse_sdk::<PropertyBagStore>(&bytes, 0, FEAT_HDR).unwrap()).unwrap(),
+            bytes
+        );
+
+        let unterminated = PbString {
+            characters: PbStringCharacters::Ansi(b"x".to_vec()),
+        };
+        assert!(encode_sdk(&unterminated).is_err());
+        assert!(parse_sdk::<PbString>(&[1, 0x80, b'x'], 0, FEAT_HDR).is_err());
+        let embedded_nul = PbString {
+            characters: PbStringCharacters::Ansi(b"a\0b\0".to_vec()),
+        };
+        assert!(encode_sdk(&embedded_nul).is_err());
+
+        assert!(parse_sdk::<PropertyBagStore>(&u32::MAX.to_le_bytes(), 0, FEAT_HDR).is_err());
+
+        let mut invalid_id = bytes.clone();
+        invalid_id[8..12].copy_from_slice(&0x1_0000u32.to_le_bytes());
+        assert!(parse_sdk::<PropertyBagStore>(&invalid_id, 0, FEAT_HDR).is_err());
+
+        let mut short_factoid = bytes.clone();
+        short_factoid[4..8].copy_from_slice(&18u32.to_le_bytes());
+        assert!(parse_sdk::<PropertyBagStore>(&short_factoid, 0, FEAT_HDR).is_err());
+        let mut long_factoid = bytes.clone();
+        long_factoid[4..8].copy_from_slice(&20u32.to_le_bytes());
+        assert!(parse_sdk::<PropertyBagStore>(&long_factoid, 0, FEAT_HDR).is_err());
+
+        let invalid_header = PropertyBagStore { cb_hdr: 0, ..value };
+        assert!(encode_sdk(&invalid_header).is_err());
+    }
+
+    #[test]
+    fn cf_filter_derives_its_size_and_enforces_ms_xls_limits() {
+        let value = CfFilter {
+            reserved: 0,
+            flags: CfFilterFlags::TOP | CfFilterFlags::PERCENT,
+            parameter: 100,
+        };
+        let bytes = encode_sdk(&value).unwrap();
+        assert_eq!(bytes, [4, 0, 0, 3, 100, 0]);
+        assert_eq!(value.sdk_size(), 6);
+        assert_eq!(parse_sdk::<CfFilter>(&bytes, 0, CF12).unwrap(), value);
+
+        for bytes in [
+            [3, 0, 0, 3, 100, 0].as_slice(),
+            [5, 0, 0, 3, 100, 0].as_slice(),
+            [5, 0, 0, 3, 100, 0, 0].as_slice(),
+            [4, 0, 1, 3, 100, 0].as_slice(),
+            [4, 0, 0, 0x80, 100, 0].as_slice(),
+            [4, 0, 0, 2, 101, 0].as_slice(),
+            [4, 0, 0, 0, 0xe9, 3].as_slice(),
+        ] {
+            assert!(parse_sdk::<CfFilter>(bytes, 0, CF12).is_err());
+        }
+    }
+
+    #[test]
     fn additional_short_spec_records_are_static_and_exact() {
         let cases = [
             (
@@ -28236,6 +29594,20 @@ mod tests {
                     },
                 }),
             ),
+            (
+                PALETTE,
+                vec![2, 0, 0x33, 0x22, 0x11, 0, 0x66, 0x55, 0x44, 0],
+                BiffRecordData::Palette(PaletteRecord {
+                    colors: vec![0x0011_2233, 0x0044_5566],
+                }),
+            ),
+            (
+                CHART_SERIES_LIST,
+                vec![3, 0, 1, 0, 3, 0, 5, 0],
+                BiffRecordData::ChartSeriesList(ChartSeriesListRecord {
+                    series_numbers: vec![1, 3, 5],
+                }),
+            ),
         ];
 
         for (record_type, payload, expected) in cases {
@@ -28245,6 +29617,273 @@ mod tests {
         }
 
         assert!(decode_record(SX_NIL, &[0], false, true, 0).is_err());
+        assert!(decode_record(PALETTE, &[2, 0, 1, 2, 3, 4], false, true, 0).is_err());
+        assert!(decode_record(CHART_SERIES_LIST, &[2, 0, 1, 0], false, true, 0).is_err());
+    }
+
+    #[test]
+    fn derived_query_and_pivot_selection_layouts_are_exact() {
+        let query = BiffRecordData::Qsi(QsiRecord {
+            flags: QsiFlags::TITLES | QsiFlags::ASYNC | QsiFlags::SAVE_DATA,
+            auto_format_index: 7,
+            formatting_flags: QsiFormattingFlags::NUMBER | QsiFormattingFlags::BORDER,
+            reserved: 0,
+            name: xl_ascii(b"Query"),
+            unused: 0x55aa,
+        });
+        let (record_type, payload) = query.encode().unwrap();
+        assert_eq!(record_type, QSI);
+        assert_eq!(
+            decode_record(record_type, &payload, false, true, 0).unwrap(),
+            query
+        );
+
+        let selection = SxSelectRecord {
+            reserved1: 0,
+            pane: PaneType::TopRight,
+            reserved2: 0,
+            axis: SxAxis::ROW | SxAxis::PAGE,
+            active_dimension: 1,
+            line_start: 2,
+            active_line: 3,
+            minimum_line: 4,
+            maximum_line: 5,
+            clicked_row: 6,
+            clicked_column: 7,
+            previous_clicked_row: 8,
+            previous_clicked_column: 9,
+            options: SxSelectOptions {
+                click_count: 3,
+                label_only: true,
+                data_only: false,
+                toggle_data_header: true,
+                selection_click: true,
+                extendable: false,
+                unused: 0x2a,
+            },
+        };
+        let mut expected = vec![0, 0, 1, 0, 5, 0];
+        for value in 1u16..=9 {
+            expected.extend_from_slice(&value.to_le_bytes());
+        }
+        expected.extend_from_slice(&0xa9a3u16.to_le_bytes());
+        assert_eq!(encode_sdk(&selection).unwrap(), expected);
+        assert_eq!(
+            parse_sdk::<SxSelectRecord>(&expected, 0, SX_SELECT).unwrap(),
+            selection
+        );
+
+        let segmented = SxAddlString {
+            total_character_count: 2,
+            reserved: 0x1234,
+            segment: xl_ascii(b"ab"),
+        };
+        let bytes = encode_sdk(&segmented).unwrap();
+        assert_eq!(bytes, vec![2, 0, 0, 0, 0x34, 0x12, 2, 0, 0, b'a', b'b']);
+        assert_eq!(
+            parse_sdk::<SxAddlString>(&bytes, 0, SX_ADDL).unwrap(),
+            segmented
+        );
+
+        let mut overflowing = selection;
+        overflowing.options.click_count = 32;
+        assert!(encode_sdk(&overflowing).is_err());
+        let mut oversized = segmented;
+        oversized.total_character_count = u32::from(u16::MAX) + 1;
+        assert!(encode_sdk(&oversized).is_err());
+    }
+
+    #[test]
+    fn remaining_formal_records_are_static_aggregated_and_context_checked() {
+        let header = |record_type| FrtHeader {
+            record_type,
+            flags: FrtFlags::empty(),
+            reserved: 0,
+        };
+        let old_header = |record_type| FrtHeaderOld {
+            record_type,
+            flags: FrtFlags::empty(),
+        };
+        let row_range = Ref8U {
+            first_row: 1,
+            last_row: 3,
+            first_column: 0,
+            last_column: 2,
+        };
+        let column_range = Ref8U {
+            first_row: 0,
+            last_row: 10,
+            first_column: 4,
+            last_column: 4,
+        };
+        let cases = vec![
+            BiffRecordData::Lrng(LrngRecord {
+                declared_row_range_count: 1,
+                row_ranges: vec![row_range],
+                declared_column_range_count: 1,
+                column_ranges: vec![column_range],
+            }),
+            BiffRecordData::ExtString(ExtStringRecord {
+                header: old_header(EXT_STRING),
+                string: xl_ascii(b"db"),
+                unused: vec![0xaa; 3],
+            }),
+            BiffRecordData::OleDbConn(OleDbConnRecord {
+                header: old_header(OLE_DB_CONN),
+                flags: OleDbConnFlags::PASSWORD_STRIPPED,
+                declared_string_count: 1,
+                reserved: 0,
+            }),
+            BiffRecordData::FrtFontList(FrtFontListRecord {
+                header: old_header(FRT_FONT_LIST),
+                excel_version: 0x0a,
+                reserved: 0,
+                declared_font_count: 1,
+                fonts: vec![FontInfo {
+                    flags: FontInfoFlags::SCALED,
+                    font_index: 2,
+                }],
+            }),
+            BiffRecordData::DataLabExt(DataLabExtRecord {
+                header: header(DATA_LAB_EXT),
+            }),
+            BiffRecordData::Mdb(MdbRecord {
+                header: header(MDB),
+                entries: vec![MDir {
+                    metadata_type: MdtInfoIndex { index: 1 },
+                    metadata_record_index: 7,
+                }],
+            }),
+        ];
+        for expected in cases {
+            let (record_type, payload) = expected.encode().unwrap();
+            let decoded = decode_record(record_type, &payload, false, true, 0).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(decoded.encode().unwrap(), (record_type, payload));
+        }
+
+        let bof = BiffRecordData::Bof(BofRecord {
+            version: 0x0600,
+            document_type: 0x0010,
+            build_identifier: 0x1234,
+            build_year: 0x07cc,
+            history_flags: 0,
+            lowest_version: 6,
+        });
+        let big_name = BigNameRecord {
+            reserved: 0x1000,
+            declared_data_byte_count: 5,
+            declared_name_byte_count: 4,
+            name: b"kind".to_vec(),
+            data: vec![1, 2, 3, 4, 5],
+            physical_segments: vec![
+                BigNameSegmentLayout { data_byte_count: 2 },
+                BigNameSegmentLayout { data_byte_count: 3 },
+            ],
+        };
+        let mut bytes = Vec::new();
+        for encoded in bof
+            .encode_physical()
+            .unwrap()
+            .into_iter()
+            .chain(
+                BiffRecordData::BigName(big_name.clone())
+                    .encode_physical()
+                    .unwrap(),
+            )
+            .chain(BiffRecordData::Eof.encode_physical().unwrap())
+        {
+            bytes.extend_from_slice(&encoded.record_type.to_le_bytes());
+            bytes.extend_from_slice(&(encoded.payload.len() as u16).to_le_bytes());
+            bytes.extend_from_slice(&encoded.payload);
+        }
+        let stream = BiffStream::from_bytes(&bytes).unwrap();
+        assert_eq!(stream.records.len(), 3);
+        assert_eq!(stream.records[1].data, BiffRecordData::BigName(big_name));
+        assert_eq!(stream.to_bytes().unwrap(), bytes);
+
+        let context_records = vec![
+            BiffRecord {
+                offset: 0,
+                data: BiffRecordData::Bof(BofRecord {
+                    version: 0x0600,
+                    document_type: 0x0005,
+                    build_identifier: 0,
+                    build_year: 0,
+                    history_flags: 0,
+                    lowest_version: 6,
+                }),
+            },
+            BiffRecord {
+                offset: 20,
+                data: BiffRecordData::MdtInfo(MdtInfoRecord {
+                    header: header(MDT_INFO),
+                    flags: MdtInfoFlags::COPY,
+                    name: LpWideString {
+                        character_count: 1,
+                        characters: vec![b'm' as u16],
+                    },
+                }),
+            },
+            BiffRecord {
+                offset: 40,
+                data: BiffRecordData::Mdb(MdbRecord {
+                    header: header(MDB),
+                    entries: vec![MDir {
+                        metadata_type: MdtInfoIndex { index: 1 },
+                        metadata_record_index: 0,
+                    }],
+                }),
+            },
+            BiffRecord {
+                offset: 60,
+                data: BiffRecordData::OleDbConn(OleDbConnRecord {
+                    header: old_header(OLE_DB_CONN),
+                    flags: OleDbConnFlags::empty(),
+                    declared_string_count: 1,
+                    reserved: 0,
+                }),
+            },
+            BiffRecord {
+                offset: 72,
+                data: BiffRecordData::ExtString(ExtStringRecord {
+                    header: old_header(EXT_STRING),
+                    string: xl_ascii(b"db"),
+                    unused: vec![0; 3],
+                }),
+            },
+            BiffRecord {
+                offset: 88,
+                data: BiffRecordData::FrtFontList(FrtFontListRecord {
+                    header: old_header(FRT_FONT_LIST),
+                    excel_version: 0x09,
+                    reserved: 0,
+                    declared_font_count: 0,
+                    fonts: Vec::new(),
+                }),
+            },
+            BiffRecord {
+                offset: 96,
+                data: BiffRecordData::ChartStartObject(ChartStartObjectRecord {
+                    header: old_header(CHART_START_OBJECT),
+                    object_kind: 0,
+                    object_context: 0,
+                    object_instance1: 0x09,
+                    object_instance2: 0,
+                }),
+            },
+        ];
+        validate_remaining_static_record_context(&context_records).unwrap();
+
+        let mut invalid_context = context_records.clone();
+        invalid_context[6].data = BiffRecordData::Eof;
+        assert!(validate_remaining_static_record_context(&invalid_context).is_err());
+        let mut invalid_metadata = context_records;
+        let BiffRecordData::Mdb(value) = &mut invalid_metadata[2].data else {
+            unreachable!()
+        };
+        value.entries[0].metadata_type.index = 2;
+        assert!(validate_remaining_static_record_context(&invalid_metadata).is_err());
     }
 
     #[test]
@@ -29631,6 +31270,24 @@ mod tests {
             strings: Vec::new(),
         });
         assert!(invalid_tuple.encode().is_err());
+
+        let negative_count = MdxTupleRecord {
+            header: header(MDX_TUPLE),
+            connection_name: index(0),
+            source_function: MdxFunction::CubeMember,
+            declared_string_count: -1,
+            strings: Vec::new(),
+        };
+        assert!(encode_sdk(&negative_count).is_err());
+
+        let negative_index = MdxPropRecord {
+            header: header(MDX_PROP),
+            connection_name: index(-1),
+            source_function: MdxFunction::CubeMemberProperty,
+            member_name: index(0),
+            property_name: index(0),
+        };
+        assert!(encode_sdk(&negative_index).is_err());
     }
 
     #[test]
@@ -30526,9 +32183,521 @@ mod tests {
     }
 
     #[test]
+    fn biff_relayout_updates_sheet_and_index_file_pointers_after_growth() {
+        let mut stream = BiffStream {
+            records: vec![
+                BiffRecord {
+                    offset: 0,
+                    data: BiffRecordData::Bof(BofRecord {
+                        version: 0x0600,
+                        document_type: 0x0005,
+                        build_identifier: 0,
+                        build_year: 0x07cc,
+                        history_flags: 1,
+                        lowest_version: 6,
+                    }),
+                },
+                BiffRecord {
+                    offset: 20,
+                    data: BiffRecordData::BoundSheet8(BoundSheet8Record {
+                        sheet_bof_offset: 37,
+                        state: 0,
+                        sheet_type: 0,
+                        name: ShortXlUnicodeString {
+                            flags: 0,
+                            characters: XlStringCharacters::Compressed(b"S".to_vec()),
+                        },
+                    }),
+                },
+                BiffRecord {
+                    offset: 33,
+                    data: BiffRecordData::Eof,
+                },
+                BiffRecord {
+                    offset: 37,
+                    data: BiffRecordData::Bof(BofRecord {
+                        version: 0x0600,
+                        document_type: 0x0010,
+                        build_identifier: 0,
+                        build_year: 0x07cc,
+                        history_flags: 1,
+                        lowest_version: 6,
+                    }),
+                },
+                BiffRecord {
+                    offset: 57,
+                    data: BiffRecordData::Index(IndexRecord {
+                        reserved1: 0,
+                        first_row: 0,
+                        last_row_exclusive: 0,
+                        def_col_width_offset: 77,
+                        dbcell_offsets: Vec::new(),
+                    }),
+                },
+                BiffRecord {
+                    offset: 77,
+                    data: BiffRecordData::FixedU16 {
+                        kind: FixedU16RecordKind::DefaultColWidth,
+                        value: 8,
+                    },
+                },
+                BiffRecord {
+                    offset: 83,
+                    data: BiffRecordData::Eof,
+                },
+            ],
+            trailing_padding: Vec::new(),
+        };
+        let BiffRecordData::BoundSheet8(sheet) = &mut stream.records[1].data else {
+            unreachable!()
+        };
+        sheet.name.characters = XlStringCharacters::Compressed(b"Sheet1".to_vec());
+
+        let mut invalid = stream.clone();
+        let BiffRecordData::BoundSheet8(sheet) = &mut invalid.records[1].data else {
+            unreachable!()
+        };
+        sheet.sheet_bof_offset = 999;
+        let unchanged_after_failure = invalid.clone();
+        assert!(invalid.relayout().is_err());
+        assert_eq!(invalid, unchanged_after_failure);
+
+        let bytes = stream.to_bytes().unwrap();
+        let parsed = BiffStream::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.records[3].offset, 42);
+        assert!(matches!(
+            &parsed.records[1].data,
+            BiffRecordData::BoundSheet8(BoundSheet8Record {
+                sheet_bof_offset: 42,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &parsed.records[4].data,
+            BiffRecordData::Index(IndexRecord {
+                def_col_width_offset: 82,
+                ..
+            })
+        ));
+        assert_eq!(parsed.records[5].offset, 82);
+    }
+
+    #[test]
+    fn biff_relayout_updates_dbcell_relative_offsets_after_insertion() {
+        let mut stream = BiffStream {
+            records: vec![
+                BiffRecord {
+                    offset: 0,
+                    data: BiffRecordData::Unknown {
+                        record_type: ROW,
+                        payload: vec![0; 16],
+                    },
+                },
+                BiffRecord {
+                    offset: 999,
+                    data: BiffRecordData::Unknown {
+                        record_type: 0x1234,
+                        payload: vec![0; 2],
+                    },
+                },
+                BiffRecord {
+                    offset: 20,
+                    data: BiffRecordData::Unknown {
+                        record_type: NUMBER,
+                        payload: vec![0; 14],
+                    },
+                },
+                BiffRecord {
+                    offset: 38,
+                    data: BiffRecordData::DbCell(DbCellRecord {
+                        row_offset: 38,
+                        cell_offsets: vec![0],
+                    }),
+                },
+            ],
+            trailing_padding: Vec::new(),
+        };
+
+        stream.relayout().unwrap();
+        assert_eq!(
+            stream
+                .records
+                .iter()
+                .map(|record| record.offset)
+                .collect::<Vec<_>>(),
+            [0, 20, 26, 44]
+        );
+        assert!(matches!(
+            &stream.records[3].data,
+            BiffRecordData::DbCell(DbCellRecord {
+                row_offset: 44,
+                cell_offsets,
+            }) if cell_offsets == &[6]
+        ));
+    }
+
+    #[test]
     fn truncated_and_oversized_records_are_rejected() {
         assert!(BiffStream::from_bytes(&[9, 8, 1]).is_err());
         assert!(BiffStream::from_bytes(&[1, 0, 0xff, 0xff]).is_err());
+    }
+
+    #[test]
+    fn mso_drawing_selection_uses_the_shared_office_art_header_layout() {
+        let selection = MsoDrawingSelectionRecord {
+            header: OfficeArtRecordHeader {
+                version: 0,
+                instance: 0,
+                record_type: 0xf119,
+                declared_length: 0x1122_3344,
+            },
+            shape_count_unused: 0xaabb_ccdd,
+            mode: MsoDrawingSelectionMode::Crop,
+            focus_shape_id: 0x0102_0304,
+            selected_shape_ids: vec![0x1122_3344, 0x5566_7788],
+        };
+        let bytes = encode_sdk(&selection).unwrap();
+        assert_eq!(
+            bytes,
+            [
+                0, 0, 0x19, 0xf1, 0x44, 0x33, 0x22, 0x11, // OfficeArtFDGSL rh
+                0xdd, 0xcc, 0xbb, 0xaa, // cpsp
+                7, 0, 0, 0, // dgslk
+                4, 3, 2, 1, // spidFocus
+                0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55,
+            ]
+        );
+        assert_eq!(
+            parse_sdk::<MsoDrawingSelectionRecord>(&bytes, 0, MSO_DRAWING_SELECTION).unwrap(),
+            selection
+        );
+        assert!(
+            parse_sdk::<MsoDrawingSelectionRecord>(
+                &bytes[..bytes.len() - 1],
+                0,
+                MSO_DRAWING_SELECTION,
+            )
+            .is_err()
+        );
+        assert!(
+            encode_sdk(&MsoDrawingSelectionRecord {
+                header: OfficeArtRecordHeader {
+                    record_type: 0xf118,
+                    ..selection.header
+                },
+                ..selection
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn derived_remaining_arrays_are_exact_and_reject_partial_elements() {
+        let dbcell = DbCellRecord {
+            row_offset: 0x1122_3344,
+            cell_offsets: vec![0x5566, 0x7788],
+        };
+        let dbcell_bytes = encode_sdk(&dbcell).unwrap();
+        assert_eq!(
+            dbcell_bytes,
+            [0x44, 0x33, 0x22, 0x11, 0x66, 0x55, 0x88, 0x77]
+        );
+        assert_eq!(
+            parse_sdk::<DbCellRecord>(&dbcell_bytes, 0, DB_CELL).unwrap(),
+            dbcell
+        );
+        assert!(parse_sdk::<DbCellRecord>(&dbcell_bytes[..7], 0, DB_CELL).is_err());
+
+        let sxivd = SxIvdRecord {
+            field_indices: vec![-1, 0x1234],
+        };
+        let sxivd_bytes = encode_sdk(&sxivd).unwrap();
+        assert_eq!(sxivd_bytes, [0xff, 0xff, 0x34, 0x12]);
+        assert_eq!(
+            parse_sdk::<SxIvdRecord>(&sxivd_bytes, 0, SX_IVD).unwrap(),
+            sxivd
+        );
+        assert!(parse_sdk::<SxIvdRecord>(&sxivd_bytes[..3], 0, SX_IVD).is_err());
+
+        let index = IndexRecord {
+            reserved1: 0,
+            first_row: 1,
+            last_row_exclusive: 2,
+            def_col_width_offset: 3,
+            dbcell_offsets: vec![4, 5],
+        };
+        let index_bytes = encode_sdk(&index).unwrap();
+        assert_eq!(
+            parse_sdk::<IndexRecord>(&index_bytes, 0, INDEX).unwrap(),
+            index
+        );
+        assert!(parse_sdk::<IndexRecord>(&index_bytes[..23], 0, INDEX).is_err());
+
+        let tooltip = HyperlinkTooltipRecord {
+            header: FrtRefHeaderNoGrbit {
+                record_type: HLINK_TOOLTIP,
+                range: CellRange {
+                    first_row: 1,
+                    last_row: 2,
+                    first_column: 3,
+                    last_column: 4,
+                },
+            },
+            tooltip: vec![b'A' as u16, 0],
+        };
+        let tooltip_bytes = encode_sdk(&tooltip).unwrap();
+        assert_eq!(
+            parse_sdk::<HyperlinkTooltipRecord>(&tooltip_bytes, 0, HLINK_TOOLTIP).unwrap(),
+            tooltip
+        );
+        assert!(
+            parse_sdk::<HyperlinkTooltipRecord>(
+                &tooltip_bytes[..tooltip_bytes.len() - 1],
+                0,
+                HLINK_TOOLTIP,
+            )
+            .is_err()
+        );
+
+        let page_items = SxPiRecord {
+            items: vec![SxPiItem {
+                field_index: 1,
+                item_index: 0x7ffd,
+                object_id: 3,
+            }],
+        };
+        let page_item_bytes = encode_sdk(&page_items).unwrap();
+        assert_eq!(page_item_bytes, [1, 0, 0xfd, 0x7f, 3, 0]);
+        assert_eq!(
+            parse_sdk::<SxPiRecord>(&page_item_bytes, 0, SX_PI).unwrap(),
+            page_items
+        );
+        assert!(parse_sdk::<SxPiRecord>(&page_item_bytes[..5], 0, SX_PI).is_err());
+
+        let ext_sst = ExtSstRecord {
+            strings_per_bucket: 8,
+            buckets: vec![IsstInf {
+                stream_offset: 0x1122_3344,
+                record_offset: 0x5566,
+                reserved: 0,
+            }],
+        };
+        let ext_sst_bytes = encode_sdk(&ext_sst).unwrap();
+        assert_eq!(
+            ext_sst_bytes,
+            [8, 0, 0x44, 0x33, 0x22, 0x11, 0x66, 0x55, 0, 0]
+        );
+        assert_eq!(
+            parse_sdk::<ExtSstRecord>(&ext_sst_bytes, 0, EXT_SST).unwrap(),
+            ext_sst
+        );
+        assert!(parse_sdk::<ExtSstRecord>(&ext_sst_bytes[..9], 0, EXT_SST).is_err());
+
+        let mdb = MdbRecord {
+            header: FrtHeader {
+                record_type: MDB,
+                flags: FrtFlags::empty(),
+                reserved: 0,
+            },
+            entries: vec![MDir {
+                metadata_type: MdtInfoIndex { index: 1 },
+                metadata_record_index: 0x1122_3344,
+            }],
+        };
+        let mdb_bytes = encode_sdk(&mdb).unwrap();
+        assert_eq!(mdb_bytes.len(), 20);
+        assert_eq!(parse_sdk::<MdbRecord>(&mdb_bytes, 0, MDB).unwrap(), mdb);
+        assert!(parse_sdk::<MdbRecord>(&mdb_bytes[..19], 0, MDB).is_err());
+    }
+
+    #[test]
+    fn derived_rrd_and_chart_label_layouts_are_byte_exact() {
+        let revision = Rrd {
+            memory_size: 26,
+            revision_id: 1,
+            revision_type: RevisionType::Conflict,
+            flags: RrdFlags::ACCEPTED,
+            sheet_id: 2,
+        };
+        let revision_bytes = encode_sdk(&revision).unwrap();
+        assert_eq!(
+            revision_bytes,
+            [
+                26, 0, 0, 0, // cbMemory
+                1, 0, 0, 0, // revid
+                0x25, 0, // revt
+                1, 0, // grbit
+                2, 0, // itab
+            ]
+        );
+        assert_eq!(
+            parse_sdk::<Rrd>(&revision_bytes, 0, RRD_CONFLICT).unwrap(),
+            revision
+        );
+
+        let mut reserved_revision = revision_bytes.clone();
+        reserved_revision[11] = 0x80;
+        assert!(parse_sdk::<Rrd>(&reserved_revision, 0, RRD_CONFLICT).is_err());
+        assert!(
+            encode_sdk(&RrdConflictRecord {
+                revision: Rrd {
+                    revision_type: RevisionType::AddView,
+                    ..revision
+                },
+            })
+            .is_err()
+        );
+
+        let chart = ChartDataLabelExtContentsRecord {
+            header: FrtHeader {
+                record_type: CHART_DATA_LABEL_EXT_CONTENTS,
+                flags: FrtFlags::empty(),
+                reserved: 0,
+            },
+            flags: ChartDataLabelExtContentsFlags::SERIES_NAME
+                | ChartDataLabelExtContentsFlags::VALUE,
+            separator: XlUnicodeStringMin2 {
+                declared_character_count: 0,
+                text: None,
+            },
+        };
+        let chart_bytes = encode_sdk(&chart).unwrap();
+        assert_eq!(
+            chart_bytes,
+            [
+                0x6b, 0x08, 0, 0, // FrtHeader rt/grbitFrt
+                0, 0, 0, 0, 0, 0, 0, 0, // FrtHeader reserved
+                5, 0, // data-label flags
+                0, 0, // empty separator cch
+            ]
+        );
+        assert_eq!(
+            parse_sdk::<ChartDataLabelExtContentsRecord>(
+                &chart_bytes,
+                0,
+                CHART_DATA_LABEL_EXT_CONTENTS,
+            )
+            .unwrap(),
+            chart
+        );
+    }
+
+    #[test]
+    fn derived_ext_string_and_optional_chart_tails_are_byte_exact() {
+        let ext_string = ExtStringRecord {
+            header: FrtHeaderOld {
+                record_type: EXT_STRING,
+                flags: FrtFlags::empty(),
+            },
+            string: xl_ascii(b"db"),
+            unused: vec![0xaa; 3],
+        };
+        let ext_string_bytes = encode_sdk(&ext_string).unwrap();
+        assert_eq!(
+            ext_string_bytes,
+            [
+                0x04, 0x08, 0, 0, // FrtHeaderOld
+                2, 0, 0, b'd', b'b', // XLUnicodeString
+                0xaa, 0xaa, 0xaa, // minimum-size padding
+            ]
+        );
+        assert_eq!(
+            parse_sdk::<ExtStringRecord>(&ext_string_bytes, 0, EXT_STRING).unwrap(),
+            ext_string
+        );
+        assert!(
+            encode_sdk(&ExtStringRecord {
+                unused: vec![0xaa; 2],
+                ..ext_string.clone()
+            })
+            .is_err()
+        );
+
+        let category_label = ChartCatLabRecord {
+            header: FrtHeaderOld {
+                record_type: CHART_CAT_LAB,
+                flags: FrtFlags::empty(),
+            },
+            offset_percent: 0x0112,
+            alignment: 2,
+            flags: ChartCatLabFlags::AUTO_CATEGORY_LABEL_COUNT,
+            reserved: Some(0),
+        };
+        let category_label_bytes = encode_sdk(&category_label).unwrap();
+        assert_eq!(
+            category_label_bytes,
+            [0x56, 0x08, 0, 0, 0x12, 0x01, 2, 0, 1, 0, 0, 0,]
+        );
+        assert_eq!(
+            parse_sdk::<ChartCatLabRecord>(&category_label_bytes, 0, CHART_CAT_LAB).unwrap(),
+            category_label
+        );
+        assert!(
+            parse_sdk::<ChartCatLabRecord>(
+                &category_label_bytes[..category_label_bytes.len() - 1],
+                0,
+                CHART_CAT_LAB,
+            )
+            .is_err()
+        );
+
+        let end_object = ChartEndObjectRecord {
+            header: FrtHeaderOld {
+                record_type: CHART_END_OBJECT,
+                flags: FrtFlags::empty(),
+            },
+            object_kind: 0x0010,
+            unused1: Some(0x3344),
+            unused2: Some(0x5566),
+            unused3: Some(0x7788),
+        };
+        let end_object_bytes = encode_sdk(&end_object).unwrap();
+        assert_eq!(
+            end_object_bytes,
+            [
+                0x55, 0x08, 0, 0, 0x10, 0, 0x44, 0x33, 0x66, 0x55, 0x88, 0x77,
+            ]
+        );
+        assert_eq!(
+            parse_sdk::<ChartEndObjectRecord>(&end_object_bytes, 0, CHART_END_OBJECT).unwrap(),
+            end_object
+        );
+        assert!(
+            parse_sdk::<ChartEndObjectRecord>(
+                &end_object_bytes[..end_object_bytes.len() - 1],
+                0,
+                CHART_END_OBJECT,
+            )
+            .is_err()
+        );
+
+        let end_block = EndBlockRecord {
+            header: FrtHeaderOld {
+                record_type: END_BLOCK,
+                flags: FrtFlags::empty(),
+            },
+            object_kind: 0x0004,
+            unused1: Some(0x3344),
+            unused2: Some(0x5566),
+            unused3: None,
+        };
+        let end_block_bytes = encode_sdk(&end_block).unwrap();
+        assert_eq!(
+            end_block_bytes,
+            [0x53, 0x08, 0, 0, 4, 0, 0x44, 0x33, 0x66, 0x55]
+        );
+        assert_eq!(
+            parse_sdk::<EndBlockRecord>(&end_block_bytes, 0, END_BLOCK).unwrap(),
+            end_block
+        );
+        assert!(
+            encode_sdk(&EndBlockRecord {
+                unused1: None,
+                unused2: Some(0x5566),
+                ..end_block
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -32229,5 +34398,241 @@ mod tests {
             parse_sdk::<FrtArchIdRecord>(&architecture_bytes, 0, FRT_ARCH_ID).unwrap(),
             architecture
         );
+    }
+
+    #[test]
+    fn final_formal_records_are_static_and_physically_reversible() {
+        let empty_text = BiffUnicodeString {
+            flags: 0,
+            characters: XlStringCharacters::Compressed(Vec::new()),
+            trailing_byte: None,
+        };
+        let text = |value: &[u8]| BiffUnicodeString {
+            flags: 0,
+            characters: XlStringCharacters::Compressed(value.to_vec()),
+            trailing_byte: None,
+        };
+
+        let route = DocRouteRecord {
+            stage_index: 0,
+            declared_recipient_count: 0,
+            delivery: DocumentRoutingDelivery::Sequential,
+            flags: DocRouteFlags::SAVE_ROUTING_INFORMATION,
+            subject: Vec::new(),
+            message: Vec::new(),
+            route_id: Vec::new(),
+            custom_recipient_type: Vec::new(),
+            workbook_title: Vec::new(),
+            organization: Vec::new(),
+            entry_id: vec![1, 2],
+            recipients: Vec::new(),
+        };
+        let route_physical = route.encode_physical().unwrap();
+        assert_eq!(route_physical.len(), 1);
+        assert!(matches!(
+            decode_record(DOC_ROUTE, &route_physical[0].payload, false, true, 0).unwrap(),
+            BiffRecordData::DocRoute(_)
+        ));
+
+        let wrapper = FrtWrapperRecord {
+            header: FrtHeaderOld {
+                record_type: FRT_WRAPPER,
+                flags: FrtFlags::empty(),
+            },
+            wrapped: Box::new(BiffRecordData::Empty {
+                kind: EmptyRecordKind::ChartBegin,
+                reserved: None,
+            }),
+            padding: vec![0; 4],
+        };
+        let wrapper_bytes = encode_sdk(&wrapper).unwrap();
+        assert_eq!(
+            parse_sdk::<FrtWrapperRecord>(&wrapper_bytes, 0, FRT_WRAPPER).unwrap(),
+            wrapper
+        );
+
+        let qsif = QsifRecord {
+            header: FrtHeaderOld {
+                record_type: QSIF,
+                flags: FrtFlags::empty(),
+            },
+            flags: QsifFlags {
+                user_inserted: false,
+                fill_down: true,
+                descending: false,
+                sort_key: 1,
+                row_numbers: false,
+                sorted: true,
+                clipped: false,
+            },
+            field_id: 1,
+            list_id: None,
+            title: XlUnicodeString {
+                text: text(b"Field"),
+            },
+        };
+        let qsif_bytes = encode_sdk(&qsif).unwrap();
+        assert_eq!(parse_qsif_payload(&qsif_bytes, false).unwrap(), qsif);
+
+        let qsir = QsirRecord {
+            header: FrtRefHeaderU {
+                record_type: QSIR,
+                flags: FrtFlags::HAS_CELL_RANGE,
+                range: CellRange {
+                    first_row: 0,
+                    last_row: 1,
+                    first_column: 0,
+                    last_column: 1,
+                },
+            },
+            saved_query_size: 24,
+            saved_field_size: 15,
+            flags: QsirFlags {
+                persist: false,
+                persist_sort: false,
+                persist_auto_filter: false,
+                sorted: true,
+                case_sensitive: false,
+                has_header_row: true,
+                id_wrapped: false,
+                titles_old: false,
+                version_before_refresh_alert: 8,
+            },
+            custom_sort_index: 0,
+            declared_field_count: 1,
+            next_field_id: 2,
+            extra_columns_left: 0,
+            extra_columns_right: 0,
+            list_id: None,
+            deleted_titles: Vec::new(),
+            fields: vec![qsif],
+        };
+        let qsir_physical = qsir.encode_physical().unwrap();
+        assert_eq!(qsir_physical.len(), 2);
+        let parsed_qsir = parse_qsir_payload(&qsir_physical[0].payload, false).unwrap();
+        assert!(parsed_qsir.flags.sorted);
+        assert_eq!(parsed_qsir.saved_query_size, qsir.saved_query_size);
+
+        let web_string = || WebPubString {
+            text: empty_text.clone(),
+            padding: Some(0),
+        };
+        let web_pub = WebPubRecord {
+            header: FrtRefHeaderU {
+                record_type: WEB_PUB,
+                flags: FrtFlags::empty(),
+                range: CellRange {
+                    first_row: 0,
+                    last_row: 0,
+                    first_column: 0,
+                    last_column: 0,
+                },
+            },
+            source_type: WebPublishSourceType::Workbook,
+            destination_type: WebPublishDestinationType::Workbook,
+            flags: WebPubFlags::AUTO_REPUBLISH,
+            reserved: 0,
+            unused: 7,
+            style_id: 1,
+            source_name: None,
+            destination_file: web_string(),
+            division_id: web_string(),
+            title: web_string(),
+            chart_id: None,
+            future_bytes: vec![1, 2],
+            trailing_unused: 3,
+        };
+        let web_bytes = encode_sdk(&web_pub).unwrap();
+        assert_eq!(
+            parse_sdk::<WebPubRecord>(&web_bytes, 0, WEB_PUB).unwrap(),
+            web_pub
+        );
+
+        let view_link = SxViewLinkRecord {
+            record_type: SX_VIEW_LINK,
+            unused: 9,
+            reserved: 0,
+            pivot_table_name: text(b"Pivot"),
+        };
+        let view_link_bytes = encode_sdk(&view_link).unwrap();
+        assert_eq!(
+            parse_sdk::<SxViewLinkRecord>(&view_link_bytes, 0, SX_VIEW_LINK).unwrap(),
+            view_link
+        );
+
+        let cr_err = CrErrRecord {
+            header: FrtHeader {
+                record_type: CR_ERR,
+                flags: FrtFlags::empty(),
+                reserved: 0,
+            },
+            declared_size: 0x13,
+            declared_character_count: 1,
+            chunks: vec![ContinuedStringChunk {
+                flags: 0,
+                characters: XlStringCharacters::Compressed(vec![b'E']),
+                trailing: Vec::new(),
+            }],
+        };
+        let cr_physical = cr_err.encode_physical().unwrap();
+        assert_eq!(
+            CrErrRecord::from_sequence(&cr_physical[0].payload, &[]).unwrap(),
+            cr_err
+        );
+
+        let filter = AutoFilter12Record {
+            header: FrtRefHeaderU {
+                record_type: AUTO_FILTER12,
+                flags: FrtFlags::HAS_CELL_RANGE,
+                range: CellRange {
+                    first_row: 0,
+                    last_row: 10,
+                    first_column: 0,
+                    last_column: 0,
+                },
+            },
+            entry_index: 0,
+            hide_arrow: false,
+            dynamic_filter_type: AutoFilter12DynamicFilter::None,
+            declared_criteria_count: 1,
+            declared_date_grouping_count: 0,
+            flags: AutoFilter12Flags {
+                worksheet: true,
+                unused: 0,
+            },
+            unused: 0,
+            list_id: u32::MAX,
+            user_view_guid: [0; 16],
+            filter: AutoFilter12Filter::Criteria,
+            criteria: vec![AutoFilter12Continuation {
+                header: FrtRefHeaderU {
+                    record_type: CONTINUE_FRT12,
+                    flags: FrtFlags::HAS_CELL_RANGE,
+                    range: CellRange {
+                        first_row: 0,
+                        last_row: 10,
+                        first_column: 0,
+                        last_column: 0,
+                    },
+                },
+                value: AutoFilter12Criterion {
+                    operand: AutoFilterOperand {
+                        comparison: 2,
+                        value: AutoFilterOperandValue::Number {
+                            bits: 1.5f64.to_bits(),
+                        },
+                        string: None,
+                    },
+                    string_unused: None,
+                },
+            }],
+            date_groupings: Vec::new(),
+        };
+        let filter_physical = filter.encode_physical().unwrap();
+        assert_eq!(filter_physical.len(), 2);
+        assert!(matches!(
+            decode_record(AUTO_FILTER12, &filter_physical[0].payload, false, true, 0).unwrap(),
+            BiffRecordData::AutoFilter12(_)
+        ));
     }
 }

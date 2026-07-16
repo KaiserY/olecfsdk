@@ -7,6 +7,9 @@ use crate::{
     cfb::CompoundFile,
     io::BinaryFormat,
     limits::Limits,
+    office_art::{
+        OfficeArtBStoreDelayFileBlockLayout, OfficeArtBStoreDelayLayout, OfficeArtDrawingGraph,
+    },
     parse::{
         ParseDiagnostic, ParseDiagnosticCode, ParseOptions, ParseOutcome, SpecificationReference,
         compound_from_bytes, compound_from_path, compound_outcome,
@@ -15,8 +18,9 @@ use crate::{
 };
 
 use super::{
-    BinaryTagData, CurrentUserData, CurrentUserStream, ExternalStorageAtom, PicturesStream,
-    PowerPointDocument, PptRecord, PptRecordData, PptRecordSequence,
+    BinaryTagData, CurrentUserData, CurrentUserStream, ExternalStorageAtom, PersistObjectDirectory,
+    PicturesStream, PowerPointDocument, PptLivePresentation, PptRecord, PptRecordData,
+    PptRecordSequence,
 };
 
 const DOCUMENT_STREAM: &str = "/PowerPoint Document";
@@ -33,6 +37,28 @@ pub struct PptFile {
     pub document: PowerPointDocument,
     pub current_user: CurrentUserStream,
     pub pictures: Option<PicturesStream>,
+}
+
+/// Result of appending one MS-PPT incremental-save checkpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PptAppendUserEditReport {
+    pub previous_user_edit_offset: u32,
+    pub user_edit_offset: u32,
+    pub persist_directory_offset: u32,
+    pub appended_persist_records: usize,
+    pub persist_ids: Vec<u32>,
+}
+
+/// Explicit physical-history policy for a strict PPT save.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PptHistoryStrategy {
+    /// Rewrite positions while retaining the existing physical record history.
+    #[default]
+    PreservePhysicalHistory,
+    /// Append a new full current-directory checkpoint and retain preceding checkpoints.
+    AppendUserEdit,
+    /// Discard dead/history records and emit one normalized current edit.
+    RebuildCurrentLiveState,
 }
 
 impl PptFile {
@@ -106,6 +132,213 @@ impl PptFile {
         Self::from_compound_outcome(compound, options)
     }
 
+    /// Rebuilds PPT record lengths/positions and the incremental-save
+    /// references owned by the Current User and PowerPoint Document streams.
+    /// The update is transactional.
+    pub fn relayout(&mut self) -> Result<()> {
+        self.relayout_with_policy(false)
+    }
+
+    fn relayout_with_policy(&mut self, preserve_compatibility: bool) -> Result<()> {
+        let mut rebuilt = self.clone();
+        let CurrentUserData::Parsed(current_user) = &rebuilt.current_user.data else {
+            return Err(Error::invalid(
+                0,
+                "PPT relayout requires a conforming CurrentUserAtom",
+            ));
+        };
+        let presentation = if preserve_compatibility {
+            rebuilt
+                .document
+                .live_presentation_compatible(current_user)
+                .map(ParseOutcome::into_value)
+        } else {
+            rebuilt.document.live_presentation(current_user)
+        };
+        let pictures_layout = match &mut rebuilt.pictures {
+            Some(PicturesStream::Complete(pictures)) => Some(pictures.relayout()?),
+            Some(PicturesStream::Compatibility { .. } | PicturesStream::Partial(_))
+                if preserve_compatibility =>
+            {
+                None
+            }
+            Some(PicturesStream::Compatibility { .. } | PicturesStream::Partial(_)) => {
+                return Err(Error::invalid(
+                    0,
+                    "PPT relayout requires a complete OfficeArtBStoreDelay",
+                ));
+            }
+            None => None,
+        };
+        match presentation {
+            Ok(_) => {
+                rebuilt.document.relocate_picture_references(
+                    pictures_layout.as_ref(),
+                    preserve_compatibility,
+                )?;
+            }
+            Err(_)
+                if preserve_compatibility
+                    && pictures_layout
+                        .as_ref()
+                        .is_none_or(|layout| !layout.changed()) => {}
+            Err(error) => return Err(error),
+        }
+        let CurrentUserData::Parsed(current_user) = &mut rebuilt.current_user.data else {
+            unreachable!("CurrentUserAtom was checked above")
+        };
+        rebuilt
+            .document
+            .relayout_with_policy(current_user, preserve_compatibility)?;
+        *self = rebuilt;
+        Ok(())
+    }
+
+    /// Constructs the MS-PPT 2.1.2 Part 1 persist object directory from this
+    /// file's Current User and PowerPoint Document streams.
+    pub fn persist_object_directory(&self) -> Result<PersistObjectDirectory> {
+        let CurrentUserData::Parsed(current_user) = &self.current_user.data else {
+            return Err(Error::invalid(
+                0,
+                "PPT persist object directory requires a conforming CurrentUserAtom",
+            ));
+        };
+        self.document.persist_object_directory(current_user)
+    }
+
+    /// Resolves the MS-PPT live presentation from the current user edit.
+    pub fn live_presentation(&self) -> Result<PptLivePresentation> {
+        let CurrentUserData::Parsed(current_user) = &self.current_user.data else {
+            return Err(Error::invalid(
+                0,
+                "PPT live presentation requires a conforming CurrentUserAtom",
+            ));
+        };
+        self.document.live_presentation(current_user)
+    }
+
+    /// Resolves the OfficeArt drawing graph from the current live PPT
+    /// presentation rather than from superseded physical-history records.
+    pub fn live_drawing_graph(&self) -> Result<OfficeArtDrawingGraph> {
+        let CurrentUserData::Parsed(current_user) = &self.current_user.data else {
+            return Err(Error::invalid(
+                0,
+                "PPT drawing graph requires a conforming CurrentUserAtom",
+            ));
+        };
+        self.document.live_drawing_graph(current_user)
+    }
+
+    pub fn live_presentation_compatible(&self) -> Result<ParseOutcome<PptLivePresentation>> {
+        let CurrentUserData::Parsed(current_user) = &self.current_user.data else {
+            return Err(Error::invalid(
+                0,
+                "PPT live presentation requires a conforming CurrentUserAtom",
+            ));
+        };
+        self.document.live_presentation_compatible(current_user)
+    }
+
+    /// Replaces the PowerPoint Document physical history with one current
+    /// user edit containing only the MS-PPT live persist objects.
+    pub fn rebuild_current_live_state(&mut self) -> Result<()> {
+        let mut rebuilt = self.clone();
+        let CurrentUserData::Parsed(current_user) = &mut rebuilt.current_user.data else {
+            return Err(Error::invalid(
+                0,
+                "PPT current-live-state rebuild requires a conforming CurrentUserAtom",
+            ));
+        };
+        rebuilt.document.rebuild_current_live_state(current_user)?;
+        *self = rebuilt;
+        Ok(())
+    }
+
+    /// Appends a full MS-PPT current persist-object checkpoint.
+    ///
+    /// The source checkpoint is restored from this root's compound-file
+    /// snapshot, all current persist objects are appended as new physical
+    /// records, and a new PersistDirectoryAtom/UserEditAtom pair becomes
+    /// current. Calling this method commits a new source snapshot, so a later
+    /// edit can append another checkpoint from the resulting root.
+    pub fn append_user_edit(&mut self) -> Result<PptAppendUserEditReport> {
+        let mut rebuilt = self.clone();
+        let baseline = Self::from_compound_file(rebuilt.compound_file.clone())?;
+        let CurrentUserData::Parsed(baseline_current_user) = &baseline.current_user.data else {
+            return Err(Error::invalid(
+                0,
+                "append-user-edit requires a conforming source CurrentUserAtom",
+            ));
+        };
+        let CurrentUserData::Parsed(current_user) = &mut rebuilt.current_user.data else {
+            return Err(Error::invalid(
+                0,
+                "append-user-edit requires a conforming CurrentUserAtom",
+            ));
+        };
+        let previous_edit_count = rebuilt
+            .document
+            .incremental_save_chain(current_user)?
+            .edits
+            .len();
+        let previous_record_count = rebuilt.document.records.records.len();
+        let source_pictures_layout =
+            source_to_current_pictures_layout(&baseline.pictures, &rebuilt.pictures)?;
+        let persist_ids = rebuilt.document.append_user_edit_from_baseline(
+            current_user,
+            &baseline.document,
+            baseline_current_user,
+            source_pictures_layout.as_ref(),
+        )?;
+        rebuilt.relayout_with_policy(false)?;
+
+        let CurrentUserData::Parsed(current_user) = &rebuilt.current_user.data else {
+            unreachable!("append-user-edit retains the parsed CurrentUserAtom")
+        };
+        let chain = rebuilt.document.incremental_save_chain(current_user)?;
+        if chain.edits.len() != previous_edit_count + 1 {
+            return Err(Error::invalid(
+                u64::from(current_user.offset_to_current_edit),
+                "append-user-edit did not add exactly one incremental-save edit",
+            ));
+        }
+        let current_edit = &chain.edits[0];
+        let previous_edit = chain.edits.get(1).ok_or_else(|| {
+            Error::invalid(
+                u64::from(current_edit.user_edit_offset),
+                "appended UserEditAtom does not reference the previous edit",
+            )
+        })?;
+        if current_edit.user_edit.offset_last_edit != previous_edit.user_edit_offset {
+            return Err(Error::invalid(
+                u64::from(current_edit.user_edit_offset),
+                "appended UserEditAtom offsetLastEdit does not reference the previous edit",
+            ));
+        }
+        let metadata_record_count = previous_record_count
+            .checked_add(2)
+            .ok_or_else(|| Error::Limit("append-user-edit record count overflow".into()))?;
+        let appended_persist_records = rebuilt
+            .document
+            .records
+            .records
+            .len()
+            .checked_sub(metadata_record_count)
+            .ok_or_else(|| Error::invalid(0, "append-user-edit record count decreased"))?;
+        let report = PptAppendUserEditReport {
+            previous_user_edit_offset: previous_edit.user_edit_offset,
+            user_edit_offset: current_edit.user_edit_offset,
+            persist_directory_offset: current_edit.persist_directory_offset,
+            appended_persist_records,
+            persist_ids,
+        };
+
+        rebuilt.compound_file =
+            rebuilt.to_compound_file_with_current_layout(SaveOptions::default())?;
+        *self = rebuilt;
+        Ok(report)
+    }
+
     fn from_compound_outcome(
         compound: ParseOutcome<CompoundFile>,
         options: ParseOptions,
@@ -128,30 +361,39 @@ impl PptFile {
         match &current_user.data {
             CurrentUserData::Parsed(atom) => {
                 audit_current_user(&current_user, options.is_strict(), &mut diagnostics)?;
-                if let Err(error) = document.incremental_save_chain(atom) {
-                    let offset = error
-                        .offset()
-                        .unwrap_or(u64::from(atom.offset_to_current_edit));
-                    if options.is_strict() {
+                if options.is_strict() {
+                    if let Err(error) = document.live_presentation(atom) {
+                        let offset = error
+                            .offset()
+                            .unwrap_or(u64::from(atom.offset_to_current_edit));
                         return Err(Error::invalid(
                             offset,
                             format!(
-                                "PowerPoint Document Stream violates the user-edit chain in MS-PPT 2.1.2: {error}"
+                                "PowerPoint Document Stream violates the live-record process in MS-PPT 2.1.2: {error}"
                             ),
                         ));
                     }
-                    diagnostics.push(ParseDiagnostic::warning(
-                        ParseDiagnosticCode::InvalidReference,
-                        BinaryFormat::Ppt,
-                        Some(DOCUMENT_STREAM),
-                        Some(offset),
-                        "UserEditAtom chain",
-                        SpecificationReference {
-                            document: "MS-PPT",
-                            section: "2.1.2",
-                        },
-                        format!("preserved a broken user-edit chain: {error}"),
-                    ));
+                } else {
+                    match document.live_presentation_compatible(atom) {
+                        Ok(outcome) => diagnostics.extend(outcome.diagnostics),
+                        Err(error) => {
+                            let offset = error
+                                .offset()
+                                .unwrap_or(u64::from(atom.offset_to_current_edit));
+                            diagnostics.push(ParseDiagnostic::warning(
+                                ParseDiagnosticCode::InvalidReference,
+                                BinaryFormat::Ppt,
+                                Some(DOCUMENT_STREAM),
+                                Some(offset),
+                                "live-record process",
+                                SpecificationReference {
+                                    document: "MS-PPT",
+                                    section: "2.1.2",
+                                },
+                                format!("preserved a broken live-record process: {error}"),
+                            ));
+                        }
+                    }
                 }
             }
             CurrentUserData::Compatibility(_) if options.is_strict() => {
@@ -195,28 +437,34 @@ impl PptFile {
             .stream(PICTURES_STREAM)
             .map(|bytes| PicturesStream::from_bytes_with_limits(bytes, options.limits))
             .transpose()?;
-        if let Some(PicturesStream::Partial(partial)) = &pictures {
-            if options.is_strict() {
-                return Err(Error::invalid(
-                    0,
-                    format!(
-                        "Pictures Stream violates MS-PPT 2.1.3 and MS-ODRAW 2.2.21: {}",
-                        partial.reason
-                    ),
+        if let Some(pictures) = &pictures {
+            let reason = match pictures {
+                PicturesStream::Complete(_) => None,
+                PicturesStream::Compatibility { reason, .. } => Some(reason.as_str()),
+                PicturesStream::Partial(partial) => Some(partial.reason.as_str()),
+            };
+            if let Some(reason) = reason {
+                if options.is_strict() {
+                    return Err(Error::invalid(
+                        0,
+                        format!(
+                            "Pictures Stream violates MS-PPT 2.1.3 and MS-ODRAW 2.2.21: {reason}"
+                        ),
+                    ));
+                }
+                diagnostics.push(ParseDiagnostic::warning(
+                    ParseDiagnosticCode::InvalidStreamPreserved,
+                    BinaryFormat::Ppt,
+                    Some(PICTURES_STREAM),
+                    Some(0),
+                    "OfficeArtBStoreDelay",
+                    SpecificationReference {
+                        document: "MS-PPT",
+                        section: "2.1.3",
+                    },
+                    format!("preserved a nonconforming Pictures Stream: {reason}"),
                 ));
             }
-            diagnostics.push(ParseDiagnostic::warning(
-                ParseDiagnosticCode::InvalidStreamPreserved,
-                BinaryFormat::Ppt,
-                Some(PICTURES_STREAM),
-                Some(0),
-                "OfficeArtBStoreDelay",
-                SpecificationReference {
-                    document: "MS-PPT",
-                    section: "2.1.3",
-                },
-                format!("preserved a partial Pictures Stream: {}", partial.reason),
-            ));
         }
         Ok(ParseOutcome::new(
             Self {
@@ -239,6 +487,32 @@ impl PptFile {
     }
 
     pub fn to_compound_file_with_options(&self, options: SaveOptions) -> Result<CompoundFile> {
+        let mut rebuilt = self.clone();
+        if matches!(rebuilt.current_user.data, CurrentUserData::Parsed(_)) {
+            rebuilt.relayout_with_policy(options.preserves_compatibility())?;
+        }
+        rebuilt.to_compound_file_with_current_layout(options)
+    }
+
+    /// Applies an explicit MS-PPT physical-history policy before strict save.
+    pub fn to_compound_file_with_history_strategy(
+        &self,
+        strategy: PptHistoryStrategy,
+    ) -> Result<CompoundFile> {
+        let mut rebuilt = self.clone();
+        match strategy {
+            PptHistoryStrategy::PreservePhysicalHistory => {}
+            PptHistoryStrategy::AppendUserEdit => {
+                rebuilt.append_user_edit()?;
+            }
+            PptHistoryStrategy::RebuildCurrentLiveState => {
+                rebuilt.rebuild_current_live_state()?;
+            }
+        }
+        rebuilt.to_compound_file()
+    }
+
+    fn to_compound_file_with_current_layout(&self, options: SaveOptions) -> Result<CompoundFile> {
         if !options.preserves_compatibility() {
             if !matches!(&self.current_user.data, CurrentUserData::Parsed(_)) {
                 return Err(Error::invalid(
@@ -251,10 +525,13 @@ impl PptFile {
             if let CurrentUserData::Parsed(atom) = &self.current_user.data {
                 self.document.incremental_save_chain(atom)?;
             }
-            if matches!(&self.pictures, Some(PicturesStream::Partial(_))) {
+            if matches!(
+                &self.pictures,
+                Some(PicturesStream::Compatibility { .. } | PicturesStream::Partial(_))
+            ) {
                 return Err(Error::invalid(
                     0,
-                    "strict save rejects a partial Pictures Stream",
+                    "strict save rejects a nonconforming Pictures Stream",
                 ));
             }
         }
@@ -277,6 +554,11 @@ impl PptFile {
         self.to_compound_file_preserving_compatibility()?.to_bytes()
     }
 
+    pub fn to_bytes_with_history_strategy(&self, strategy: PptHistoryStrategy) -> Result<Vec<u8>> {
+        self.to_compound_file_with_history_strategy(strategy)?
+            .to_bytes()
+    }
+
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         self.to_compound_file()?.save(path)
     }
@@ -284,6 +566,92 @@ impl PptFile {
     pub fn save_preserving_compatibility(&self, path: impl AsRef<Path>) -> Result<()> {
         self.to_compound_file_preserving_compatibility()?.save(path)
     }
+
+    pub fn save_with_history_strategy(
+        &self,
+        path: impl AsRef<Path>,
+        strategy: PptHistoryStrategy,
+    ) -> Result<()> {
+        self.to_compound_file_with_history_strategy(strategy)?
+            .save(path)
+    }
+}
+
+fn source_to_current_pictures_layout(
+    source: &Option<PicturesStream>,
+    current: &Option<PicturesStream>,
+) -> Result<Option<OfficeArtBStoreDelayLayout>> {
+    let (source, current) = match (source, current) {
+        (None, None) => return Ok(None),
+        (None, Some(PicturesStream::Complete(_))) => {
+            return Ok(Some(OfficeArtBStoreDelayLayout {
+                file_blocks: Vec::new(),
+            }));
+        }
+        (Some(PicturesStream::Complete(_)), None) => {
+            return Err(Error::invalid(
+                0,
+                "append-user-edit cannot remove the source Pictures Stream",
+            ));
+        }
+        (Some(PicturesStream::Complete(source)), Some(PicturesStream::Complete(current))) => {
+            (source, current)
+        }
+        _ => {
+            return Err(Error::invalid(
+                0,
+                "append-user-edit requires conforming source and current Pictures streams",
+            ));
+        }
+    };
+    if current.records.len() < source.records.len() {
+        return Err(Error::invalid(
+            0,
+            "append-user-edit cannot remove Pictures Stream file blocks",
+        ));
+    }
+    for (index, source_record) in source.records.iter().enumerate() {
+        if current.records[index].header.record_type != source_record.header.record_type {
+            return Err(Error::invalid(
+                0,
+                "append-user-edit only supports Pictures Stream additions after source file blocks",
+            ));
+        }
+    }
+
+    let mut normalized = current.clone();
+    normalized.relayout()?;
+    let mut old_offset = 0u32;
+    let mut new_offset = 0u32;
+    let mut file_blocks = Vec::with_capacity(source.records.len());
+    for (record_index, source_record) in source.records.iter().enumerate() {
+        let current_record = &normalized.records[record_index];
+        let old_size = source_record
+            .header
+            .declared_length
+            .checked_add(8)
+            .ok_or_else(|| Error::Limit("source Pictures file-block size overflow".into()))?;
+        let new_size = current_record
+            .header
+            .declared_length
+            .checked_add(8)
+            .ok_or_else(|| Error::Limit("current Pictures file-block size overflow".into()))?;
+        file_blocks.push(OfficeArtBStoreDelayFileBlockLayout {
+            record_index,
+            record_type: source_record.header.record_type,
+            old_offset,
+            new_offset,
+            old_size,
+            new_size,
+        });
+        old_offset = old_offset
+            .checked_add(old_size)
+            .ok_or_else(|| Error::Limit("source Pictures Stream offset overflow".into()))?;
+        new_offset = new_offset
+            .checked_add(new_size)
+            .ok_or_else(|| Error::Limit("current Pictures Stream offset overflow".into()))?;
+    }
+    Ok(Some(OfficeArtBStoreDelayLayout { file_blocks }))
 }
 
 fn audit_current_user(
@@ -623,10 +991,15 @@ mod tests {
     use super::*;
     use crate::{
         cfb::Version,
+        office_art::{
+            OfficeArtBStoreDelay, OfficeArtBitmapBlip, OfficeArtBitmapData, OfficeArtFbse,
+            OfficeArtRecord, OfficeArtRecordData, OfficeArtRecordHeader,
+        },
         ppt::{
-            CURRENT_USER_ATOM, CurrentUserAtom, DOCUMENT_ATOM, EXTERNAL_OLE_OBJECT_STORAGE,
-            PERSIST_DIRECTORY_ATOM, PersistDirectoryAtom, PptRecordHeader, USER_EDIT_ATOM,
-            UserEditAtom,
+            CURRENT_USER_ATOM, CurrentUserAtom, DOCUMENT_ATOM, DOCUMENT_CONTAINER, DocumentAtom,
+            EXTERNAL_OLE_OBJECT_STORAGE, PERSIST_DIRECTORY_ATOM, PersistDirectoryAtom,
+            PersistObjectReferenceStatus, PptLivePersistObjectRole, PptPoint, PptRecordHeader,
+            SLIDE_LIST_WITH_TEXT_CONTAINER, USER_EDIT_ATOM, UnknownPptRecord, UserEditAtom,
         },
     };
 
@@ -634,7 +1007,7 @@ mod tests {
         let atom = CurrentUserAtom {
             fixed_size: 20,
             header_token: 0xe391_c05f,
-            offset_to_current_edit: 16,
+            offset_to_current_edit: 80,
             declared_user_name_byte_length: 3,
             document_file_version: 0x03f4,
             major_version: 3,
@@ -660,43 +1033,82 @@ mod tests {
     }
 
     fn document_with_minimal_chain(mut suffix: Vec<u8>) -> Vec<u8> {
+        let document_atom = DocumentAtom {
+            slide_size: PptPoint { x: 720, y: 540 },
+            notes_size: PptPoint { x: 540, y: 720 },
+            server_zoom: PptPoint { x: 1, y: 1 },
+            notes_master_persist_id_ref: 0,
+            handout_master_persist_id_ref: 0,
+            first_slide_number: 1,
+            slide_size_type: 0,
+            save_with_fonts: 0,
+            omit_title_placeholders: 0,
+            right_to_left: 0,
+            show_comments: 0,
+        };
+        let document_atom_body = super::super::write_fixed(&document_atom).unwrap();
+        let mut document_container_body = Vec::new();
+        PptRecordHeader {
+            version: 1,
+            instance: 0,
+            record_type: DOCUMENT_ATOM,
+            declared_length: document_atom_body.len() as u32,
+        }
+        .write(&mut document_container_body)
+        .unwrap();
+        document_container_body.extend_from_slice(&document_atom_body);
+        PptRecordHeader {
+            version: 0x0f,
+            instance: 1,
+            record_type: SLIDE_LIST_WITH_TEXT_CONTAINER,
+            declared_length: 0,
+        }
+        .write(&mut document_container_body)
+        .unwrap();
+
         let persist_body = PersistDirectoryAtom {
-            entries: Vec::new(),
+            entries: vec![super::super::PersistDirectoryEntry {
+                first_persist_id: 1,
+                stream_offsets: vec![0],
+            }],
         }
         .to_bytes()
         .unwrap();
-        assert!(persist_body.is_empty());
+        assert_eq!(document_container_body.len(), 56);
+        assert_eq!(persist_body.len(), 8);
         let user_body = UserEditAtom {
             last_slide_id_ref: 0,
             version: 0,
             minor_version: 0,
             major_version: 3,
             offset_last_edit: 0,
-            offset_persist_directory: 8,
-            doc_persist_id_ref: 0,
+            offset_persist_directory: 64,
+            doc_persist_id_ref: 1,
             persist_id_seed: 1,
-            last_view: 0,
+            last_view: 1,
             unused: 0,
             encrypt_session_persist_id_ref: None,
-        }
-        .to_bytes();
+        };
+        let user_body = super::super::write_fixed(&user_body).unwrap();
         let mut document = Vec::new();
         PptRecordHeader {
-            version: 0,
+            version: 0x0f,
             instance: 0,
-            record_type: 0x779f,
-            declared_length: 0,
+            record_type: DOCUMENT_CONTAINER,
+            declared_length: document_container_body.len() as u32,
         }
         .write(&mut document)
         .unwrap();
+        document.extend_from_slice(&document_container_body);
         PptRecordHeader {
             version: 0,
             instance: 0,
             record_type: PERSIST_DIRECTORY_ATOM,
-            declared_length: 0,
+            declared_length: persist_body.len() as u32,
         }
         .write(&mut document)
         .unwrap();
+        document.extend_from_slice(&persist_body);
         PptRecordHeader {
             version: 0,
             instance: 0,
@@ -731,6 +1143,372 @@ mod tests {
         assert_eq!(file.document.records.records.len(), 3);
         let reopened = PptFile::from_bytes(&file.to_bytes().unwrap()).unwrap();
         assert_eq!(reopened.document, file.document);
+    }
+
+    #[test]
+    fn file_root_relayouts_variable_records_and_incremental_save_references() {
+        let compound = compound_with_document(document_with_minimal_chain(Vec::new()));
+        let mut file = PptFile::from_compound_file(compound).unwrap();
+        let PptRecordData::Container(value) = &mut file.document.records.records[0].data else {
+            unreachable!()
+        };
+        value.records.push(PptRecord {
+            offset: 8,
+            header: PptRecordHeader {
+                version: 0,
+                instance: 0,
+                record_type: 0x779f,
+                declared_length: 5,
+            },
+            data: PptRecordData::Unknown(UnknownPptRecord {
+                record_type: 0x779f,
+                body: vec![1, 2, 3, 4, 5],
+            }),
+        });
+        let PptRecordData::PersistDirectory(value) = &mut file.document.records.records[1].data
+        else {
+            unreachable!()
+        };
+        value.entries.push(super::super::PersistDirectoryEntry {
+            first_persist_id: 2,
+            stream_offsets: vec![0],
+        });
+
+        let mut invalid = file.clone();
+        let PptRecordData::PersistDirectory(value) = &mut invalid.document.records.records[1].data
+        else {
+            unreachable!()
+        };
+        value.entries[0].stream_offsets[0] = 999;
+        let unchanged_after_failure = invalid.clone();
+        assert!(invalid.relayout().is_err());
+        assert_eq!(invalid, unchanged_after_failure);
+
+        file.relayout().unwrap();
+        assert_eq!(file.document.records.records[0].header.declared_length, 69);
+        assert_eq!(file.document.records.records[1].offset, 77);
+        assert_eq!(file.document.records.records[1].header.declared_length, 16);
+        assert_eq!(file.document.records.records[2].offset, 101);
+        let PptRecordData::UserEdit(user_edit) = &file.document.records.records[2].data else {
+            unreachable!()
+        };
+        assert_eq!(user_edit.offset_persist_directory, 77);
+        let CurrentUserData::Parsed(current_user) = &file.current_user.data else {
+            unreachable!()
+        };
+        assert_eq!(current_user.offset_to_current_edit, 101);
+
+        let reopened = PptFile::from_bytes(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.document, file.document);
+        assert_eq!(reopened.current_user, file.current_user);
+    }
+
+    #[test]
+    fn file_root_relayouts_pictures_and_physical_fbse_delay_references() {
+        fn bitmap_blip(data: Vec<u8>) -> OfficeArtRecord {
+            OfficeArtRecord {
+                header: OfficeArtRecordHeader {
+                    version: 0,
+                    instance: 0x06e0,
+                    record_type: 0xf01e,
+                    declared_length: u32::try_from(17 + data.len()).unwrap(),
+                },
+                data: OfficeArtRecordData::BitmapBlip(OfficeArtBitmapBlip {
+                    uid1: [0x11; 16],
+                    uid2: None,
+                    tag: 0xff,
+                    file_data: OfficeArtBitmapData::Encoded(data),
+                }),
+            }
+        }
+
+        let compound = compound_with_document(document_with_minimal_chain(Vec::new()));
+        let mut file = PptFile::from_compound_file(compound).unwrap();
+        let first_blip = bitmap_blip(vec![1, 2]);
+        let second_blip = bitmap_blip(vec![3]);
+        let old_second_offset = first_blip.header.declared_length + 8;
+        let second_size = second_blip.header.declared_length + 8;
+        file.pictures = Some(PicturesStream::Complete(OfficeArtBStoreDelay {
+            records: vec![first_blip, second_blip],
+        }));
+
+        let fbse = OfficeArtFbse {
+            win32_blip_type: 6,
+            macos_blip_type: 6,
+            uid: [0x22; 16],
+            tag: 0xff,
+            declared_blip_size: second_size,
+            reference_count: 1,
+            delay_offset: old_second_offset,
+            unused1: 0,
+            declared_name_length: 0,
+            unused2: 0,
+            unused3: 0,
+            name_data: Vec::new(),
+            embedded_blip: None,
+            trailing: Vec::new(),
+        };
+        let fbse_record = PptRecord {
+            offset: 0,
+            header: PptRecordHeader {
+                version: 2,
+                instance: 6,
+                record_type: 0xf007,
+                declared_length: 36,
+            },
+            data: PptRecordData::OfficeArt(Box::new(OfficeArtRecord {
+                header: OfficeArtRecordHeader {
+                    version: 2,
+                    instance: 6,
+                    record_type: 0xf007,
+                    declared_length: 36,
+                },
+                data: OfficeArtRecordData::Fbse(fbse),
+            })),
+        };
+        let mut dead_fbse_record = fbse_record.clone();
+        dead_fbse_record.offset = 120;
+        let PptRecordData::Container(document) = &mut file.document.records.records[0].data else {
+            unreachable!()
+        };
+        document.records.push(PptRecord {
+            offset: 0,
+            header: PptRecordHeader {
+                version: 0x0f,
+                instance: 1,
+                record_type: 0xf001,
+                declared_length: 44,
+            },
+            data: PptRecordData::Container(PptRecordSequence {
+                records: vec![fbse_record],
+                trailing_header_bytes: Vec::new(),
+            }),
+        });
+        file.document.records.records.push(dead_fbse_record);
+
+        let Some(PicturesStream::Complete(pictures)) = &mut file.pictures else {
+            unreachable!()
+        };
+        let OfficeArtRecordData::BitmapBlip(first) = &mut pictures.records[0].data else {
+            unreachable!()
+        };
+        let OfficeArtBitmapData::Encoded(data) = &mut first.file_data else {
+            unreachable!()
+        };
+        data.extend_from_slice(&[4, 5, 6]);
+        let OfficeArtRecordData::BitmapBlip(second) = &mut pictures.records[1].data else {
+            unreachable!()
+        };
+        let OfficeArtBitmapData::Encoded(data) = &mut second.file_data else {
+            unreachable!()
+        };
+        data.extend_from_slice(&[7, 8]);
+
+        let mut invalid = file.clone();
+        let PptRecordData::Container(document) = &mut invalid.document.records.records[0].data
+        else {
+            unreachable!()
+        };
+        let PptRecordData::Container(bstore) = &mut document.records.last_mut().unwrap().data
+        else {
+            unreachable!()
+        };
+        let PptRecordData::OfficeArt(fbse) = &mut bstore.records[0].data else {
+            unreachable!()
+        };
+        let OfficeArtRecordData::Fbse(fbse) = &mut fbse.data else {
+            unreachable!()
+        };
+        fbse.delay_offset = 999;
+        let unchanged = invalid.clone();
+        assert!(invalid.relayout().is_err());
+        assert_eq!(invalid, unchanged);
+
+        file.relayout().unwrap();
+        let Some(PicturesStream::Complete(pictures)) = &file.pictures else {
+            unreachable!()
+        };
+        assert_eq!(pictures.records[0].header.declared_length, 22);
+        assert_eq!(pictures.records[1].header.declared_length, 20);
+        let new_second_offset = pictures.records[0].header.declared_length + 8;
+        assert_eq!(new_second_offset, old_second_offset + 3);
+        let PptRecordData::Container(document) = &file.document.records.records[0].data else {
+            unreachable!()
+        };
+        let PptRecordData::Container(bstore) = &document.records.last().unwrap().data else {
+            unreachable!()
+        };
+        let PptRecordData::OfficeArt(fbse) = &bstore.records[0].data else {
+            unreachable!()
+        };
+        let OfficeArtRecordData::Fbse(fbse) = &fbse.data else {
+            unreachable!()
+        };
+        assert_eq!(fbse.delay_offset, new_second_offset);
+        assert_eq!(fbse.declared_blip_size, second_size + 2);
+        let PptRecordData::OfficeArt(dead_fbse) =
+            &file.document.records.records.last().unwrap().data
+        else {
+            unreachable!()
+        };
+        let OfficeArtRecordData::Fbse(dead_fbse) = &dead_fbse.data else {
+            unreachable!()
+        };
+        assert_eq!(dead_fbse.delay_offset, new_second_offset);
+        assert_eq!(dead_fbse.declared_blip_size, second_size + 2);
+
+        let mut reopened = PptFile::from_bytes(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.document, file.document);
+        assert_eq!(reopened.pictures, file.pictures);
+
+        let Some(PicturesStream::Complete(pictures)) = &mut reopened.pictures else {
+            unreachable!()
+        };
+        let OfficeArtRecordData::BitmapBlip(first) = &mut pictures.records[0].data else {
+            unreachable!()
+        };
+        let OfficeArtBitmapData::Encoded(data) = &mut first.file_data else {
+            unreachable!()
+        };
+        data.push(9);
+        reopened.relayout().unwrap();
+        let report = reopened.append_user_edit().unwrap();
+        assert_eq!(report.persist_ids, vec![1]);
+        assert_eq!(
+            reopened
+                .persist_object_directory()
+                .unwrap()
+                .incremental_save_chain
+                .edits
+                .len(),
+            2
+        );
+        PptFile::from_bytes(&reopened.to_bytes().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn file_root_appends_repeatable_user_edit_checkpoints() {
+        fn set_first_slide_number(file: &mut PptFile, value: u16) {
+            let presentation = file.live_presentation().unwrap();
+            let record =
+                &mut file.document.records.records[presentation.document.reference.record_index];
+            let PptRecordData::Container(children) = &mut record.data else {
+                unreachable!()
+            };
+            let document = children
+                .records
+                .iter_mut()
+                .find_map(|record| match &mut record.data {
+                    PptRecordData::Document(document) => Some(document),
+                    _ => None,
+                })
+                .unwrap();
+            document.first_slide_number = value;
+        }
+
+        fn first_slide_number(record: &PptRecord) -> u16 {
+            let PptRecordData::Container(children) = &record.data else {
+                unreachable!()
+            };
+            children
+                .records
+                .iter()
+                .find_map(|record| match &record.data {
+                    PptRecordData::Document(document) => Some(document.first_slide_number),
+                    _ => None,
+                })
+                .unwrap()
+        }
+
+        let compound = compound_with_document(document_with_minimal_chain(Vec::new()));
+        let mut file = PptFile::from_compound_file(compound).unwrap();
+        set_first_slide_number(&mut file, 2);
+        let first_report = file.append_user_edit().unwrap();
+        assert_eq!(first_report.appended_persist_records, 1);
+        assert_eq!(first_report.persist_ids, vec![1]);
+        assert!(first_report.previous_user_edit_offset < first_report.persist_directory_offset);
+        assert!(first_report.persist_directory_offset < first_report.user_edit_offset);
+
+        let directory = file.persist_object_directory().unwrap();
+        assert_eq!(directory.incremental_save_chain.edits.len(), 2);
+        let current = directory.current_reference(1).unwrap();
+        assert_eq!(
+            first_slide_number(&file.document.records.records[current.record_index]),
+            2
+        );
+        let previous = directory
+            .references
+            .iter()
+            .find(|reference| {
+                reference.persist_id == 1
+                    && reference.status == PersistObjectReferenceStatus::Superseded
+            })
+            .unwrap();
+        assert_eq!(
+            first_slide_number(&file.document.records.records[previous.record_index]),
+            1
+        );
+
+        set_first_slide_number(&mut file, 3);
+        let second_report = file.append_user_edit().unwrap();
+        assert_eq!(second_report.appended_persist_records, 1);
+        assert_eq!(second_report.persist_ids, vec![1]);
+        let directory = file.persist_object_directory().unwrap();
+        assert_eq!(directory.incremental_save_chain.edits.len(), 3);
+        let versions = directory
+            .references
+            .iter()
+            .filter(|reference| reference.persist_id == 1)
+            .map(|reference| {
+                first_slide_number(&file.document.records.records[reference.record_index])
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(versions, vec![3, 2, 1]);
+
+        let reopened = PptFile::from_bytes(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.document, file.document);
+        assert_eq!(reopened.current_user, file.current_user);
+        assert_eq!(
+            reopened.live_presentation().unwrap().document.role,
+            PptLivePersistObjectRole::Document
+        );
+
+        let compound = compound_with_document(document_with_minimal_chain(Vec::new()));
+        let mut strategic = PptFile::from_compound_file(compound).unwrap();
+        set_first_slide_number(&mut strategic, 4);
+        let bytes = strategic
+            .to_bytes_with_history_strategy(PptHistoryStrategy::AppendUserEdit)
+            .unwrap();
+        assert_eq!(
+            strategic
+                .persist_object_directory()
+                .unwrap()
+                .incremental_save_chain
+                .edits
+                .len(),
+            1,
+            "immutable strategy save must not mutate the source root"
+        );
+        let strategic_reopened = PptFile::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            strategic_reopened
+                .persist_object_directory()
+                .unwrap()
+                .incremental_save_chain
+                .edits
+                .len(),
+            2
+        );
+        let current = strategic_reopened
+            .persist_object_directory()
+            .unwrap()
+            .current_reference(1)
+            .copied()
+            .unwrap();
+        assert_eq!(
+            first_slide_number(&strategic_reopened.document.records.records[current.record_index]),
+            4
+        );
     }
 
     #[test]
@@ -886,7 +1664,7 @@ mod tests {
             outcome.diagnostics[0].code,
             ParseDiagnosticCode::InvalidReference
         );
-        assert_eq!(outcome.diagnostics[0].location.offset, Some(16));
+        assert_eq!(outcome.diagnostics[0].location.offset, Some(80));
         assert!(outcome.value.to_compound_file().is_err());
         assert!(
             outcome

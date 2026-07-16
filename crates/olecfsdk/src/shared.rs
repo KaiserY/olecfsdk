@@ -5,14 +5,155 @@ use std::io::{Cursor, Read, Seek, Write};
 use bitflags::bitflags;
 
 use crate::{
-    Error, Result,
+    Error, Result, SdkObject,
     common::FileTime,
-    io::{Reader, Writer},
+    io::{Reader, SdkRead, SdkSize, SdkWrite, Writer},
 };
 
 pub const MSO_ENVELOPE_CLSID: [u8; 16] = [
     0x1a, 0xf0, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
 ];
+
+/// MS-OSHARED 2.3.4.5 PBString character storage, including its terminating NUL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PbStringCharacters {
+    Ansi(Vec<u8>),
+    Unicode(Vec<u16>),
+}
+
+/// MS-OSHARED 2.3.4.5 PBString.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PbString {
+    /// Includes the terminating NUL counted by `cch`.
+    pub characters: PbStringCharacters,
+}
+
+/// MS-OSHARED 2.3.4.2 FactoidType.
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(size_prefix = "u32", validate_at = "validate_factoid_type")]
+pub struct FactoidType {
+    pub id: u32,
+    pub uri: PbString,
+    pub tag: PbString,
+    pub download_url: PbString,
+}
+
+/// MS-OSHARED 2.3.4.1 PropertyBagStore.
+#[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_property_bag_store")]
+pub struct PropertyBagStore {
+    #[sdk(count_prefix = "u32", min_element_size = 17)]
+    pub factoid_types: Vec<FactoidType>,
+    /// `cbHdr`; MS-OSHARED requires 0x000C.
+    pub cb_hdr: u16,
+    /// `sVer`; MS-OSHARED requires 0x0100.
+    pub version: u16,
+    /// `cfactoid`; reserved for future use and ignored by readers.
+    pub reserved_factoid_count: u32,
+    #[sdk(count_prefix = "u32", min_element_size = 3)]
+    pub string_table: Vec<PbString>,
+}
+
+impl SdkRead for PbString {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let offset = reader.position()?;
+        let header = reader.read_u16()?;
+        let count = usize::from(header & 0x7fff);
+        let characters = if header & 0x8000 != 0 {
+            PbStringCharacters::Ansi(reader.read_vec(count)?)
+        } else {
+            let byte_count = count
+                .checked_mul(2)
+                .ok_or_else(|| Error::Limit("PBString byte count overflow".into()))?;
+            let bytes = reader.read_vec(byte_count)?;
+            PbStringCharacters::Unicode(
+                bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect(),
+            )
+        };
+        let value = Self { characters };
+        validate_pb_string(&value, offset)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for PbString {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        validate_pb_string(self, writer.position()?)?;
+        match &self.characters {
+            PbStringCharacters::Ansi(values) => {
+                let count = u16::try_from(values.len())
+                    .map_err(|_| Error::Limit("ANSI PBString exceeds u16".into()))?;
+                if count > 0x7fff {
+                    return Err(Error::Limit("ANSI PBString exceeds 15-bit count".into()));
+                }
+                writer.write_u16(count | 0x8000)?;
+                writer.write_all(values)?;
+            }
+            PbStringCharacters::Unicode(values) => {
+                let count = u16::try_from(values.len())
+                    .map_err(|_| Error::Limit("Unicode PBString exceeds u16".into()))?;
+                if count > 0x7fff {
+                    return Err(Error::Limit("Unicode PBString exceeds 15-bit count".into()));
+                }
+                writer.write_u16(count)?;
+                for value in values {
+                    writer.write_u16(*value)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SdkSize for PbString {
+    fn sdk_size(&self) -> u64 {
+        2 + match &self.characters {
+            PbStringCharacters::Ansi(values) => values.len() as u64,
+            PbStringCharacters::Unicode(values) => (values.len() as u64) * 2,
+        }
+    }
+}
+
+fn validate_pb_string(value: &PbString, offset: u64) -> Result<()> {
+    let valid = match &value.characters {
+        PbStringCharacters::Ansi(values) => values
+            .split_last()
+            .is_some_and(|(last, body)| *last == 0 && body.iter().all(|value| *value != 0)),
+        PbStringCharacters::Unicode(values) => values
+            .split_last()
+            .is_some_and(|(last, body)| *last == 0 && body.iter().all(|value| *value != 0)),
+    };
+    if !valid {
+        return Err(Error::invalid(
+            offset,
+            "PBString must contain exactly one terminating NUL character",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_factoid_type(value: &FactoidType, offset: u64) -> Result<()> {
+    if value.id > u32::from(u16::MAX) {
+        return Err(Error::invalid(
+            offset,
+            "FactoidType id exceeds the MS-OSHARED 16-bit range",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_property_bag_store(value: &PropertyBagStore, offset: u64) -> Result<()> {
+    if value.cb_hdr != 0x000c || value.version != 0x0100 {
+        return Err(Error::invalid(
+            offset,
+            "PropertyBagStore cbHdr or sVer violates MS-OSHARED",
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NumberingFormat(u8);

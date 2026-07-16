@@ -341,7 +341,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
-    use crate::{SdkEnum, SdkObject};
+    use crate::{SdkBitfield, SdkEnum, SdkObject};
 
     #[derive(Debug, PartialEq, Eq, SdkObject)]
     struct Header {
@@ -366,6 +366,54 @@ mod tests {
     }
 
     #[derive(Debug, PartialEq, Eq, SdkObject)]
+    struct LengthPrefixedValues {
+        #[sdk(count_prefix = "u16")]
+        values: Vec<u32>,
+    }
+
+    #[derive(Debug, PartialEq, Eq, SdkObject)]
+    #[sdk(size_prefix = "u16")]
+    struct SizePrefixedObject {
+        tag: u16,
+        value: u32,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct MisreportedSize;
+
+    impl SdkRead for MisreportedSize {
+        fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+            reader.read_u16()?;
+            Ok(Self)
+        }
+    }
+
+    impl SdkWrite for MisreportedSize {
+        fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+            writer.write_u16(0)
+        }
+    }
+
+    impl SdkSize for MisreportedSize {
+        fn sdk_size(&self) -> u64 {
+            1
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq, SdkObject)]
+    #[sdk(size_prefix = "u16")]
+    struct SizePrefixedCustomObject {
+        value: MisreportedSize,
+    }
+
+    #[derive(Debug, PartialEq, Eq, SdkObject)]
+    #[sdk(size_prefix = "u8")]
+    struct TinySizePrefixedObject {
+        #[sdk(remaining)]
+        bytes: Vec<u8>,
+    }
+
+    #[derive(Debug, PartialEq, Eq, SdkObject)]
     struct ConditionalAndPadding {
         flags: u16,
         #[sdk(condition = "flags", mask = 0x0001)]
@@ -384,6 +432,57 @@ mod tests {
         tail: Vec<u8>,
     }
 
+    #[derive(Debug, PartialEq, Eq, SdkObject)]
+    struct RemainingWords {
+        tag: u8,
+        #[sdk(remaining)]
+        values: Vec<u16>,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+    struct FixedPair {
+        first: u16,
+        second: u16,
+    }
+
+    #[derive(Debug, PartialEq, Eq, SdkObject)]
+    struct MinimumSizedPairs {
+        #[sdk(count_prefix = "u16", min_element_size = 4)]
+        values: Vec<FixedPair>,
+    }
+
+    #[derive(Debug, PartialEq, Eq, SdkObject)]
+    struct RemainingFixedPairs {
+        tag: u8,
+        #[sdk(remaining(element_size = 4))]
+        values: Vec<FixedPair>,
+    }
+
+    #[derive(Debug, PartialEq, Eq, SdkObject)]
+    struct OptionalRemainingWord {
+        tag: u16,
+        #[sdk(optional_remaining)]
+        value: Option<u32>,
+    }
+
+    #[derive(Debug, PartialEq, Eq, SdkObject)]
+    struct OptionalRemainingWords {
+        tag: u16,
+        #[sdk(optional_remaining)]
+        values: Option<[u16; 3]>,
+    }
+
+    #[derive(Debug, PartialEq, Eq, SdkObject)]
+    struct OptionalTailWords {
+        tag: u16,
+        #[sdk(optional)]
+        first: Option<u16>,
+        #[sdk(optional)]
+        second: Option<u16>,
+        #[sdk(optional)]
+        third: Option<u16>,
+    }
+
     bitflags::bitflags! {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         struct TestFlags: u16 {
@@ -395,6 +494,40 @@ mod tests {
     struct Flagged {
         #[sdk(bitflags = "u16")]
         flags: TestFlags,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+    #[sdk(repr = "u16", validate = validate_packed_options)]
+    struct PackedOptions {
+        #[sdk(bits = 0..=2)]
+        kind: u8,
+        #[sdk(bit = 3)]
+        enabled: bool,
+        #[sdk(bits = 8..=15)]
+        producer_data: u8,
+    }
+
+    fn validate_packed_options(value: &PackedOptions, offset: u64) -> Result<()> {
+        if value.kind > 5 {
+            return Err(Error::invalid(
+                offset,
+                "packed kind is outside its specification",
+            ));
+        }
+        Ok(())
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+    #[sdk(validate_at = "validate_positioned_object")]
+    struct PositionedObject {
+        value: u8,
+    }
+
+    fn validate_positioned_object(value: &PositionedObject, offset: u64) -> Result<()> {
+        if value.value != 0 {
+            return Err(Error::invalid(offset, "positioned object must be zero"));
+        }
+        Ok(())
     }
 
     #[test]
@@ -416,6 +549,136 @@ mod tests {
     }
 
     #[test]
+    fn derive_optional_remaining_requires_zero_or_one_complete_value() {
+        let absent = OptionalRemainingWord {
+            tag: 7,
+            value: None,
+        };
+        let present = OptionalRemainingWord {
+            tag: 7,
+            value: Some(0x1122_3344),
+        };
+
+        for value in [&absent, &present] {
+            let mut writer = Writer::new(Cursor::new(Vec::new()));
+            value.write_to(&mut writer).unwrap();
+            let bytes = writer.into_inner().into_inner();
+            assert_eq!(value.sdk_size(), bytes.len() as u64);
+            let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+            assert_eq!(
+                OptionalRemainingWord::read_from(&mut reader).unwrap(),
+                *value
+            );
+        }
+
+        for bytes in [[7, 0, 1].as_slice(), [7, 0, 1, 2, 3, 4, 5].as_slice()] {
+            let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+            assert!(OptionalRemainingWord::read_from(&mut reader).is_err());
+        }
+
+        let words = OptionalRemainingWords {
+            tag: 9,
+            values: Some([0x1122, 0x3344, 0x5566]),
+        };
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        words.write_to(&mut writer).unwrap();
+        let bytes = writer.into_inner().into_inner();
+        assert_eq!(bytes, [9, 0, 0x22, 0x11, 0x44, 0x33, 0x66, 0x55]);
+        assert_eq!(words.sdk_size(), bytes.len() as u64);
+        let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(
+            OptionalRemainingWords::read_from(&mut reader).unwrap(),
+            words
+        );
+
+        for bytes in [
+            [9, 0, 1, 2].as_slice(),
+            [9, 0, 1, 2, 3, 4, 5, 6, 7, 8].as_slice(),
+        ] {
+            let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+            assert!(OptionalRemainingWords::read_from(&mut reader).is_err());
+        }
+    }
+
+    #[test]
+    fn derive_remaining_fixed_layout_objects_is_bounded_per_element() {
+        let value = RemainingFixedPairs {
+            tag: 7,
+            values: vec![
+                FixedPair {
+                    first: 0x1122,
+                    second: 0x3344,
+                },
+                FixedPair {
+                    first: 0x5566,
+                    second: 0x7788,
+                },
+            ],
+        };
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        value.write_to(&mut writer).unwrap();
+        let bytes = writer.into_inner().into_inner();
+        assert_eq!(value.sdk_size(), 9);
+        assert_eq!(bytes, [7, 0x22, 0x11, 0x44, 0x33, 0x66, 0x55, 0x88, 0x77]);
+        let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(RemainingFixedPairs::read_from(&mut reader).unwrap(), value);
+
+        let mut partial = Reader::new(Cursor::new([7, 1, 2, 3])).unwrap();
+        assert!(RemainingFixedPairs::read_from(&mut partial).is_err());
+    }
+
+    #[test]
+    fn derive_optional_suffix_preserves_each_present_prefix_field() {
+        for value in [
+            OptionalTailWords {
+                tag: 9,
+                first: None,
+                second: None,
+                third: None,
+            },
+            OptionalTailWords {
+                tag: 9,
+                first: Some(0x1122),
+                second: None,
+                third: None,
+            },
+            OptionalTailWords {
+                tag: 9,
+                first: Some(0x1122),
+                second: Some(0x3344),
+                third: None,
+            },
+            OptionalTailWords {
+                tag: 9,
+                first: Some(0x1122),
+                second: Some(0x3344),
+                third: Some(0x5566),
+            },
+        ] {
+            let mut writer = Writer::new(Cursor::new(Vec::new()));
+            value.write_to(&mut writer).unwrap();
+            let bytes = writer.into_inner().into_inner();
+            assert_eq!(value.sdk_size(), bytes.len() as u64);
+            let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+            assert_eq!(OptionalTailWords::read_from(&mut reader).unwrap(), value);
+        }
+
+        let gap = OptionalTailWords {
+            tag: 9,
+            first: None,
+            second: Some(0x3344),
+            third: None,
+        };
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        assert!(gap.write_to(&mut writer).is_err());
+
+        for bytes in [[9, 0, 1].as_slice(), [9, 0, 1, 2, 3, 4, 5, 6, 7].as_slice()] {
+            let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+            assert!(OptionalTailWords::read_from(&mut reader).is_err());
+        }
+    }
+
+    #[test]
     fn derive_bitflags_retains_unknown_bits() {
         let bytes = [0x01, 0x80];
         let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
@@ -424,6 +687,63 @@ mod tests {
         let mut writer = Writer::new(Cursor::new(Vec::new()));
         value.write_to(&mut writer).unwrap();
         assert_eq!(writer.into_inner().into_inner(), bytes);
+    }
+
+    #[test]
+    fn derive_generates_spec_bounded_bitfields() {
+        let bytes = [0x0d, 0xa5];
+        let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+        let value = PackedOptions::read_from(&mut reader).unwrap();
+        assert_eq!(
+            value,
+            PackedOptions {
+                kind: 5,
+                enabled: true,
+                producer_data: 0xa5,
+            }
+        );
+        assert_eq!(value.sdk_size(), 2);
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        value.write_to(&mut writer).unwrap();
+        assert_eq!(writer.into_inner().into_inner(), bytes);
+
+        let mut reserved = Reader::new(Cursor::new([0x10, 0])).unwrap();
+        assert!(PackedOptions::read_from(&mut reserved).is_err());
+        let too_wide = PackedOptions {
+            kind: 8,
+            enabled: false,
+            producer_data: 0,
+        };
+        assert!(
+            too_wide
+                .write_to(&mut Writer::new(Cursor::new(Vec::new())))
+                .is_err()
+        );
+        let invalid_by_spec = PackedOptions {
+            kind: 6,
+            enabled: false,
+            producer_data: 0,
+        };
+        assert!(
+            invalid_by_spec
+                .write_to(&mut Writer::new(Cursor::new(Vec::new())))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn object_validator_can_receive_the_physical_start_offset() {
+        let mut reader = Reader::with_bounds(Cursor::new([0, 0, 7]), 2, 1).unwrap();
+        let read_error = PositionedObject::read_from(&mut reader).unwrap_err();
+        assert_eq!(read_error.offset(), Some(2));
+
+        let mut output = Cursor::new(vec![0, 0]);
+        output.set_position(2);
+        let mut writer = Writer::new(output);
+        let write_error = PositionedObject { value: 7 }
+            .write_to(&mut writer)
+            .unwrap_err();
+        assert_eq!(write_error.offset(), Some(2));
     }
 
     #[test]
@@ -446,6 +766,88 @@ mod tests {
             invalid
                 .write_to(&mut Writer::new(Cursor::new(Vec::new())))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn derive_generates_vector_count_prefixes() {
+        let value = LengthPrefixedValues {
+            values: vec![7, 11, 13],
+        };
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        value.write_to(&mut writer).unwrap();
+        let bytes = writer.into_inner().into_inner();
+        assert_eq!(bytes, [3, 0, 7, 0, 0, 0, 11, 0, 0, 0, 13, 0, 0, 0]);
+        assert_eq!(value.sdk_size(), 14);
+
+        let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(LengthPrefixedValues::read_from(&mut reader).unwrap(), value);
+        assert_eq!(reader.remaining().unwrap(), 0);
+
+        let too_many = LengthPrefixedValues {
+            values: vec![0; usize::from(u16::MAX) + 1],
+        };
+        assert!(
+            too_many
+                .write_to(&mut Writer::new(Cursor::new(Vec::new())))
+                .is_err()
+        );
+
+        let pairs = MinimumSizedPairs {
+            values: vec![FixedPair {
+                first: 1,
+                second: 2,
+            }],
+        };
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        pairs.write_to(&mut writer).unwrap();
+        let bytes = writer.into_inner().into_inner();
+        assert_eq!(bytes, [1, 0, 1, 0, 2, 0]);
+        let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(MinimumSizedPairs::read_from(&mut reader).unwrap(), pairs);
+
+        let mut impossible_count = Reader::new(Cursor::new([2, 0, 1, 0, 2, 0])).unwrap();
+        assert!(MinimumSizedPairs::read_from(&mut impossible_count).is_err());
+    }
+
+    #[test]
+    fn derive_size_prefix_bounds_the_complete_object_payload() {
+        let value = SizePrefixedObject {
+            tag: 0x1122,
+            value: 0x3344_5566,
+        };
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        value.write_to(&mut writer).unwrap();
+        let bytes = writer.into_inner().into_inner();
+        assert_eq!(bytes, [6, 0, 0x22, 0x11, 0x66, 0x55, 0x44, 0x33]);
+        assert_eq!(value.sdk_size(), 8);
+
+        let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(SizePrefixedObject::read_from(&mut reader).unwrap(), value);
+        assert_eq!(reader.remaining().unwrap(), 0);
+
+        for bytes in [
+            [5, 0, 0x22, 0x11, 0x66, 0x55, 0x44, 0x33].as_slice(),
+            [7, 0, 0x22, 0x11, 0x66, 0x55, 0x44, 0x33].as_slice(),
+            [7, 0, 0x22, 0x11, 0x66, 0x55, 0x44, 0x33, 0].as_slice(),
+        ] {
+            let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+            assert!(SizePrefixedObject::read_from(&mut reader).is_err());
+        }
+
+        assert!(
+            SizePrefixedCustomObject {
+                value: MisreportedSize,
+            }
+            .write_to(&mut Writer::new(Cursor::new(Vec::new())))
+            .is_err()
+        );
+        assert!(
+            TinySizePrefixedObject {
+                bytes: vec![0; usize::from(u8::MAX) + 1],
+            }
+            .write_to(&mut Writer::new(Cursor::new(Vec::new())))
+            .is_err()
         );
     }
 
@@ -526,5 +928,27 @@ mod tests {
         assert_eq!(value.sdk_size(), 6);
         let mut reader = Reader::new(Cursor::new(writer.into_inner().into_inner())).unwrap();
         assert_eq!(RemainingBytes::read_from(&mut reader).unwrap(), value);
+    }
+
+    #[test]
+    fn derive_supports_typed_remaining_arrays() {
+        let bytes = [5, 7, 0, 11, 0];
+        let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+        let value = RemainingWords::read_from(&mut reader).unwrap();
+        assert_eq!(
+            value,
+            RemainingWords {
+                tag: 5,
+                values: vec![7, 11]
+            }
+        );
+        assert_eq!(value.sdk_size(), bytes.len() as u64);
+
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        value.write_to(&mut writer).unwrap();
+        assert_eq!(writer.into_inner().into_inner(), bytes);
+
+        let mut odd = Reader::new(Cursor::new([5, 7, 0, 11])).unwrap();
+        assert!(RemainingWords::read_from(&mut odd).is_err());
     }
 }

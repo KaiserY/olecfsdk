@@ -19,7 +19,7 @@ pub mod vba;
 pub mod xls;
 
 pub use error::{Error, Result};
-pub use olecfsdk_derive::{SdkEnum, SdkObject};
+pub use olecfsdk_derive::{SdkBitfield, SdkEnum, SdkObject};
 pub use parse::{
     ParseDiagnostic, ParseDiagnosticCode, ParseDiagnosticLocation, ParseDiagnosticSeverity,
     ParseOptions, ParseOutcome, SpecificationReference,

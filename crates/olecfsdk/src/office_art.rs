@@ -1,8 +1,15 @@
 //! Shared MS-ODRAW OfficeArt record framing.
 
-use std::io::{Read, Write};
+use std::{
+    collections::BTreeSet,
+    io::{Cursor, Read, Seek, Write},
+};
 
-use crate::{Error, Result, limits::Limits};
+use crate::{
+    Error, Result, SdkBitfield,
+    io::{Reader, SdkRead, SdkSize, SdkWrite, Writer},
+    limits::Limits,
+};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 
 const HEADER_LEN: usize = 8;
@@ -14,6 +21,28 @@ const STANDARD_HYPERLINK_CLASS_ID: [u8; 16] = [
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OfficeArtStream {
     pub records: Vec<OfficeArtRecord>,
+}
+
+/// MS-ODRAW 2.2.21 headerless delay-loaded sequence used by the PPT
+/// Pictures Stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtBStoreDelay {
+    pub records: Vec<OfficeArtRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtBStoreDelayLayout {
+    pub file_blocks: Vec<OfficeArtBStoreDelayFileBlockLayout>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtBStoreDelayFileBlockLayout {
+    pub record_index: usize,
+    pub record_type: u16,
+    pub old_offset: u32,
+    pub new_offset: u32,
+    pub old_size: u32,
+    pub new_size: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,6 +97,65 @@ pub struct OfficeArtRecordHeader {
     pub instance: u16,
     pub record_type: u16,
     pub declared_length: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u16")]
+struct OfficeArtRecordHeaderOptions {
+    #[sdk(bits = 0..=3)]
+    version: u8,
+    #[sdk(bits = 4..=15)]
+    instance: u16,
+}
+
+impl SdkRead for OfficeArtRecordHeader {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        let options = OfficeArtRecordHeaderOptions::read_from(reader)?;
+        Ok(Self {
+            version: options.version,
+            instance: options.instance,
+            record_type: reader.read_u16()?,
+            declared_length: reader.read_u32()?,
+        })
+    }
+}
+
+impl SdkWrite for OfficeArtRecordHeader {
+    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        OfficeArtRecordHeaderOptions {
+            version: self.version,
+            instance: self.instance,
+        }
+        .write_to(writer)?;
+        writer.write_u16(self.record_type)?;
+        writer.write_u32(self.declared_length)
+    }
+}
+
+impl SdkSize for OfficeArtRecordHeader {
+    fn sdk_size(&self) -> u64 {
+        HEADER_LEN as u64
+    }
+}
+
+impl OfficeArtRecordHeader {
+    fn read_slice(bytes: &[u8]) -> Result<Self> {
+        let header = bytes
+            .get(..HEADER_LEN)
+            .ok_or_else(|| Error::invalid(0, "truncated OfficeArt record header"))?;
+        let mut reader = Reader::new(Cursor::new(header))?;
+        Self::read_from(&mut reader)
+    }
+
+    fn append_to(self, bytes: &mut Vec<u8>) -> Result<()> {
+        let mut encoded = [0u8; HEADER_LEN];
+        {
+            let mut writer = Writer::new(Cursor::new(encoded.as_mut_slice()));
+            self.write_to(&mut writer)?;
+        }
+        bytes.extend_from_slice(&encoded);
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -171,7 +259,203 @@ pub struct OfficeArtDggBlock {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OfficeArtIdCluster {
     pub drawing_id: u32,
-    pub current_shape_id: u32,
+    /// `cspidCur`: number of local shape identifiers already allocated in
+    /// this cluster (and therefore the next local identifier to allocate).
+    pub current_shape_id_count: u32,
+}
+
+/// Document-level view of one complete MS-ODRAW drawing group and its
+/// drawing containers. The source record trees remain the editable truth;
+/// this value makes their cross-record identifiers and allocation high-water
+/// marks explicit without flattening the trees.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtDrawingGraph {
+    pub drawing_group: OfficeArtDggBlock,
+    pub drawings: Vec<OfficeArtDrawingGraphDrawing>,
+    pub clusters: Vec<OfficeArtDrawingGraphCluster>,
+    /// Document-wide `OfficeArtBStoreContainer`, when present.
+    pub blip_store: Option<OfficeArtBlipStore>,
+    /// Non-complex `OfficeArtFOPTE` values whose `fBid` bit is set. A zero
+    /// value is ignored by MS-ODRAW and is therefore not included.
+    pub blip_references: Vec<OfficeArtBlipReference>,
+    /// Property tables whose fixed or complex region was physically
+    /// incomplete. Known `fBid` entries are still exposed, but the list of
+    /// BLIP references cannot be claimed complete while this is non-empty.
+    pub incomplete_property_tables: Vec<OfficeArtPropertyTableLocation>,
+    pub maximum_shape_id_relation: OfficeArtHighWaterRelation,
+    pub saved_shape_count_relation: OfficeArtHighWaterRelation,
+    pub saved_drawing_count_relation: OfficeArtHighWaterRelation,
+    pub issues: Vec<OfficeArtDrawingGraphIssue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtDrawingGraphDrawing {
+    pub drawing_id: u16,
+    pub drawing: OfficeArtDrawing,
+    pub shapes: Vec<OfficeArtShape>,
+    pub patriarch_shape_count: usize,
+    pub shape_count_basis: OfficeArtShapeCountBasis,
+    pub current_shape_id_relation: OfficeArtHighWaterRelation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtDrawingGraphCluster {
+    /// One-based position in `OfficeArtFDGGBlock.Rgidcl`.
+    pub cluster_number: u32,
+    pub cluster: OfficeArtIdCluster,
+    pub present_shape_count: usize,
+    pub present_max_local_shape_id: Option<u32>,
+    pub shape_id_count_relation: OfficeArtHighWaterRelation,
+}
+
+/// Document-wide `OfficeArtBStoreContainer.rgfb` projected without copying
+/// the potentially large BLIP payloads from the editable record tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtBlipStore {
+    pub declared_entry_count: u16,
+    pub entries: Vec<OfficeArtBlipStoreEntry>,
+    pub entry_count_matches: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtBlipStoreEntry {
+    /// One-based `rgfb` index used by BLIP properties.
+    pub blip_identifier: u32,
+    pub record_type: u16,
+    pub kind: OfficeArtBlipStoreEntryKind,
+    pub actual_reference_count: u32,
+    /// Present only for an `OfficeArtFBSE`, because a direct
+    /// `OfficeArtBlip` file block has no `cRef` field.
+    pub reference_count_relation: Option<OfficeArtBlipReferenceCountRelation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OfficeArtBlipStoreEntryKind {
+    Fbse {
+        declared_reference_count: u32,
+        delay_offset: u32,
+        has_embedded_blip: bool,
+    },
+    DirectBlip,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfficeArtBlipReferenceCountRelation {
+    BelowActual,
+    EqualToActual,
+    AboveActual,
+}
+
+/// One ordinary (non-inline) `OfficeArtFOPTE` reference into the document
+/// `OfficeArtBStoreContainer.rgfb` array.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtBlipReference {
+    /// `None` denotes a document-wide property table in the Dgg container.
+    pub drawing_id: Option<u16>,
+    pub property_record_type: u16,
+    pub property_table_index: usize,
+    pub property_index: usize,
+    pub property_id: u16,
+    /// One-based `rgfb` index.
+    pub blip_identifier: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtPropertyTableLocation {
+    pub drawing_id: Option<u16>,
+    pub property_record_type: u16,
+    pub property_table_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfficeArtShapeCountBasis {
+    /// `OfficeArtFDG.csp` counts every currently present `OfficeArtFSP`.
+    AllPresentShapes,
+    /// Producer compatibility shape used by LibreOffice: the single
+    /// patriarch `OfficeArtFSP` is not included in `csp`.
+    ExcludesPatriarchShapes,
+    /// `csp` is above the number of present shapes and therefore retains an
+    /// allocation/history count that cannot be reconstructed from the tree.
+    HistoricalHighWater,
+    /// `csp` is below both specified present-shape interpretations.
+    BelowPresentShapes,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfficeArtHighWaterRelation {
+    BelowPresentTree,
+    EqualToPresentTree,
+    AbovePresentTree,
+    EmptyZero,
+    EmptyNonzero,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OfficeArtDrawingGraphIssue {
+    MaximumShapeIdOutOfRange {
+        value: u32,
+    },
+    DrawingIdOutOfRange {
+        drawing_id: u16,
+    },
+    DuplicateDrawingId {
+        drawing_id: u16,
+    },
+    DuplicateShapeId {
+        shape_id: u32,
+    },
+    ShapeInClusterZero {
+        drawing_id: u16,
+        shape_id: u32,
+    },
+    ShapeClusterMissing {
+        drawing_id: u16,
+        shape_id: u32,
+        cluster_number: u32,
+    },
+    ShapeClusterDrawingMismatch {
+        shape_id: u32,
+        drawing_id: u16,
+        cluster_number: u32,
+        cluster_drawing_id: u32,
+    },
+    BlipStoreEntryCountMismatch {
+        declared: u16,
+        actual: usize,
+    },
+    BlipReferenceOutOfRange {
+        drawing_id: Option<u16>,
+        property_record_type: u16,
+        property_id: u16,
+        blip_identifier: u32,
+    },
+    EmptyBlipStoreSlotReferenced {
+        drawing_id: Option<u16>,
+        property_record_type: u16,
+        property_id: u16,
+        blip_identifier: u32,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OfficeArtGraphBlipStoreInput {
+    pub declared_entry_count: u16,
+    pub entries: Vec<OfficeArtGraphBlipStoreEntryInput>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OfficeArtGraphBlipStoreEntryInput {
+    pub record_type: u16,
+    pub fbse: Option<(u32, u32, bool)>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OfficeArtGraphDrawingInput {
+    pub drawing_id: u16,
+    pub drawing: OfficeArtDrawing,
+    pub shapes: Vec<OfficeArtShape>,
+    pub blip_references: Vec<OfficeArtBlipReference>,
+    pub incomplete_property_tables: Vec<OfficeArtPropertyTableLocation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -541,6 +825,17 @@ impl OfficeArtStream {
         Ok(bytes)
     }
 
+    /// Recomputes every complete OfficeArt record length from the typed tree.
+    /// The update is transactional.
+    pub fn relayout(&mut self) -> Result<()> {
+        let mut rebuilt = self.clone();
+        for record in &mut rebuilt.records {
+            record.relayout()?;
+        }
+        *self = rebuilt;
+        Ok(())
+    }
+
     pub fn visit(&self, mut visitor: impl FnMut(&OfficeArtRecord)) {
         fn visit_records(records: &[OfficeArtRecord], visitor: &mut impl FnMut(&OfficeArtRecord)) {
             for record in records {
@@ -568,6 +863,789 @@ impl OfficeArtStream {
         }
         visit_records(&self.records, &mut visitor);
     }
+
+    pub fn visit_mut(&mut self, mut visitor: impl FnMut(&mut OfficeArtRecord)) {
+        fn visit_records(
+            records: &mut [OfficeArtRecord],
+            visitor: &mut impl FnMut(&mut OfficeArtRecord),
+        ) {
+            for record in records {
+                visitor(record);
+                match &mut record.data {
+                    OfficeArtRecordData::Container(children)
+                    | OfficeArtRecordData::CompatibilityContainer(children) => {
+                        visit_records(children, visitor)
+                    }
+                    OfficeArtRecordData::Fbse(fbse) => {
+                        if let Some(blip) = &mut fbse.embedded_blip {
+                            visitor(blip);
+                            match &mut blip.data {
+                                OfficeArtRecordData::Container(children)
+                                | OfficeArtRecordData::CompatibilityContainer(children) => {
+                                    visit_records(children, visitor);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        visit_records(&mut self.records, &mut visitor);
+    }
+}
+
+impl OfficeArtDrawingGraph {
+    /// Host-format adapter for formats such as PPT whose recursive container
+    /// framing is owned by the host record tree while OfficeArt atoms remain
+    /// typed `OfficeArtRecord` values.
+    pub fn from_components(
+        drawing_group: OfficeArtDggBlock,
+        drawings: Vec<(u16, OfficeArtDrawing, Vec<OfficeArtShape>)>,
+    ) -> Result<Self> {
+        let drawing_group = OfficeArtStream {
+            records: vec![OfficeArtRecord {
+                header: OfficeArtRecordHeader {
+                    version: 0x0f,
+                    instance: 0,
+                    record_type: 0xf000,
+                    declared_length: 0,
+                },
+                data: OfficeArtRecordData::Container(vec![OfficeArtRecord {
+                    header: OfficeArtRecordHeader {
+                        version: 0,
+                        instance: 0,
+                        record_type: 0xf006,
+                        declared_length: 0,
+                    },
+                    data: OfficeArtRecordData::DggBlock(drawing_group),
+                }]),
+            }],
+        };
+        let drawings = drawings
+            .into_iter()
+            .map(|(drawing_id, drawing, shapes)| OfficeArtStream {
+                records: vec![OfficeArtRecord {
+                    header: OfficeArtRecordHeader {
+                        version: 0x0f,
+                        instance: 0,
+                        record_type: 0xf002,
+                        declared_length: 0,
+                    },
+                    data: OfficeArtRecordData::Container(
+                        std::iter::once(OfficeArtRecord {
+                            header: OfficeArtRecordHeader {
+                                version: 0,
+                                instance: drawing_id,
+                                record_type: 0xf008,
+                                declared_length: 8,
+                            },
+                            data: OfficeArtRecordData::Drawing(drawing),
+                        })
+                        .chain(shapes.into_iter().map(|shape| OfficeArtRecord {
+                            header: OfficeArtRecordHeader {
+                                version: 2,
+                                instance: 0,
+                                record_type: 0xf00a,
+                                declared_length: 8,
+                            },
+                            data: OfficeArtRecordData::Shape(shape),
+                        }))
+                        .collect(),
+                    ),
+                }],
+            })
+            .collect::<Vec<_>>();
+        let drawing_refs = drawings.iter().collect::<Vec<_>>();
+        Self::from_streams(&drawing_group, &drawing_refs)
+    }
+
+    pub(crate) fn from_components_with_blips(
+        drawing_group: OfficeArtDggBlock,
+        blip_stores: Vec<OfficeArtGraphBlipStoreInput>,
+        drawing_group_blip_references: Vec<OfficeArtBlipReference>,
+        drawing_group_incomplete_property_tables: Vec<OfficeArtPropertyTableLocation>,
+        drawings: Vec<OfficeArtGraphDrawingInput>,
+    ) -> Result<Self> {
+        let basic_drawings = drawings
+            .iter()
+            .map(|value| (value.drawing_id, value.drawing, value.shapes.clone()))
+            .collect();
+        let mut graph = Self::from_components(drawing_group, basic_drawings)?;
+        let mut references = drawing_group_blip_references;
+        let mut incomplete_property_tables = drawing_group_incomplete_property_tables;
+        for drawing in drawings {
+            references.extend(drawing.blip_references);
+            incomplete_property_tables.extend(drawing.incomplete_property_tables);
+        }
+        graph.incomplete_property_tables = incomplete_property_tables;
+        graph.attach_blip_graph(blip_stores, references)?;
+        Ok(graph)
+    }
+
+    /// Builds a cross-record graph from one complete `OfficeArtDggContainer`
+    /// and the complete `OfficeArtDgContainer` records owned by the host
+    /// document. Structural identity errors are rejected; count conventions
+    /// and allocation high-water relations remain explicit in the result.
+    pub fn from_streams(
+        drawing_group: &OfficeArtStream,
+        drawings: &[&OfficeArtStream],
+    ) -> Result<Self> {
+        require_office_art_root(drawing_group, 0xf000, "OfficeArtDggContainer")?;
+        let blip_stores = collect_office_art_blip_store_inputs(drawing_group);
+        let (mut blip_references, mut incomplete_property_tables) =
+            collect_office_art_blip_references(drawing_group, None);
+        let mut dgg_records = Vec::new();
+        drawing_group.visit(|record| {
+            if let OfficeArtRecordData::DggBlock(value) = &record.data {
+                dgg_records.push(value.clone());
+            }
+        });
+        let [drawing_group] = dgg_records.as_slice() else {
+            return Err(Error::invalid(
+                0,
+                format!(
+                    "OfficeArtDggContainer contains {} OfficeArtFDGGBlock records, expected 1",
+                    dgg_records.len()
+                ),
+            ));
+        };
+        let mut issues = Vec::new();
+        if drawing_group.maximum_shape_id >= 0x03ff_d7ff {
+            issues.push(OfficeArtDrawingGraphIssue::MaximumShapeIdOutOfRange {
+                value: drawing_group.maximum_shape_id,
+            });
+        }
+
+        let mut drawing_ids = BTreeSet::new();
+        let mut shape_ids = BTreeSet::new();
+        let mut graph_drawings = Vec::with_capacity(drawings.len());
+        for (drawing_index, stream) in drawings.iter().enumerate() {
+            require_office_art_root(stream, 0xf002, "OfficeArtDgContainer")?;
+            let mut fdg_records = Vec::new();
+            let mut shapes = Vec::new();
+            stream.visit(|record| match &record.data {
+                OfficeArtRecordData::Drawing(value) => {
+                    fdg_records.push((record.header.instance, *value));
+                }
+                OfficeArtRecordData::Shape(value) => shapes.push(*value),
+                _ => {}
+            });
+            let [(drawing_id, drawing)] = fdg_records.as_slice() else {
+                return Err(Error::invalid(
+                    0,
+                    format!(
+                        "OfficeArtDgContainer {drawing_index} contains {} OfficeArtFDG records, expected 1",
+                        fdg_records.len()
+                    ),
+                ));
+            };
+            let (drawing_blip_references, drawing_incomplete_property_tables) =
+                collect_office_art_blip_references(stream, Some(*drawing_id));
+            blip_references.extend(drawing_blip_references);
+            incomplete_property_tables.extend(drawing_incomplete_property_tables);
+            if *drawing_id > 0x0ffe {
+                issues.push(OfficeArtDrawingGraphIssue::DrawingIdOutOfRange {
+                    drawing_id: *drawing_id,
+                });
+            }
+            if !drawing_ids.insert(*drawing_id) {
+                issues.push(OfficeArtDrawingGraphIssue::DuplicateDrawingId {
+                    drawing_id: *drawing_id,
+                });
+            }
+            for shape in &shapes {
+                if !shape_ids.insert(shape.shape_id) {
+                    issues.push(OfficeArtDrawingGraphIssue::DuplicateShapeId {
+                        shape_id: shape.shape_id,
+                    });
+                }
+            }
+            let patriarch_shape_count = shapes
+                .iter()
+                .filter(|shape| shape.flags.contains(OfficeArtShapeFlags::PATRIARCH))
+                .count();
+            let present_shape_count = shapes.len();
+            let declared_shape_count = usize::try_from(drawing.shape_count)
+                .map_err(|_| Error::Limit("OfficeArtFDG shape count exceeds usize".into()))?;
+            let non_patriarch_count = present_shape_count.saturating_sub(patriarch_shape_count);
+            let shape_count_basis = if declared_shape_count == present_shape_count {
+                OfficeArtShapeCountBasis::AllPresentShapes
+            } else if patriarch_shape_count != 0 && declared_shape_count == non_patriarch_count {
+                OfficeArtShapeCountBasis::ExcludesPatriarchShapes
+            } else if declared_shape_count > present_shape_count {
+                OfficeArtShapeCountBasis::HistoricalHighWater
+            } else {
+                OfficeArtShapeCountBasis::BelowPresentShapes
+            };
+            let current_shape_id_relation = office_art_high_water_relation(
+                drawing.current_shape_id,
+                shapes.iter().map(|shape| shape.shape_id).max(),
+            );
+            graph_drawings.push(OfficeArtDrawingGraphDrawing {
+                drawing_id: *drawing_id,
+                drawing: *drawing,
+                shapes,
+                patriarch_shape_count,
+                shape_count_basis,
+                current_shape_id_relation,
+            });
+        }
+
+        let mut clusters = Vec::with_capacity(drawing_group.clusters.len());
+        for (index, cluster) in drawing_group.clusters.iter().enumerate() {
+            clusters.push(OfficeArtDrawingGraphCluster {
+                cluster_number: u32::try_from(index + 1)
+                    .map_err(|_| Error::Limit("OfficeArt cluster number exceeds u32".into()))?,
+                cluster: *cluster,
+                present_shape_count: 0,
+                present_max_local_shape_id: None,
+                shape_id_count_relation: OfficeArtHighWaterRelation::EmptyZero,
+            });
+        }
+        for drawing in &graph_drawings {
+            for shape in &drawing.shapes {
+                let cluster_number = shape.shape_id / 0x400;
+                let Some(cluster_number_minus_one) = cluster_number.checked_sub(1) else {
+                    issues.push(OfficeArtDrawingGraphIssue::ShapeInClusterZero {
+                        drawing_id: drawing.drawing_id,
+                        shape_id: shape.shape_id,
+                    });
+                    continue;
+                };
+                let cluster_index = usize::try_from(cluster_number_minus_one)
+                    .map_err(|_| Error::Limit("OfficeArt cluster index exceeds usize".into()))?;
+                let Some(cluster) = clusters.get_mut(cluster_index) else {
+                    issues.push(OfficeArtDrawingGraphIssue::ShapeClusterMissing {
+                        drawing_id: drawing.drawing_id,
+                        shape_id: shape.shape_id,
+                        cluster_number,
+                    });
+                    continue;
+                };
+                if cluster.cluster.drawing_id != u32::from(drawing.drawing_id) {
+                    issues.push(OfficeArtDrawingGraphIssue::ShapeClusterDrawingMismatch {
+                        shape_id: shape.shape_id,
+                        drawing_id: drawing.drawing_id,
+                        cluster_number,
+                        cluster_drawing_id: cluster.cluster.drawing_id,
+                    });
+                }
+                cluster.present_shape_count += 1;
+                let local_shape_id = shape.shape_id % 0x400;
+                cluster.present_max_local_shape_id = Some(
+                    cluster
+                        .present_max_local_shape_id
+                        .map_or(local_shape_id, |current| current.max(local_shape_id)),
+                );
+            }
+        }
+        for cluster in &mut clusters {
+            cluster.shape_id_count_relation = office_art_high_water_relation(
+                cluster.cluster.current_shape_id_count,
+                cluster
+                    .present_max_local_shape_id
+                    .and_then(|maximum| maximum.checked_add(1)),
+            );
+        }
+
+        let maximum_shape_id_relation = office_art_high_water_relation(
+            drawing_group.maximum_shape_id,
+            shape_ids.iter().copied().max(),
+        );
+        let present_shape_count = graph_drawings.iter().try_fold(0usize, |count, drawing| {
+            count
+                .checked_add(drawing.shapes.len())
+                .ok_or_else(|| Error::Limit("OfficeArt present shape count overflow".into()))
+        })?;
+        let present_shape_count = u32::try_from(present_shape_count)
+            .map_err(|_| Error::Limit("OfficeArt present shape count exceeds u32".into()))?;
+        let present_drawing_count = u32::try_from(graph_drawings.len())
+            .map_err(|_| Error::Limit("OfficeArt present drawing count exceeds u32".into()))?;
+        let saved_shape_count_relation = office_art_high_water_relation(
+            drawing_group.saved_shape_count,
+            Some(present_shape_count),
+        );
+        let saved_drawing_count_relation = office_art_high_water_relation(
+            drawing_group.saved_drawing_count,
+            Some(present_drawing_count),
+        );
+        let mut graph = Self {
+            drawing_group: drawing_group.clone(),
+            drawings: graph_drawings,
+            clusters,
+            blip_store: None,
+            blip_references: Vec::new(),
+            incomplete_property_tables,
+            maximum_shape_id_relation,
+            saved_shape_count_relation,
+            saved_drawing_count_relation,
+            issues,
+        };
+        graph.attach_blip_graph(blip_stores, blip_references)?;
+        Ok(graph)
+    }
+
+    fn attach_blip_graph(
+        &mut self,
+        blip_stores: Vec<OfficeArtGraphBlipStoreInput>,
+        references: Vec<OfficeArtBlipReference>,
+    ) -> Result<()> {
+        if blip_stores.len() > 1 {
+            return Err(Error::invalid(
+                0,
+                format!(
+                    "OfficeArtDggContainer contains {} OfficeArtBStoreContainer records, expected at most 1",
+                    blip_stores.len()
+                ),
+            ));
+        }
+        let Some(store) = blip_stores.into_iter().next() else {
+            for reference in &references {
+                self.issues
+                    .push(OfficeArtDrawingGraphIssue::BlipReferenceOutOfRange {
+                        drawing_id: reference.drawing_id,
+                        property_record_type: reference.property_record_type,
+                        property_id: reference.property_id,
+                        blip_identifier: reference.blip_identifier,
+                    });
+            }
+            self.blip_references = references;
+            return Ok(());
+        };
+
+        let entry_count_matches = usize::from(store.declared_entry_count) == store.entries.len();
+        if !entry_count_matches {
+            self.issues
+                .push(OfficeArtDrawingGraphIssue::BlipStoreEntryCountMismatch {
+                    declared: store.declared_entry_count,
+                    actual: store.entries.len(),
+                });
+        }
+        let mut actual_reference_counts = vec![0u32; store.entries.len()];
+        for reference in &references {
+            let Some(zero_based) = reference.blip_identifier.checked_sub(1) else {
+                continue;
+            };
+            let Ok(entry_index) = usize::try_from(zero_based) else {
+                self.issues
+                    .push(OfficeArtDrawingGraphIssue::BlipReferenceOutOfRange {
+                        drawing_id: reference.drawing_id,
+                        property_record_type: reference.property_record_type,
+                        property_id: reference.property_id,
+                        blip_identifier: reference.blip_identifier,
+                    });
+                continue;
+            };
+            let Some(entry) = store.entries.get(entry_index) else {
+                self.issues
+                    .push(OfficeArtDrawingGraphIssue::BlipReferenceOutOfRange {
+                        drawing_id: reference.drawing_id,
+                        property_record_type: reference.property_record_type,
+                        property_id: reference.property_id,
+                        blip_identifier: reference.blip_identifier,
+                    });
+                continue;
+            };
+            actual_reference_counts[entry_index] = actual_reference_counts[entry_index]
+                .checked_add(1)
+                .ok_or_else(|| Error::Limit("OfficeArt BLIP reference count overflow".into()))?;
+            if matches!(entry.fbse, Some((0, _, _))) {
+                self.issues
+                    .push(OfficeArtDrawingGraphIssue::EmptyBlipStoreSlotReferenced {
+                        drawing_id: reference.drawing_id,
+                        property_record_type: reference.property_record_type,
+                        property_id: reference.property_id,
+                        blip_identifier: reference.blip_identifier,
+                    });
+            }
+        }
+        let entries = store
+            .entries
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let actual_reference_count = actual_reference_counts[index];
+                let (kind, reference_count_relation) = match entry.fbse {
+                    Some((declared_reference_count, delay_offset, has_embedded_blip)) => {
+                        let relation = match declared_reference_count.cmp(&actual_reference_count) {
+                            std::cmp::Ordering::Less => {
+                                OfficeArtBlipReferenceCountRelation::BelowActual
+                            }
+                            std::cmp::Ordering::Equal => {
+                                OfficeArtBlipReferenceCountRelation::EqualToActual
+                            }
+                            std::cmp::Ordering::Greater => {
+                                OfficeArtBlipReferenceCountRelation::AboveActual
+                            }
+                        };
+                        (
+                            OfficeArtBlipStoreEntryKind::Fbse {
+                                declared_reference_count,
+                                delay_offset,
+                                has_embedded_blip,
+                            },
+                            Some(relation),
+                        )
+                    }
+                    None => (OfficeArtBlipStoreEntryKind::DirectBlip, None),
+                };
+                Ok(OfficeArtBlipStoreEntry {
+                    blip_identifier: u32::try_from(index + 1).map_err(|_| {
+                        Error::Limit("OfficeArt BLIP identifier exceeds u32".into())
+                    })?,
+                    record_type: entry.record_type,
+                    kind,
+                    actual_reference_count,
+                    reference_count_relation,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.blip_store = Some(OfficeArtBlipStore {
+            declared_entry_count: store.declared_entry_count,
+            entries,
+            entry_count_matches,
+        });
+        self.blip_references = references;
+        Ok(())
+    }
+
+    /// Enforces the literal MS-ODRAW count interpretation. Compatibility
+    /// producer conventions and stale allocation counts remain available from
+    /// `from_streams`, but are not silently accepted here.
+    pub fn validate_strict(&self) -> Result<()> {
+        if !self.issues.is_empty() {
+            return Err(Error::invalid(
+                0,
+                format!(
+                    "OfficeArt drawing graph contains {} identifier or cluster issues",
+                    self.issues.len()
+                ),
+            ));
+        }
+        if !self.incomplete_property_tables.is_empty() {
+            return Err(Error::invalid(
+                0,
+                "OfficeArt drawing graph has incomplete property tables, so its BLIP reference inventory is not complete",
+            ));
+        }
+        for drawing in &self.drawings {
+            if drawing.shape_count_basis != OfficeArtShapeCountBasis::AllPresentShapes {
+                return Err(Error::invalid(
+                    0,
+                    format!(
+                        "OfficeArtFDG {} shape count does not equal its present OfficeArtFSP count",
+                        drawing.drawing_id
+                    ),
+                ));
+            }
+            if !matches!(
+                drawing.current_shape_id_relation,
+                OfficeArtHighWaterRelation::EqualToPresentTree
+                    | OfficeArtHighWaterRelation::EmptyZero
+            ) {
+                return Err(Error::invalid(
+                    0,
+                    format!(
+                        "OfficeArtFDG {} current shape identifier is not the last present shape",
+                        drawing.drawing_id
+                    ),
+                ));
+            }
+        }
+        if self.saved_shape_count_relation != OfficeArtHighWaterRelation::EqualToPresentTree {
+            return Err(Error::invalid(
+                0,
+                "OfficeArtFDGG saved shape count does not equal the present OfficeArtFSP count",
+            ));
+        }
+        if self.saved_drawing_count_relation != OfficeArtHighWaterRelation::EqualToPresentTree {
+            return Err(Error::invalid(
+                0,
+                "OfficeArtFDGG saved drawing count does not equal the drawing containers",
+            ));
+        }
+        if !matches!(
+            self.maximum_shape_id_relation,
+            OfficeArtHighWaterRelation::EqualToPresentTree | OfficeArtHighWaterRelation::EmptyZero
+        ) {
+            return Err(Error::invalid(
+                0,
+                "OfficeArtFDGG maximum shape identifier is not the maximum present shape",
+            ));
+        }
+        if self.clusters.iter().any(|cluster| {
+            !matches!(
+                cluster.shape_id_count_relation,
+                OfficeArtHighWaterRelation::EqualToPresentTree
+                    | OfficeArtHighWaterRelation::EmptyZero
+            )
+        }) {
+            return Err(Error::invalid(
+                0,
+                "OfficeArtIDCL shape-identifier count does not match its present shapes",
+            ));
+        }
+        if self.blip_store.as_ref().is_some_and(|store| {
+            store.entries.iter().any(|entry| {
+                entry.reference_count_relation
+                    != Some(OfficeArtBlipReferenceCountRelation::EqualToActual)
+                    && entry.reference_count_relation.is_some()
+            })
+        }) {
+            return Err(Error::invalid(
+                0,
+                "OfficeArtFBSE reference count does not equal the ordinary BLIP property references",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn collect_office_art_blip_store_inputs(
+    stream: &OfficeArtStream,
+) -> Vec<OfficeArtGraphBlipStoreInput> {
+    let mut stores = Vec::new();
+    stream.visit(|record| {
+        if record.header.record_type != 0xf001 {
+            return;
+        }
+        let children = match &record.data {
+            OfficeArtRecordData::Container(children)
+            | OfficeArtRecordData::CompatibilityContainer(children) => children,
+            _ => return,
+        };
+        stores.push(OfficeArtGraphBlipStoreInput {
+            declared_entry_count: record.header.instance,
+            entries: children
+                .iter()
+                .map(|child| OfficeArtGraphBlipStoreEntryInput {
+                    record_type: child.header.record_type,
+                    fbse: match &child.data {
+                        OfficeArtRecordData::Fbse(value) => Some((
+                            value.reference_count,
+                            value.delay_offset,
+                            value.embedded_blip.is_some(),
+                        )),
+                        _ => None,
+                    },
+                })
+                .collect(),
+        });
+    });
+    stores
+}
+
+fn collect_office_art_blip_references(
+    stream: &OfficeArtStream,
+    drawing_id: Option<u16>,
+) -> (
+    Vec<OfficeArtBlipReference>,
+    Vec<OfficeArtPropertyTableLocation>,
+) {
+    let mut references = Vec::new();
+    let mut incomplete_property_tables = Vec::new();
+    let mut property_table_index = 0usize;
+    stream.visit(|record| {
+        collect_office_art_record_blip_references(
+            record,
+            drawing_id,
+            &mut property_table_index,
+            &mut references,
+            &mut incomplete_property_tables,
+        );
+    });
+    (references, incomplete_property_tables)
+}
+
+pub(crate) fn collect_office_art_record_blip_references(
+    record: &OfficeArtRecord,
+    drawing_id: Option<u16>,
+    property_table_index: &mut usize,
+    references: &mut Vec<OfficeArtBlipReference>,
+    incomplete_property_tables: &mut Vec<OfficeArtPropertyTableLocation>,
+) {
+    match &record.data {
+        OfficeArtRecordData::PropertyTable(table) => {
+            for (property_index, property) in table.properties.iter().enumerate() {
+                if !property.is_blip_id {
+                    continue;
+                }
+                let OfficeArtPropertyValue::Simple(blip_identifier) = property.value else {
+                    continue;
+                };
+                if blip_identifier != 0 {
+                    references.push(OfficeArtBlipReference {
+                        drawing_id,
+                        property_record_type: record.header.record_type,
+                        property_table_index: *property_table_index,
+                        property_index,
+                        property_id: property.property_id,
+                        blip_identifier,
+                    });
+                }
+            }
+            *property_table_index += 1;
+        }
+        OfficeArtRecordData::IncompletePropertyTable(table) => {
+            incomplete_property_tables.push(OfficeArtPropertyTableLocation {
+                drawing_id,
+                property_record_type: record.header.record_type,
+                property_table_index: *property_table_index,
+            });
+            for (property_index, property) in table.entries.iter().enumerate() {
+                if property.is_blip_id
+                    && !property.is_complex
+                    && property.value_or_declared_length != 0
+                {
+                    references.push(OfficeArtBlipReference {
+                        drawing_id,
+                        property_record_type: record.header.record_type,
+                        property_table_index: *property_table_index,
+                        property_index,
+                        property_id: property.property_id,
+                        blip_identifier: property.value_or_declared_length,
+                    });
+                }
+            }
+            *property_table_index += 1;
+        }
+        _ => {}
+    }
+}
+
+fn require_office_art_root(
+    stream: &OfficeArtStream,
+    record_type: u16,
+    structure: &str,
+) -> Result<()> {
+    let [root] = stream.records.as_slice() else {
+        return Err(Error::invalid(
+            0,
+            format!("{structure} stream does not contain exactly one root record"),
+        ));
+    };
+    if root.header.version != 0x0f
+        || root.header.record_type != record_type
+        || !matches!(root.data, OfficeArtRecordData::Container(_))
+    {
+        return Err(Error::invalid(
+            0,
+            format!("{structure} root record has invalid framing"),
+        ));
+    }
+    Ok(())
+}
+
+fn office_art_high_water_relation(
+    value: u32,
+    present_maximum: Option<u32>,
+) -> OfficeArtHighWaterRelation {
+    match present_maximum {
+        None if value == 0 => OfficeArtHighWaterRelation::EmptyZero,
+        None => OfficeArtHighWaterRelation::EmptyNonzero,
+        Some(maximum) if value < maximum => OfficeArtHighWaterRelation::BelowPresentTree,
+        Some(maximum) if value == maximum => OfficeArtHighWaterRelation::EqualToPresentTree,
+        Some(_) => OfficeArtHighWaterRelation::AbovePresentTree,
+    }
+}
+
+impl OfficeArtBStoreDelay {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Self::from_bytes_with_limits(bytes, Limits::default())
+    }
+
+    pub fn from_bytes_with_limits(bytes: &[u8], limits: Limits) -> Result<Self> {
+        let stream = OfficeArtStream::from_bytes_with_limits(bytes, limits)?;
+        for record in &stream.records {
+            if !is_bstore_delay_file_block(record.header.record_type) {
+                return Err(Error::invalid(
+                    0,
+                    format!(
+                        "OfficeArtBStoreDelay contains invalid file-block record type 0x{:04X}",
+                        record.header.record_type
+                    ),
+                ));
+            }
+        }
+        Ok(Self {
+            records: stream.records,
+        })
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        OfficeArtStream {
+            records: self.records.clone(),
+        }
+        .to_bytes()
+    }
+
+    /// Recomputes file-block sizes and returns the old-to-new `foDelay`
+    /// relocation map. The update is transactional.
+    pub fn relayout(&mut self) -> Result<OfficeArtBStoreDelayLayout> {
+        let mut rebuilt = self.clone();
+        let mut old_offset = 0u32;
+        let mut new_offset = 0u32;
+        let mut file_blocks = Vec::with_capacity(rebuilt.records.len());
+        for (record_index, record) in rebuilt.records.iter_mut().enumerate() {
+            if !is_bstore_delay_file_block(record.header.record_type) {
+                return Err(Error::invalid(
+                    u64::from(old_offset),
+                    "OfficeArtBStoreDelay contains an invalid file-block record type",
+                ));
+            }
+            let old_size = record
+                .header
+                .declared_length
+                .checked_add(HEADER_LEN as u32)
+                .ok_or_else(|| Error::Limit("OfficeArt file-block size overflow".into()))?;
+            record.relayout()?;
+            let new_size = record
+                .header
+                .declared_length
+                .checked_add(HEADER_LEN as u32)
+                .ok_or_else(|| Error::Limit("OfficeArt file-block size overflow".into()))?;
+            file_blocks.push(OfficeArtBStoreDelayFileBlockLayout {
+                record_index,
+                record_type: record.header.record_type,
+                old_offset,
+                new_offset,
+                old_size,
+                new_size,
+            });
+            old_offset = old_offset
+                .checked_add(old_size)
+                .ok_or_else(|| Error::Limit("OfficeArt delay-stream offset overflow".into()))?;
+            new_offset = new_offset
+                .checked_add(new_size)
+                .ok_or_else(|| Error::Limit("OfficeArt delay-stream offset overflow".into()))?;
+        }
+        *self = rebuilt;
+        Ok(OfficeArtBStoreDelayLayout { file_blocks })
+    }
+}
+
+impl OfficeArtBStoreDelayLayout {
+    pub fn file_block_at_old_offset(
+        &self,
+        old_offset: u32,
+    ) -> Option<&OfficeArtBStoreDelayFileBlockLayout> {
+        self.file_blocks
+            .iter()
+            .find(|file_block| file_block.old_offset == old_offset)
+    }
+
+    pub fn changed(&self) -> bool {
+        self.file_blocks.iter().any(|file_block| {
+            file_block.old_offset != file_block.new_offset
+                || file_block.old_size != file_block.new_size
+        })
+    }
+}
+
+fn is_bstore_delay_file_block(record_type: u16) -> bool {
+    record_type == 0xf007 || (0xf018..=0xf117).contains(&record_type)
 }
 
 impl OfficeArtPartialStream {
@@ -925,10 +2003,7 @@ impl OfficeArtIncompleteRecord {
                 "OfficeArt incomplete payload exceeds declared length",
             ));
         }
-        let options = u16::from(self.header.version) | (self.header.instance << 4);
-        bytes.extend_from_slice(&options.to_le_bytes());
-        bytes.extend_from_slice(&self.header.record_type.to_le_bytes());
-        bytes.extend_from_slice(&self.header.declared_length.to_le_bytes());
+        self.header.append_to(bytes)?;
         match &self.data {
             OfficeArtIncompleteRecordData::Container(sequence) => {
                 bytes.extend_from_slice(&sequence.to_bytes()?);
@@ -972,7 +2047,76 @@ impl OfficeArtIncompleteRecordData {
 }
 
 impl OfficeArtRecord {
-    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+    /// Recomputes this record's payload length from its typed descendants.
+    pub fn relayout(&mut self) -> Result<()> {
+        match &mut self.data {
+            OfficeArtRecordData::Container(children) => {
+                for child in children.iter_mut() {
+                    child.relayout()?;
+                }
+                if self.header.record_type == 0xf001 {
+                    if children
+                        .iter()
+                        .any(|child| !is_bstore_delay_file_block(child.header.record_type))
+                    {
+                        return Err(Error::invalid(
+                            0,
+                            "OfficeArtBStoreContainer contains an invalid file-block record type",
+                        ));
+                    }
+                    self.header.instance = record_instance_from_len(
+                        children.len(),
+                        "OfficeArtBStoreContainerFileBlock",
+                    )?;
+                }
+            }
+            OfficeArtRecordData::CompatibilityContainer(children) => {
+                for child in children {
+                    child.relayout()?;
+                }
+            }
+            OfficeArtRecordData::Fbse(value) => {
+                if let Some(blip) = &mut value.embedded_blip {
+                    let old_size = blip
+                        .header
+                        .declared_length
+                        .checked_add(HEADER_LEN as u32)
+                        .ok_or_else(|| Error::Limit("embedded BLIP size overflow".into()))?;
+                    blip.relayout()?;
+                    let new_size = blip
+                        .header
+                        .declared_length
+                        .checked_add(HEADER_LEN as u32)
+                        .ok_or_else(|| Error::Limit("embedded BLIP size overflow".into()))?;
+                    if old_size != new_size {
+                        value.declared_blip_size = new_size;
+                    }
+                }
+            }
+            OfficeArtRecordData::DggBlock(value) => value.relayout()?,
+            OfficeArtRecordData::MetafileBlip(value) => value.relayout()?,
+            OfficeArtRecordData::Frit(values) => {
+                self.header.instance = record_instance_from_len(values.len(), "OfficeArtFRIT")?;
+            }
+            OfficeArtRecordData::ColorMru(colors) => {
+                self.header.instance = record_instance_from_len(colors.len(), "MSOCR")?;
+            }
+            OfficeArtRecordData::PropertyTable(value)
+                if matches!(self.header.record_type, 0xf00b | 0xf121 | 0xf122) =>
+            {
+                value.relayout()?;
+                self.header.instance =
+                    record_instance_from_len(value.properties.len(), "OfficeArtFOPTE")?;
+            }
+            _ => {}
+        }
+        let payload = self.payload_bytes()?;
+        self.header.declared_length = u32::try_from(payload.len())
+            .map_err(|_| Error::Limit("OfficeArt record payload exceeds u32".into()))?;
+        Ok(())
+    }
+
+    fn payload_bytes(&self) -> Result<Vec<u8>> {
         if self.header.version > 0x0f || self.header.instance > 0x0fff {
             return Err(Error::invalid(
                 0,
@@ -1051,19 +2195,32 @@ impl OfficeArtRecord {
                 payload.extend_from_slice(&value.story_index.to_le_bytes());
             }
         }
+        Ok(payload)
+    }
+
+    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        let payload = self.payload_bytes()?;
         if usize::try_from(self.header.declared_length).ok() != Some(payload.len()) {
             return Err(Error::invalid(
                 0,
                 "OfficeArt declared length does not match payload",
             ));
         }
-        let options = u16::from(self.header.version) | (self.header.instance << 4);
-        bytes.extend_from_slice(&options.to_le_bytes());
-        bytes.extend_from_slice(&self.header.record_type.to_le_bytes());
-        bytes.extend_from_slice(&self.header.declared_length.to_le_bytes());
+        self.header.append_to(bytes)?;
         bytes.extend_from_slice(&payload);
         Ok(())
     }
+}
+
+fn record_instance_from_len(len: usize, structure: &str) -> Result<u16> {
+    let instance =
+        u16::try_from(len).map_err(|_| Error::Limit(format!("{structure} count exceeds u16")))?;
+    if instance > 0x0fff {
+        return Err(Error::Limit(format!(
+            "{structure} count exceeds OfficeArt recInstance"
+        )));
+    }
+    Ok(instance)
 }
 
 fn parse_records(
@@ -1152,14 +2309,7 @@ fn parse_partial_sequence(
             )));
         }
         *record_count += 1;
-        let header_bytes = &remaining[..HEADER_LEN];
-        let options = u16::from_le_bytes([header_bytes[0], header_bytes[1]]);
-        let header = OfficeArtRecordHeader {
-            version: (options & 0x000f) as u8,
-            instance: options >> 4,
-            record_type: u16::from_le_bytes([header_bytes[2], header_bytes[3]]),
-            declared_length: u32::from_le_bytes(header_bytes[4..8].try_into().expect("four bytes")),
-        };
+        let header = OfficeArtRecordHeader::read_slice(remaining)?;
         let declared_len = usize::try_from(header.declared_length).unwrap_or(usize::MAX);
         let available_len = declared_len.min(remaining.len() - HEADER_LEN);
         let available_payload = &remaining[HEADER_LEN..HEADER_LEN + available_len];
@@ -1288,16 +2438,7 @@ fn parse_one_record(
             "OfficeArt container depth exceeds {MAX_CONTAINER_DEPTH}"
         )));
     }
-    let header_bytes = bytes
-        .get(..HEADER_LEN)
-        .ok_or_else(|| Error::invalid(0, "truncated OfficeArt record header"))?;
-    let options = u16::from_le_bytes([header_bytes[0], header_bytes[1]]);
-    let header = OfficeArtRecordHeader {
-        version: (options & 0x000f) as u8,
-        instance: options >> 4,
-        record_type: u16::from_le_bytes([header_bytes[2], header_bytes[3]]),
-        declared_length: u32::from_le_bytes(header_bytes[4..8].try_into().expect("four bytes")),
-    };
+    let header = OfficeArtRecordHeader::read_slice(bytes)?;
     let payload_len = usize::try_from(header.declared_length)
         .map_err(|_| Error::Limit("OfficeArt payload length exceeds usize".into()))?;
     if payload_len > limits.max_allocation {
@@ -1590,6 +2731,62 @@ impl OfficeArtMetafileBlip {
             OfficeArtMetafileData::Opaque {
                 original_encoded, ..
             } => payload.extend_from_slice(original_encoded),
+        }
+        Ok(())
+    }
+
+    fn relayout(&mut self) -> Result<()> {
+        let (decoded_len, encoded) = match &self.file_data {
+            OfficeArtMetafileData::Emf {
+                decoded,
+                original_encoded,
+            }
+            | OfficeArtMetafileData::Wmf {
+                decoded,
+                original_encoded,
+            }
+            | OfficeArtMetafileData::Pict {
+                decoded,
+                original_encoded,
+            } => {
+                if decode_metafile_data(
+                    original_encoded,
+                    self.metafile_header.compression,
+                    decoded.len(),
+                )
+                .as_deref()
+                    == Some(decoded)
+                {
+                    return Ok(());
+                }
+                let mut encoded = Vec::new();
+                write_typed_metafile(
+                    &mut encoded,
+                    decoded,
+                    original_encoded,
+                    self.metafile_header.compression,
+                )?;
+                (Some(decoded.len()), encoded)
+            }
+            OfficeArtMetafileData::Opaque { .. } => return Ok(()),
+        };
+        if let Some(decoded_len) = decoded_len {
+            self.metafile_header.uncompressed_size = u32::try_from(decoded_len)
+                .map_err(|_| Error::Limit("OfficeArt metafile data exceeds u32".into()))?;
+        }
+        self.metafile_header.saved_size = u32::try_from(encoded.len())
+            .map_err(|_| Error::Limit("OfficeArt encoded metafile exceeds u32".into()))?;
+        match &mut self.file_data {
+            OfficeArtMetafileData::Emf {
+                original_encoded, ..
+            }
+            | OfficeArtMetafileData::Wmf {
+                original_encoded, ..
+            }
+            | OfficeArtMetafileData::Pict {
+                original_encoded, ..
+            } => *original_encoded = encoded,
+            OfficeArtMetafileData::Opaque { .. } => unreachable!("opaque data returned above"),
         }
         Ok(())
     }
@@ -2128,7 +3325,9 @@ impl OfficeArtDggBlock {
             .chunks_exact(8)
             .map(|cluster| OfficeArtIdCluster {
                 drawing_id: u32::from_le_bytes(cluster[0..4].try_into().expect("four bytes")),
-                current_shape_id: u32::from_le_bytes(cluster[4..8].try_into().expect("four bytes")),
+                current_shape_id_count: u32::from_le_bytes(
+                    cluster[4..8].try_into().expect("four bytes"),
+                ),
             })
             .collect::<Vec<_>>();
         Some(Self {
@@ -2157,8 +3356,16 @@ impl OfficeArtDggBlock {
         payload.extend_from_slice(&self.saved_drawing_count.to_le_bytes());
         for cluster in &self.clusters {
             payload.extend_from_slice(&cluster.drawing_id.to_le_bytes());
-            payload.extend_from_slice(&cluster.current_shape_id.to_le_bytes());
+            payload.extend_from_slice(&cluster.current_shape_id_count.to_le_bytes());
         }
+        Ok(())
+    }
+
+    fn relayout(&mut self) -> Result<()> {
+        self.declared_cluster_count = u32::try_from(self.clusters.len())
+            .map_err(|_| Error::Limit("OfficeArt FDGG cluster count exceeds u32".into()))?
+            .checked_add(1)
+            .ok_or_else(|| Error::Limit("OfficeArt FDGG cluster count overflow".into()))?;
         Ok(())
     }
 }
@@ -2396,6 +3603,77 @@ impl OfficeArtPropertyTable {
         payload.extend_from_slice(&self.trailing);
         Ok(())
     }
+
+    fn relayout(&mut self) -> Result<()> {
+        for property in &mut self.properties {
+            match &mut property.value {
+                OfficeArtPropertyValue::Simple(_) => {}
+                OfficeArtPropertyValue::Complex {
+                    declared_length,
+                    data,
+                } => {
+                    *declared_length = u32::try_from(data.len()).map_err(|_| {
+                        Error::Limit("OfficeArt complex property exceeds u32".into())
+                    })?;
+                }
+                OfficeArtPropertyValue::Utf16String {
+                    declared_length,
+                    code_units,
+                } => {
+                    *declared_length =
+                        u32::try_from(code_units.len().checked_mul(2).ok_or_else(|| {
+                            Error::Limit("OfficeArt UTF-16 property length overflow".into())
+                        })?)
+                        .map_err(|_| {
+                            Error::Limit("OfficeArt UTF-16 property exceeds u32".into())
+                        })?;
+                }
+                OfficeArtPropertyValue::EmptyComplex { declared_length }
+                | OfficeArtPropertyValue::EmptyArray { declared_length } => {
+                    *declared_length = 0;
+                }
+                OfficeArtPropertyValue::Array {
+                    declared_length,
+                    declared_length_delta,
+                    value,
+                } => {
+                    let encoded_len = value.relayout()?;
+                    let declared = encoded_len
+                        .checked_sub(usize::from(*declared_length_delta))
+                        .ok_or_else(|| {
+                            Error::invalid(0, "OfficeArt array delta exceeds its encoded length")
+                        })?;
+                    *declared_length = u32::try_from(declared)
+                        .map_err(|_| Error::Limit("OfficeArt array property exceeds u32".into()))?;
+                }
+                OfficeArtPropertyValue::MetroBlob {
+                    declared_length,
+                    value,
+                } => {
+                    value.validate()?;
+                    *declared_length = u32::try_from(value.package_bytes.len()).map_err(|_| {
+                        Error::Limit("OfficeArt metroBlob property exceeds u32".into())
+                    })?;
+                }
+                OfficeArtPropertyValue::Hyperlink {
+                    declared_length,
+                    class_id,
+                    object,
+                } => {
+                    if *class_id != STANDARD_HYPERLINK_CLASS_ID {
+                        return Err(Error::invalid(0, "OfficeArt IHlink CLSID changed"));
+                    }
+                    let length = object.to_bytes()?.len().checked_add(16).ok_or_else(|| {
+                        Error::Limit("OfficeArt IHlink property length overflow".into())
+                    })?;
+                    *declared_length = u32::try_from(length).map_err(|_| {
+                        Error::Limit("OfficeArt IHlink property exceeds u32".into())
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn is_utf16_complex_property(property_id: u16) -> bool {
@@ -2625,6 +3903,20 @@ impl OfficeArtArray {
             .ok_or_else(|| Error::Limit("OfficeArt array length overflow".into()))
     }
 
+    fn relayout(&mut self) -> Result<usize> {
+        let element_count = u16::try_from(self.data.element_count())
+            .map_err(|_| Error::Limit("OfficeArt array element count exceeds u16".into()))?;
+        self.element_count = element_count;
+        self.allocated_element_count = self.allocated_element_count.max(element_count);
+        let element_size = self.data.element_size();
+        self.encoded_element_size = if self.encoded_element_size == 0xfff0 && element_size == 4 {
+            0xfff0
+        } else {
+            element_size
+        };
+        self.encoded_len()
+    }
+
     fn write(&self, payload: &mut Vec<u8>) -> Result<()> {
         self.encoded_len()?;
         payload.extend_from_slice(&self.element_count.to_le_bytes());
@@ -2707,6 +3999,15 @@ impl OfficeArtArrayData {
             Self::FixedPointBits(values) | Self::Unsigned32(values) => values.len() * 4,
             Self::Rectangles(values) => values.len() * 16,
             Self::ShadeColors(values) => values.len() * 8,
+        }
+    }
+
+    fn element_size(&self) -> u16 {
+        match self {
+            Self::Points16(_) | Self::FixedPointBits(_) | Self::Unsigned32(_) => 4,
+            Self::Points32(_) | Self::ShadeColors(_) => 8,
+            Self::Segments(_) => 2,
+            Self::Rectangles(_) => 16,
         }
     }
 
@@ -3001,6 +4302,43 @@ impl OfficeArtIncompletePropertyEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_record_header_is_byte_exact_and_enforces_bit_widths() {
+        let header = OfficeArtRecordHeader {
+            version: 5,
+            instance: 0x0abc,
+            record_type: 0xf119,
+            declared_length: 0x1122_3344,
+        };
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        header.write_to(&mut writer).unwrap();
+        let bytes = writer.into_inner().into_inner();
+        assert_eq!(bytes, [0xc5, 0xab, 0x19, 0xf1, 0x44, 0x33, 0x22, 0x11]);
+        assert_eq!(header.sdk_size(), HEADER_LEN as u64);
+        let mut reader = Reader::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(
+            OfficeArtRecordHeader::read_from(&mut reader).unwrap(),
+            header
+        );
+
+        for invalid in [
+            OfficeArtRecordHeader {
+                version: 0x10,
+                ..header
+            },
+            OfficeArtRecordHeader {
+                instance: 0x1000,
+                ..header
+            },
+        ] {
+            assert!(
+                invalid
+                    .write_to(&mut Writer::new(Cursor::new(Vec::new())))
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn nested_container_and_atom_round_trip() {
@@ -3573,5 +4911,439 @@ mod tests {
             Some(OfficeArtRecordData::BitmapBlip(_))
         ));
         assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn relayout_rebuilds_local_record_counts_and_property_lengths() {
+        let mut stream = OfficeArtStream {
+            records: vec![
+                OfficeArtRecord {
+                    header: OfficeArtRecordHeader {
+                        version: 0,
+                        instance: 0,
+                        record_type: 0xf006,
+                        declared_length: 24,
+                    },
+                    data: OfficeArtRecordData::DggBlock(OfficeArtDggBlock {
+                        maximum_shape_id: 1024,
+                        declared_cluster_count: 2,
+                        saved_shape_count: 1,
+                        saved_drawing_count: 1,
+                        clusters: vec![OfficeArtIdCluster {
+                            drawing_id: 1,
+                            current_shape_id_count: 2,
+                        }],
+                    }),
+                },
+                OfficeArtRecord {
+                    header: OfficeArtRecordHeader {
+                        version: 0,
+                        instance: 1,
+                        record_type: 0xf118,
+                        declared_length: 4,
+                    },
+                    data: OfficeArtRecordData::Frit(vec![OfficeArtFrit {
+                        new_group_id: 2,
+                        old_group_id: 1,
+                    }]),
+                },
+                OfficeArtRecord {
+                    header: OfficeArtRecordHeader {
+                        version: 0,
+                        instance: 1,
+                        record_type: 0xf11a,
+                        declared_length: 4,
+                    },
+                    data: OfficeArtRecordData::ColorMru(vec![OfficeArtColor(0x0011_2233)]),
+                },
+                OfficeArtRecord {
+                    header: OfficeArtRecordHeader {
+                        version: 3,
+                        instance: 1,
+                        record_type: 0xf00b,
+                        declared_length: 10,
+                    },
+                    data: OfficeArtRecordData::PropertyTable(OfficeArtPropertyTable {
+                        properties: vec![OfficeArtProperty {
+                            property_id: 0x0380,
+                            is_blip_id: false,
+                            value: OfficeArtPropertyValue::Utf16String {
+                                declared_length: 4,
+                                code_units: vec![u16::from(b'A'), 0],
+                            },
+                        }],
+                        trailing: Vec::new(),
+                    }),
+                },
+                OfficeArtRecord {
+                    header: OfficeArtRecordHeader {
+                        version: 3,
+                        instance: 1,
+                        record_type: 0xf121,
+                        declared_length: 14,
+                    },
+                    data: OfficeArtRecordData::PropertyTable(OfficeArtPropertyTable {
+                        properties: vec![OfficeArtProperty {
+                            property_id: 0x0146,
+                            is_blip_id: false,
+                            value: OfficeArtPropertyValue::Array {
+                                declared_length: 8,
+                                declared_length_delta: 0,
+                                value: OfficeArtArray {
+                                    element_count: 1,
+                                    allocated_element_count: 1,
+                                    encoded_element_size: 2,
+                                    data: OfficeArtArrayData::Segments(vec![1]),
+                                },
+                            },
+                        }],
+                        trailing: Vec::new(),
+                    }),
+                },
+                OfficeArtRecord {
+                    header: OfficeArtRecordHeader {
+                        version: 0x0f,
+                        instance: 0,
+                        record_type: 0xf001,
+                        declared_length: 0,
+                    },
+                    data: OfficeArtRecordData::Container(vec![OfficeArtRecord {
+                        header: OfficeArtRecordHeader {
+                            version: 0,
+                            instance: 0,
+                            record_type: 0xf018,
+                            declared_length: 0,
+                        },
+                        data: OfficeArtRecordData::Atom(Vec::new()),
+                    }]),
+                },
+            ],
+        };
+
+        let OfficeArtRecordData::DggBlock(dgg) = &mut stream.records[0].data else {
+            unreachable!()
+        };
+        dgg.clusters.push(OfficeArtIdCluster {
+            drawing_id: 2,
+            current_shape_id_count: 3,
+        });
+        let OfficeArtRecordData::Frit(values) = &mut stream.records[1].data else {
+            unreachable!()
+        };
+        values.push(OfficeArtFrit {
+            new_group_id: 4,
+            old_group_id: 3,
+        });
+        let OfficeArtRecordData::ColorMru(colors) = &mut stream.records[2].data else {
+            unreachable!()
+        };
+        colors.push(OfficeArtColor(0x0044_5566));
+        let OfficeArtRecordData::PropertyTable(table) = &mut stream.records[3].data else {
+            unreachable!()
+        };
+        let OfficeArtPropertyValue::Utf16String { code_units, .. } = &mut table.properties[0].value
+        else {
+            unreachable!()
+        };
+        code_units.insert(1, u16::from(b'B'));
+        table.properties.push(OfficeArtProperty {
+            property_id: 0x0181,
+            is_blip_id: false,
+            value: OfficeArtPropertyValue::Simple(7),
+        });
+        let OfficeArtRecordData::PropertyTable(table) = &mut stream.records[4].data else {
+            unreachable!()
+        };
+        let OfficeArtPropertyValue::Array { value, .. } = &mut table.properties[0].value else {
+            unreachable!()
+        };
+        let OfficeArtArrayData::Segments(segments) = &mut value.data else {
+            unreachable!()
+        };
+        segments.push(2);
+
+        stream.relayout().unwrap();
+        let OfficeArtRecordData::DggBlock(dgg) = &stream.records[0].data else {
+            unreachable!()
+        };
+        assert_eq!(dgg.declared_cluster_count, 3);
+        assert_eq!(stream.records[0].header.declared_length, 32);
+        assert_eq!(stream.records[1].header.instance, 2);
+        assert_eq!(stream.records[1].header.declared_length, 8);
+        assert_eq!(stream.records[2].header.instance, 2);
+        assert_eq!(stream.records[2].header.declared_length, 8);
+        assert_eq!(stream.records[3].header.instance, 2);
+        assert_eq!(stream.records[3].header.declared_length, 18);
+        let OfficeArtRecordData::PropertyTable(table) = &stream.records[3].data else {
+            unreachable!()
+        };
+        assert!(matches!(
+            table.properties[0].value,
+            OfficeArtPropertyValue::Utf16String {
+                declared_length: 6,
+                ..
+            }
+        ));
+        let OfficeArtRecordData::PropertyTable(table) = &stream.records[4].data else {
+            unreachable!()
+        };
+        assert!(matches!(
+            table.properties[0].value,
+            OfficeArtPropertyValue::Array {
+                declared_length: 10,
+                value: OfficeArtArray {
+                    element_count: 2,
+                    allocated_element_count: 2,
+                    ..
+                },
+                ..
+            }
+        ));
+        assert_eq!(stream.records[4].header.declared_length, 16);
+        assert_eq!(stream.records[5].header.instance, 1);
+        assert_eq!(stream.records[5].header.declared_length, 8);
+
+        let bytes = stream.to_bytes().unwrap();
+        assert_eq!(OfficeArtStream::from_bytes(&bytes).unwrap(), stream);
+
+        let mut oversized = OfficeArtStream {
+            records: vec![OfficeArtRecord {
+                header: OfficeArtRecordHeader {
+                    version: 0,
+                    instance: 0,
+                    record_type: 0xf11a,
+                    declared_length: 0,
+                },
+                data: OfficeArtRecordData::ColorMru(vec![OfficeArtColor(0); 0x1000]),
+            }],
+        };
+        let unchanged = oversized.clone();
+        assert!(oversized.relayout().is_err());
+        assert_eq!(oversized, unchanged);
+    }
+
+    #[test]
+    fn drawing_graph_aggregates_ids_and_keeps_count_conventions_explicit() {
+        let mut drawing_group = OfficeArtStream {
+            records: vec![OfficeArtRecord {
+                header: OfficeArtRecordHeader {
+                    version: 0x0f,
+                    instance: 0,
+                    record_type: 0xf000,
+                    declared_length: 0,
+                },
+                data: OfficeArtRecordData::Container(vec![OfficeArtRecord {
+                    header: OfficeArtRecordHeader {
+                        version: 0,
+                        instance: 0,
+                        record_type: 0xf006,
+                        declared_length: 0,
+                    },
+                    data: OfficeArtRecordData::DggBlock(OfficeArtDggBlock {
+                        maximum_shape_id: 1025,
+                        declared_cluster_count: 2,
+                        saved_shape_count: 2,
+                        saved_drawing_count: 1,
+                        clusters: vec![OfficeArtIdCluster {
+                            drawing_id: 1,
+                            current_shape_id_count: 2,
+                        }],
+                    }),
+                }]),
+            }],
+        };
+        let mut drawing = OfficeArtStream {
+            records: vec![OfficeArtRecord {
+                header: OfficeArtRecordHeader {
+                    version: 0x0f,
+                    instance: 0,
+                    record_type: 0xf002,
+                    declared_length: 0,
+                },
+                data: OfficeArtRecordData::Container(vec![
+                    OfficeArtRecord {
+                        header: OfficeArtRecordHeader {
+                            version: 0,
+                            instance: 1,
+                            record_type: 0xf008,
+                            declared_length: 8,
+                        },
+                        data: OfficeArtRecordData::Drawing(OfficeArtDrawing {
+                            shape_count: 2,
+                            current_shape_id: 1025,
+                        }),
+                    },
+                    OfficeArtRecord {
+                        header: OfficeArtRecordHeader {
+                            version: 2,
+                            instance: 0,
+                            record_type: 0xf00a,
+                            declared_length: 8,
+                        },
+                        data: OfficeArtRecordData::Shape(OfficeArtShape {
+                            shape_id: 1024,
+                            flags: OfficeArtShapeFlags::PATRIARCH,
+                        }),
+                    },
+                    OfficeArtRecord {
+                        header: OfficeArtRecordHeader {
+                            version: 2,
+                            instance: 1,
+                            record_type: 0xf00a,
+                            declared_length: 8,
+                        },
+                        data: OfficeArtRecordData::Shape(OfficeArtShape {
+                            shape_id: 1025,
+                            flags: OfficeArtShapeFlags::empty(),
+                        }),
+                    },
+                ]),
+            }],
+        };
+        drawing_group.relayout().unwrap();
+        drawing.relayout().unwrap();
+
+        let graph = OfficeArtDrawingGraph::from_streams(&drawing_group, &[&drawing]).unwrap();
+        assert_eq!(graph.drawings.len(), 1);
+        assert_eq!(graph.drawings[0].drawing_id, 1);
+        assert_eq!(graph.drawings[0].shapes.len(), 2);
+        assert_eq!(graph.drawings[0].patriarch_shape_count, 1);
+        assert_eq!(
+            graph.drawings[0].shape_count_basis,
+            OfficeArtShapeCountBasis::AllPresentShapes
+        );
+        assert_eq!(
+            graph.maximum_shape_id_relation,
+            OfficeArtHighWaterRelation::EqualToPresentTree
+        );
+        assert_eq!(
+            graph.clusters[0].shape_id_count_relation,
+            OfficeArtHighWaterRelation::EqualToPresentTree
+        );
+        graph.validate_strict().unwrap();
+
+        let mut next_id_compatibility = drawing_group.clone();
+        next_id_compatibility.visit_mut(|record| {
+            if let OfficeArtRecordData::DggBlock(dgg) = &mut record.data {
+                dgg.maximum_shape_id += 1;
+            }
+        });
+        let graph =
+            OfficeArtDrawingGraph::from_streams(&next_id_compatibility, &[&drawing]).unwrap();
+        assert_eq!(
+            graph.maximum_shape_id_relation,
+            OfficeArtHighWaterRelation::AbovePresentTree
+        );
+        assert!(graph.validate_strict().is_err());
+
+        let OfficeArtRecordData::Container(children) = &mut drawing.records[0].data else {
+            unreachable!()
+        };
+        let OfficeArtRecordData::Drawing(fdg) = &mut children[0].data else {
+            unreachable!()
+        };
+        fdg.shape_count = 1;
+        let graph = OfficeArtDrawingGraph::from_streams(&drawing_group, &[&drawing]).unwrap();
+        assert_eq!(
+            graph.drawings[0].shape_count_basis,
+            OfficeArtShapeCountBasis::ExcludesPatriarchShapes
+        );
+        assert!(graph.validate_strict().is_err());
+    }
+
+    #[test]
+    fn empty_drawing_graph_accepts_exact_zero_counts() {
+        let graph = OfficeArtDrawingGraph::from_components(
+            OfficeArtDggBlock {
+                maximum_shape_id: 0,
+                declared_cluster_count: 1,
+                saved_shape_count: 0,
+                saved_drawing_count: 0,
+                clusters: Vec::new(),
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            graph.maximum_shape_id_relation,
+            OfficeArtHighWaterRelation::EmptyZero
+        );
+        assert_eq!(
+            graph.saved_shape_count_relation,
+            OfficeArtHighWaterRelation::EqualToPresentTree
+        );
+        assert_eq!(
+            graph.saved_drawing_count_relation,
+            OfficeArtHighWaterRelation::EqualToPresentTree
+        );
+        graph.validate_strict().unwrap();
+    }
+
+    #[test]
+    fn blip_graph_resolves_one_based_properties_and_fbse_reference_counts() {
+        let references = vec![
+            OfficeArtBlipReference {
+                drawing_id: None,
+                property_record_type: 0xf00b,
+                property_table_index: 0,
+                property_index: 0,
+                property_id: 0x0104,
+                blip_identifier: 1,
+            },
+            OfficeArtBlipReference {
+                drawing_id: None,
+                property_record_type: 0xf122,
+                property_table_index: 1,
+                property_index: 0,
+                property_id: 0x0186,
+                blip_identifier: 1,
+            },
+            OfficeArtBlipReference {
+                drawing_id: None,
+                property_record_type: 0xf00b,
+                property_table_index: 2,
+                property_index: 0,
+                property_id: 0x01c5,
+                blip_identifier: 2,
+            },
+        ];
+        let graph = OfficeArtDrawingGraph::from_components_with_blips(
+            OfficeArtDggBlock {
+                maximum_shape_id: 0,
+                declared_cluster_count: 1,
+                saved_shape_count: 0,
+                saved_drawing_count: 0,
+                clusters: Vec::new(),
+            },
+            vec![OfficeArtGraphBlipStoreInput {
+                declared_entry_count: 2,
+                entries: vec![
+                    OfficeArtGraphBlipStoreEntryInput {
+                        record_type: 0xf007,
+                        fbse: Some((2, 0, true)),
+                    },
+                    OfficeArtGraphBlipStoreEntryInput {
+                        record_type: 0xf01e,
+                        fbse: None,
+                    },
+                ],
+            }],
+            references,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+
+        let store = graph.blip_store.as_ref().unwrap();
+        assert!(store.entry_count_matches);
+        assert_eq!(store.entries[0].blip_identifier, 1);
+        assert_eq!(store.entries[0].actual_reference_count, 2);
+        assert_eq!(
+            store.entries[0].reference_count_relation,
+            Some(OfficeArtBlipReferenceCountRelation::EqualToActual)
+        );
+        assert_eq!(store.entries[1].actual_reference_count, 1);
+        assert_eq!(store.entries[1].reference_count_relation, None);
+        graph.validate_strict().unwrap();
     }
 }

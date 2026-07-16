@@ -2,7 +2,7 @@
 
 mod file;
 
-pub use file::PptFile;
+pub use file::{PptAppendUserEditReport, PptFile, PptHistoryStrategy};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -12,11 +12,18 @@ use std::{
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 
 use crate::{
-    Error, Result, SdkObject,
+    Error, Result, SdkBitfield, SdkObject,
     cfb::CompoundFile,
-    io::{Reader, SdkRead, SdkWrite, Writer},
+    io::{BinaryFormat, Reader, SdkRead, SdkWrite, Writer},
     limits::Limits,
-    office_art::{OfficeArtPartialStream, OfficeArtRecord, OfficeArtRecordData, OfficeArtStream},
+    office_art::{
+        OfficeArtBStoreDelay, OfficeArtBStoreDelayLayout, OfficeArtBlipReference,
+        OfficeArtDggBlock, OfficeArtDrawingGraph, OfficeArtGraphBlipStoreEntryInput,
+        OfficeArtGraphBlipStoreInput, OfficeArtGraphDrawingInput, OfficeArtPartialStream,
+        OfficeArtPropertyTableLocation, OfficeArtRecord, OfficeArtRecordData, OfficeArtStream,
+        collect_office_art_record_blip_references,
+    },
+    parse::{ParseDiagnostic, ParseDiagnosticCode, ParseOutcome, SpecificationReference},
     vba::VbaProject,
 };
 
@@ -25,7 +32,19 @@ const MAX_RECORD_DEPTH: usize = 256;
 
 pub const USER_EDIT_ATOM: u16 = 0x0ff5;
 pub const CURRENT_USER_ATOM: u16 = 0x0ff6;
+pub const DOCUMENT_CONTAINER: u16 = 0x03e8;
+pub const SLIDE_CONTAINER: u16 = 0x03ee;
+pub const NOTES_CONTAINER: u16 = 0x03f0;
+pub const MAIN_MASTER_CONTAINER: u16 = 0x03f8;
+pub const HANDOUT_CONTAINER: u16 = 0x0fc9;
 pub const EXTERNAL_OLE_OBJECT_STORAGE: u16 = 0x1011;
+pub const VBA_INFO_CONTAINER: u16 = 0x03ff;
+pub const EXTERNAL_OBJECT_LIST_CONTAINER: u16 = 0x0409;
+pub const DOCUMENT_INFO_LIST_CONTAINER: u16 = 0x07d0;
+pub const EXTERNAL_OLE_EMBED_CONTAINER: u16 = 0x0fcc;
+pub const EXTERNAL_OLE_LINK_CONTAINER: u16 = 0x0fce;
+pub const EXTERNAL_OLE_CONTROL_CONTAINER: u16 = 0x0fee;
+pub const SLIDE_LIST_WITH_TEXT_CONTAINER: u16 = 0x0ff0;
 pub const ROUND_TRIP_CONTENT_MASTER_INFO_12_ATOM: u16 = 0x041e;
 pub const ROUND_TRIP_THEME_12_ATOM: u16 = 0x040e;
 pub const ROUND_TRIP_OART_TEXT_STYLES_12_ATOM: u16 = 0x0423;
@@ -183,6 +202,22 @@ pub struct PptRecordHeader {
     pub declared_length: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u16")]
+struct PptRecordVersionInstance {
+    #[sdk(bits = 0..=3)]
+    version: u8,
+    #[sdk(bits = 4..=15)]
+    instance: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+struct PptRecordHeaderWire {
+    version_instance: PptRecordVersionInstance,
+    record_type: u16,
+    declared_length: u32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PowerPointDocument {
     pub records: PptRecordSequence,
@@ -198,7 +233,11 @@ pub struct CurrentUserStream {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PicturesStream {
-    Complete(OfficeArtStream),
+    Complete(OfficeArtBStoreDelay),
+    Compatibility {
+        stream: OfficeArtStream,
+        reason: String,
+    },
     Partial(OfficeArtPartialStream),
 }
 
@@ -513,7 +552,8 @@ impl ProgBinaryTag {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_user_edit_atom")]
 pub struct UserEditAtom {
     pub last_slide_id_ref: u32,
     pub version: u16,
@@ -525,7 +565,36 @@ pub struct UserEditAtom {
     pub persist_id_seed: u32,
     pub last_view: u16,
     pub unused: u16,
+    #[sdk(optional_remaining)]
     pub encrypt_session_persist_id_ref: Option<u32>,
+}
+
+fn validate_user_edit_atom(value: &UserEditAtom, offset: u64) -> Result<()> {
+    if value.minor_version != 0 {
+        return Err(Error::invalid(
+            offset + 6,
+            "UserEditAtom.minorVersion must be 0x00",
+        ));
+    }
+    if value.major_version != 3 {
+        return Err(Error::invalid(
+            offset + 7,
+            "UserEditAtom.majorVersion must be 0x03",
+        ));
+    }
+    if value.doc_persist_id_ref != 1 {
+        return Err(Error::invalid(
+            offset + 16,
+            "UserEditAtom.docPersistIdRef must be 0x00000001",
+        ));
+    }
+    if !(1..=0x12).contains(&value.last_view) {
+        return Err(Error::invalid(
+            offset + 24,
+            "UserEditAtom.lastView is not a ViewTypeEnum value",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -724,7 +793,7 @@ pub struct BroadcastDocInfo9Atom {
     pub end_time: SystemTime,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct TextDefaults9Atom {
     pub character: TextCharacterException9,
     pub paragraph: TextParagraphException9,
@@ -1499,7 +1568,7 @@ pub struct TextMasterStyle9Atom {
     pub levels: Vec<TextMasterStyle9Level>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct TextMasterStyle9Level {
     pub paragraph: TextParagraphException9,
     pub character: TextCharacterException9,
@@ -1516,12 +1585,15 @@ pub struct TextMasterStyle10Atom {
     pub levels: Vec<TextCharacterException10>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct TextCharacterException10 {
     pub mask: u32,
+    #[sdk(condition = "mask", mask = 0x0100_0000)]
     pub new_east_asian_font_ref: Option<u16>,
+    #[sdk(condition = "mask", mask = 0x0200_0000)]
     pub complex_script_font_ref: Option<u16>,
     /// Undefined PP11 extension bits, retained verbatim.
+    #[sdk(condition = "mask", mask = 0x0400_0000)]
     pub pp11_extension: Option<u32>,
 }
 
@@ -1707,11 +1779,14 @@ pub struct StyleTextProp9 {
     pub special_info: TextSpecialInfoException,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct TextParagraphException9 {
     pub mask: u32,
+    #[sdk(condition = "mask", mask = 0x0080_0000)]
     pub bullet_blip_ref: Option<u16>,
+    #[sdk(condition = "mask", mask = 0x0200_0000)]
     pub bullet_has_auto_number: Option<i16>,
+    #[sdk(condition = "mask", mask = 0x0100_0000)]
     pub auto_number_scheme: Option<TextAutoNumberScheme>,
 }
 
@@ -1721,10 +1796,11 @@ pub struct TextAutoNumberScheme {
     pub start_number: i16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct TextCharacterException9 {
     pub mask: u32,
     /// Low four bits are pp10runid; the remaining bits are retained unused data.
+    #[sdk(condition = "mask", mask = 0x0010_0000)]
     pub pp10_extension: Option<u32>,
 }
 
@@ -1852,6 +1928,190 @@ pub struct IncrementalSaveEdit {
     pub persist_directory: PersistDirectoryAtom,
 }
 
+/// MS-PPT 2.1.2 Part 1 newest-wins directory plus its physical history.
+///
+/// A current directory reference is not necessarily a live presentation
+/// object. Presentation liveness additionally depends on the references
+/// reached from the current DocumentContainer in Parts 2 through 11.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersistObjectDirectory {
+    /// User-edit chain used to construct this directory.
+    pub incremental_save_chain: IncrementalSaveChain,
+    /// Every physical directory entry, ordered from the current edit toward
+    /// the oldest edit and in physical entry order within each edit.
+    pub references: Vec<PersistObjectReference>,
+    /// Effective newest-wins reference for each persist object identifier.
+    pub current_references: BTreeMap<u32, PersistObjectReference>,
+    /// Classification of every physical top-level record in stream order.
+    pub top_level_records: Vec<PptTopLevelRecordState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PersistObjectReference {
+    pub persist_id: u32,
+    pub stream_offset: u32,
+    pub record_index: usize,
+    pub user_edit_offset: u32,
+    pub persist_directory_offset: u32,
+    pub status: PersistObjectReferenceStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersistObjectReferenceStatus {
+    /// The newest entry for this persist object identifier.
+    Current,
+    /// An older entry replaced by a later user edit.
+    Superseded,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PptTopLevelRecordState {
+    pub record_index: usize,
+    pub stream_offset: u64,
+    pub record_type: u16,
+    pub role: PptTopLevelRecordRole,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PptTopLevelRecordRole {
+    PersistObject {
+        /// IDs whose newest directory entry points at this record.
+        current_persist_ids: Vec<u32>,
+        /// IDs from older directory entries that point at this record.
+        superseded_persist_ids: Vec<u32>,
+    },
+    /// UserEditAtom or PersistDirectoryAtom reached from CurrentUserAtom.
+    IncrementalSaveMetadata(IncrementalSaveMetadataKind),
+    /// A top-level record not reached by the current directory or edit chain.
+    Unreferenced,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IncrementalSaveMetadataKind {
+    UserEditAtom,
+    PersistDirectoryAtom,
+}
+
+/// MS-PPT 2.1.2 Parts 1 through 11 resolved against the current
+/// `DocumentContainer`.
+///
+/// This is an index over the authoritative recursive record tree. Every
+/// descendant of a live top-level record has the same live status by the
+/// specification; dead records remain present in `PowerPointDocument` for
+/// physical-history preservation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PptLivePresentation {
+    pub persist_object_directory: PersistObjectDirectory,
+    pub document: PptLivePersistObject,
+    pub notes_master_slide: Option<PptLivePersistObject>,
+    pub handout_master_slide: Option<PptLivePersistObject>,
+    pub master_slides: Vec<PptLivePersistObject>,
+    pub presentation_slides: Vec<PptLivePersistObject>,
+    pub notes_slides: Vec<PptLivePersistObject>,
+    pub active_x_controls: Vec<PptLivePersistObject>,
+    pub embedded_ole_objects: Vec<PptLivePersistObject>,
+    pub linked_ole_objects: Vec<PptLivePersistObject>,
+    pub vba_project: Option<PptLivePersistObject>,
+    pub top_level_records: Vec<PptTopLevelLiveRecordState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PptLivePersistObject {
+    pub reference: PersistObjectReference,
+    pub role: PptLivePersistObjectRole,
+    /// Record containing the `PersistIdRef` that made this object live.
+    pub source_record_offset: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PptLivePersistObjectRole {
+    Document,
+    NotesMasterSlide,
+    HandoutMasterSlide,
+    MainMasterSlide,
+    TitleMasterSlide,
+    PresentationSlide,
+    NotesSlide,
+    ActiveXControl,
+    EmbeddedOleObject,
+    LinkedOleObject,
+    VbaProject,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PptTopLevelLiveRecordState {
+    pub record_index: usize,
+    pub stream_offset: u64,
+    pub record_type: u16,
+    pub status: PptTopLevelLiveRecordStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PptTopLevelLiveRecordStatus {
+    LiveIncrementalSaveMetadata(IncrementalSaveMetadataKind),
+    LivePersistObject {
+        persist_ids: Vec<u32>,
+        roles: Vec<PptLivePersistObjectRole>,
+    },
+    Dead,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PptTopLevelRecordKind {
+    UserEdit,
+    PersistDirectory,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PptTopLevelLayoutEntry {
+    old_offset: u32,
+    new_offset: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PptTopLevelLayout {
+    entries: Vec<PptTopLevelLayoutEntry>,
+    offsets: BTreeMap<u32, Option<(u32, PptTopLevelRecordKind)>>,
+}
+
+impl PptTopLevelLayout {
+    fn insert(&mut self, old_offset: u32, new_offset: u32, kind: PptTopLevelRecordKind) {
+        self.entries.push(PptTopLevelLayoutEntry {
+            old_offset,
+            new_offset,
+        });
+        self.offsets
+            .entry(old_offset)
+            .and_modify(|value| *value = None)
+            .or_insert(Some((new_offset, kind)));
+    }
+
+    fn positions_changed(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.old_offset != entry.new_offset)
+    }
+
+    fn relocate(
+        &self,
+        old_offset: u32,
+        expected: Option<PptTopLevelRecordKind>,
+        message: &'static str,
+    ) -> Result<u32> {
+        let (new_offset, kind) = self
+            .offsets
+            .get(&old_offset)
+            .copied()
+            .flatten()
+            .ok_or_else(|| Error::invalid(u64::from(old_offset), message))?;
+        if expected.is_some_and(|expected| expected != kind) {
+            return Err(Error::invalid(u64::from(old_offset), message));
+        }
+        Ok(new_offset)
+    }
+}
+
 impl PowerPointDocument {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         Self::from_bytes_with_limits(bytes, Limits::default())
@@ -1880,6 +2140,437 @@ impl PowerPointDocument {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         self.records.to_bytes()
+    }
+
+    /// Aggregates the OfficeArt Dgg/Dg atoms reachable from the current PPT
+    /// live presentation into one document-level drawing graph.
+    pub fn live_drawing_graph(
+        &self,
+        current_user: &CurrentUserAtom,
+    ) -> Result<OfficeArtDrawingGraph> {
+        let presentation = self.live_presentation(current_user)?;
+        let mut drawing_groups = Vec::new();
+        let mut blip_stores = Vec::new();
+        let mut drawing_group_blip_references = Vec::new();
+        let mut drawing_group_incomplete_property_tables = Vec::new();
+        let mut drawings = Vec::new();
+        for state in &presentation.top_level_records {
+            if !matches!(
+                state.status,
+                PptTopLevelLiveRecordStatus::LivePersistObject { .. }
+            ) {
+                continue;
+            }
+            let record = self
+                .records
+                .records
+                .get(state.record_index)
+                .ok_or_else(|| {
+                    Error::invalid(
+                        state.stream_offset,
+                        "PPT live record index is out of bounds",
+                    )
+                })?;
+            collect_ppt_office_art_drawing_components(
+                record,
+                &mut drawing_groups,
+                &mut blip_stores,
+                &mut drawing_group_blip_references,
+                &mut drawing_group_incomplete_property_tables,
+                &mut drawings,
+            )?;
+        }
+        let [drawing_group] = drawing_groups.as_slice() else {
+            return Err(Error::invalid(
+                0,
+                format!(
+                    "PPT live presentation contains {} OfficeArtFDGGBlock records, expected 1",
+                    drawing_groups.len()
+                ),
+            ));
+        };
+        OfficeArtDrawingGraph::from_components_with_blips(
+            drawing_group.clone(),
+            blip_stores,
+            drawing_group_blip_references,
+            drawing_group_incomplete_property_tables,
+            drawings,
+        )
+    }
+
+    /// Rebuilds record lengths and offsets, then relocates the complete
+    /// MS-PPT incremental-save reference graph. The update is transactional.
+    pub fn relayout(&mut self, current_user: &mut CurrentUserAtom) -> Result<()> {
+        self.relayout_with_policy(current_user, false)
+    }
+
+    pub(crate) fn relayout_with_policy(
+        &mut self,
+        current_user: &mut CurrentUserAtom,
+        preserve_compatibility: bool,
+    ) -> Result<()> {
+        let mut document = self.clone();
+        let mut current_user_atom = current_user.clone();
+        document.relayout_in_place(&mut current_user_atom, preserve_compatibility)?;
+        *self = document;
+        *current_user = current_user_atom;
+        Ok(())
+    }
+
+    /// Replaces the physical history with one user edit containing only the
+    /// persist objects that are live under MS-PPT 2.1.2 Parts 2 through 11.
+    /// Dead records, superseded definitions, and unreferenced records are
+    /// deliberately discarded. The update is transactional.
+    pub fn rebuild_current_live_state(&mut self, current_user: &mut CurrentUserAtom) -> Result<()> {
+        let mut document = self.clone();
+        let mut current_user_atom = current_user.clone();
+        document.rebuild_current_live_state_in_place(&mut current_user_atom)?;
+        *self = document;
+        *current_user = current_user_atom;
+        Ok(())
+    }
+
+    fn rebuild_current_live_state_in_place(
+        &mut self,
+        current_user: &mut CurrentUserAtom,
+    ) -> Result<()> {
+        let presentation = self.live_presentation(current_user)?;
+        let current_edit = presentation
+            .persist_object_directory
+            .incremental_save_chain
+            .edits
+            .first()
+            .ok_or_else(|| Error::invalid(0, "PPT incremental-save chain is empty"))?;
+        if current_edit
+            .user_edit
+            .encrypt_session_persist_id_ref
+            .is_some()
+        {
+            return Err(Error::invalid(
+                u64::from(current_edit.user_edit_offset),
+                "current-live-state rebuild does not support encrypted presentations",
+            ));
+        }
+
+        let mut live_offsets_by_id = BTreeMap::new();
+        let mut records = Vec::new();
+        for state in &presentation.top_level_records {
+            let PptTopLevelLiveRecordStatus::LivePersistObject { persist_ids, .. } = &state.status
+            else {
+                continue;
+            };
+            let record = self
+                .records
+                .records
+                .get(state.record_index)
+                .ok_or_else(|| Error::invalid(state.stream_offset, "live record index is invalid"))?
+                .clone();
+            let old_offset = u32::try_from(record.offset)
+                .map_err(|_| Error::Limit("PPT source record offset exceeds u32".into()))?;
+            for persist_id in persist_ids {
+                if live_offsets_by_id.insert(*persist_id, old_offset).is_some() {
+                    return Err(Error::invalid(
+                        state.stream_offset,
+                        "live persist object identifier occurs more than once",
+                    ));
+                }
+            }
+            records.push(record);
+        }
+        if live_offsets_by_id.is_empty() {
+            return Err(Error::invalid(
+                u64::from(current_edit.user_edit_offset),
+                "PPT live presentation has no persist objects",
+            ));
+        }
+
+        let persist_directory_offset = u32::MAX - 1;
+        let user_edit_offset = u32::MAX;
+        let persist_directory = PersistDirectoryAtom {
+            entries: persist_directory_entries(&live_offsets_by_id)?,
+        };
+        records.push(PptRecord {
+            offset: u64::from(persist_directory_offset),
+            header: PptRecordHeader {
+                version: 0,
+                instance: 0,
+                record_type: PERSIST_DIRECTORY_ATOM,
+                declared_length: 0,
+            },
+            data: PptRecordData::PersistDirectory(persist_directory),
+        });
+
+        let max_persist_id = *live_offsets_by_id
+            .last_key_value()
+            .expect("nonempty live persist map")
+            .0;
+        let mut user_edit = current_edit.user_edit;
+        user_edit.offset_last_edit = 0;
+        user_edit.offset_persist_directory = persist_directory_offset;
+        user_edit.persist_id_seed = user_edit.persist_id_seed.max(max_persist_id);
+        user_edit.encrypt_session_persist_id_ref = None;
+        records.push(PptRecord {
+            offset: u64::from(user_edit_offset),
+            header: PptRecordHeader {
+                version: 0,
+                instance: 0,
+                record_type: USER_EDIT_ATOM,
+                declared_length: 0,
+            },
+            data: PptRecordData::UserEdit(user_edit),
+        });
+
+        self.records = PptRecordSequence {
+            records,
+            trailing_header_bytes: Vec::new(),
+        };
+        current_user.offset_to_current_edit = user_edit_offset;
+        self.relayout_in_place(current_user, false)?;
+        self.live_presentation(current_user)?;
+        Ok(())
+    }
+
+    /// Appends a full current persist-object checkpoint while restoring the
+    /// preceding checkpoint from the source document. The caller performs
+    /// the final cross-stream layout transaction.
+    pub(crate) fn append_user_edit_from_baseline(
+        &mut self,
+        current_user: &mut CurrentUserAtom,
+        baseline: &PowerPointDocument,
+        baseline_current_user: &CurrentUserAtom,
+        source_pictures_layout: Option<&OfficeArtBStoreDelayLayout>,
+    ) -> Result<Vec<u32>> {
+        let presentation = self.live_presentation(current_user)?;
+        let baseline_directory = baseline.persist_object_directory(baseline_current_user)?;
+        let current_edit = presentation
+            .persist_object_directory
+            .incremental_save_chain
+            .edits
+            .first()
+            .ok_or_else(|| Error::invalid(0, "PPT incremental-save chain is empty"))?;
+        if current_edit
+            .user_edit
+            .encrypt_session_persist_id_ref
+            .is_some()
+        {
+            return Err(Error::invalid(
+                u64::from(current_edit.user_edit_offset),
+                "append-user-edit does not support encrypted presentations",
+            ));
+        }
+
+        let mut current_ids_by_record = BTreeMap::<usize, Vec<u32>>::new();
+        for (&persist_id, reference) in &presentation.persist_object_directory.current_references {
+            current_ids_by_record
+                .entry(reference.record_index)
+                .or_default()
+                .push(persist_id);
+        }
+        let checkpoint_records = current_ids_by_record.into_iter().collect::<Vec<_>>();
+        if checkpoint_records.is_empty() {
+            return Err(Error::invalid(
+                u64::from(current_edit.user_edit_offset),
+                "PPT current persist object directory is empty",
+            ));
+        }
+
+        let synthetic_count = checkpoint_records
+            .len()
+            .checked_add(2)
+            .ok_or_else(|| Error::Limit("PPT appended user-edit record count overflow".into()))?;
+        let synthetic_count = u32::try_from(synthetic_count)
+            .map_err(|_| Error::Limit("PPT appended user-edit record count exceeds u32".into()))?;
+        let synthetic_start = u32::MAX
+            .checked_sub(synthetic_count - 1)
+            .ok_or_else(|| Error::Limit("PPT synthetic record offset underflow".into()))?;
+        if synthetic_start <= current_edit.user_edit_offset
+            || self
+                .records
+                .records
+                .iter()
+                .any(|record| record.offset >= u64::from(synthetic_start))
+        {
+            return Err(Error::Limit(
+                "PowerPoint Document stream has no synthetic offset space for an appended user edit"
+                    .into(),
+            ));
+        }
+
+        let mut appended_records = Vec::with_capacity(checkpoint_records.len());
+        let mut offsets_by_id = BTreeMap::new();
+        let mut appended_ids = Vec::new();
+        for (append_index, (record_index, persist_ids)) in
+            checkpoint_records.into_iter().enumerate()
+        {
+            let edited_record = self
+                .records
+                .records
+                .get(record_index)
+                .ok_or_else(|| Error::invalid(0, "live persist record index is invalid"))?
+                .clone();
+            let first_persist_id = *persist_ids.first().ok_or_else(|| {
+                Error::invalid(
+                    edited_record.offset,
+                    "current persist record has no persist ID",
+                )
+            })?;
+            let baseline_reference = baseline_directory
+                .current_reference(first_persist_id)
+                .ok_or_else(|| {
+                    Error::invalid(
+                        edited_record.offset,
+                        "current persist ID does not exist in the source checkpoint",
+                    )
+                })?;
+            for persist_id in &persist_ids {
+                let reference = baseline_directory
+                    .current_reference(*persist_id)
+                    .ok_or_else(|| {
+                        Error::invalid(
+                            edited_record.offset,
+                            "current persist ID does not exist in the source checkpoint",
+                        )
+                    })?;
+                if reference.record_index != baseline_reference.record_index {
+                    return Err(Error::invalid(
+                        edited_record.offset,
+                        "aliased current persist IDs do not share one source persist object",
+                    ));
+                }
+            }
+
+            let mut restored_record = baseline
+                .records
+                .records
+                .get(baseline_reference.record_index)
+                .ok_or_else(|| Error::invalid(edited_record.offset, "source record is missing"))?
+                .clone();
+            restored_record.offset = edited_record.offset;
+            if let Some(layout) = source_pictures_layout {
+                let mut relocated = 0;
+                relocate_ppt_record_picture_references(
+                    &mut restored_record,
+                    Some(layout),
+                    false,
+                    &mut relocated,
+                )?;
+            }
+            self.records.records[record_index] = restored_record;
+
+            let append_index = u32::try_from(append_index)
+                .map_err(|_| Error::Limit("PPT append index exceeds u32".into()))?;
+            let synthetic_offset = synthetic_start
+                .checked_add(append_index)
+                .ok_or_else(|| Error::Limit("PPT synthetic record offset overflow".into()))?;
+            let mut appended_record = edited_record;
+            appended_record.offset = u64::from(synthetic_offset);
+            for persist_id in persist_ids {
+                if offsets_by_id.insert(persist_id, synthetic_offset).is_some() {
+                    return Err(Error::invalid(
+                        u64::from(synthetic_offset),
+                        "current persist ID occurs in more than one appended record",
+                    ));
+                }
+                appended_ids.push(persist_id);
+            }
+            appended_records.push(appended_record);
+        }
+        self.records.records.extend(appended_records);
+
+        let persist_directory_offset = synthetic_start
+            .checked_add(synthetic_count - 2)
+            .ok_or_else(|| {
+                Error::Limit("PPT synthetic persist-directory offset overflow".into())
+            })?;
+        self.records.records.push(PptRecord {
+            offset: u64::from(persist_directory_offset),
+            header: PptRecordHeader {
+                version: 0,
+                instance: 0,
+                record_type: PERSIST_DIRECTORY_ATOM,
+                declared_length: 0,
+            },
+            data: PptRecordData::PersistDirectory(PersistDirectoryAtom {
+                entries: persist_directory_entries(&offsets_by_id)?,
+            }),
+        });
+
+        let user_edit_offset = persist_directory_offset
+            .checked_add(1)
+            .ok_or_else(|| Error::Limit("PPT synthetic user-edit offset overflow".into()))?;
+        let max_persist_id = *presentation
+            .persist_object_directory
+            .current_references
+            .last_key_value()
+            .ok_or_else(|| Error::invalid(0, "PPT persist object directory is empty"))?
+            .0;
+        let mut user_edit = current_edit.user_edit;
+        user_edit.offset_last_edit = current_edit.user_edit_offset;
+        user_edit.offset_persist_directory = persist_directory_offset;
+        user_edit.persist_id_seed = user_edit.persist_id_seed.max(max_persist_id);
+        user_edit.encrypt_session_persist_id_ref = None;
+        self.records.records.push(PptRecord {
+            offset: u64::from(user_edit_offset),
+            header: PptRecordHeader {
+                version: 0,
+                instance: 0,
+                record_type: USER_EDIT_ATOM,
+                declared_length: 0,
+            },
+            data: PptRecordData::UserEdit(user_edit),
+        });
+        current_user.offset_to_current_edit = user_edit_offset;
+        appended_ids.sort_unstable();
+        Ok(appended_ids)
+    }
+
+    fn relayout_in_place(
+        &mut self,
+        current_user: &mut CurrentUserAtom,
+        preserve_compatibility: bool,
+    ) -> Result<()> {
+        let mut layout = PptTopLevelLayout::default();
+        self.records
+            .relayout(0, Some(&mut layout), preserve_compatibility)?;
+        if layout.positions_changed() {
+            for record in &mut self.records.records {
+                match &mut record.data {
+                    PptRecordData::UserEdit(value) => {
+                        if value.offset_last_edit != 0 {
+                            value.offset_last_edit = layout.relocate(
+                                value.offset_last_edit,
+                                Some(PptTopLevelRecordKind::UserEdit),
+                                "UserEditAtom.offsetLastEdit does not reference UserEditAtom",
+                            )?;
+                        }
+                        value.offset_persist_directory = layout.relocate(
+                            value.offset_persist_directory,
+                            Some(PptTopLevelRecordKind::PersistDirectory),
+                            "UserEditAtom.offsetPersistDirectory does not reference PersistDirectoryAtom",
+                        )?;
+                    }
+                    PptRecordData::PersistDirectory(value) => {
+                        for entry in &mut value.entries {
+                            for offset in &mut entry.stream_offsets {
+                                *offset = layout.relocate(
+                                    *offset,
+                                    None,
+                                    "PersistDirectoryAtom offset does not reference a top-level record",
+                                )?;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            current_user.offset_to_current_edit = layout.relocate(
+                current_user.offset_to_current_edit,
+                Some(PptTopLevelRecordKind::UserEdit),
+                "CurrentUserAtom.offsetToCurrentEdit does not reference UserEditAtom",
+            )?;
+            self.incremental_save_chain(current_user)?;
+        }
+        Ok(())
     }
 
     pub fn incremental_save_chain(
@@ -1951,7 +2642,6 @@ impl PowerPointDocument {
                         .checked_add(u32::try_from(index).map_err(|_| {
                             Error::Limit("PPT persist-directory index exceeds u32".into())
                         })?)
-                        .filter(|value| *value <= 0x000f_ffff)
                         .ok_or_else(|| {
                             Error::invalid(
                                 u64::from(edit.persist_directory_offset),
@@ -1968,12 +2658,1075 @@ impl PowerPointDocument {
         })
     }
 
+    /// Constructs and validates the MS-PPT 2.1.2 Part 1 persist object
+    /// directory without conflating directory membership with presentation
+    /// liveness.
+    pub fn persist_object_directory(
+        &self,
+        current_user: &CurrentUserAtom,
+    ) -> Result<PersistObjectDirectory> {
+        let chain = self.incremental_save_chain(current_user)?;
+        let mut record_index_by_offset = BTreeMap::new();
+        for (record_index, record) in self.records.records.iter().enumerate() {
+            if record_index_by_offset
+                .insert(record.offset, record_index)
+                .is_some()
+            {
+                return Err(Error::invalid(
+                    record.offset,
+                    "duplicate PPT top-level record offset",
+                ));
+            }
+        }
+
+        let mut metadata = vec![None; self.records.records.len()];
+        for edit in &chain.edits {
+            let user_edit_index = *record_index_by_offset
+                .get(&u64::from(edit.user_edit_offset))
+                .ok_or_else(|| {
+                    Error::invalid(
+                        u64::from(edit.user_edit_offset),
+                        "PPT user edit is not a top-level record",
+                    )
+                })?;
+            set_incremental_save_metadata(
+                &mut metadata,
+                user_edit_index,
+                IncrementalSaveMetadataKind::UserEditAtom,
+                edit.user_edit_offset,
+            )?;
+
+            let persist_directory_index = *record_index_by_offset
+                .get(&u64::from(edit.persist_directory_offset))
+                .ok_or_else(|| {
+                    Error::invalid(
+                        u64::from(edit.persist_directory_offset),
+                        "PPT persist directory is not a top-level record",
+                    )
+                })?;
+            set_incremental_save_metadata(
+                &mut metadata,
+                persist_directory_index,
+                IncrementalSaveMetadataKind::PersistDirectoryAtom,
+                edit.persist_directory_offset,
+            )?;
+        }
+
+        let mut references = Vec::new();
+        let mut current_references = BTreeMap::new();
+        let mut seen_persist_ids = BTreeSet::new();
+        let mut current_ids_by_record = vec![Vec::new(); self.records.records.len()];
+        let mut superseded_ids_by_record = vec![Vec::new(); self.records.records.len()];
+        for edit in &chain.edits {
+            let mut edit_persist_ids = BTreeSet::new();
+            for entry in &edit.persist_directory.entries {
+                if entry.stream_offsets.is_empty() {
+                    return Err(Error::invalid(
+                        u64::from(edit.persist_directory_offset),
+                        "PersistDirectoryEntry.cPersist must be at least 1",
+                    ));
+                }
+                if entry.stream_offsets.len() > 0x0fff {
+                    return Err(Error::invalid(
+                        u64::from(edit.persist_directory_offset),
+                        "PersistDirectoryEntry.cPersist exceeds 12 bits",
+                    ));
+                }
+                if entry.first_persist_id > 0x000f_fffe {
+                    return Err(Error::invalid(
+                        u64::from(edit.persist_directory_offset),
+                        "PersistDirectoryEntry.persistId exceeds 0xFFFFE",
+                    ));
+                }
+
+                for (entry_index, stream_offset) in entry.stream_offsets.iter().copied().enumerate()
+                {
+                    let persist_id = entry
+                        .first_persist_id
+                        .checked_add(u32::try_from(entry_index).map_err(|_| {
+                            Error::Limit("PPT persist-directory index exceeds u32".into())
+                        })?)
+                        .ok_or_else(|| {
+                            Error::invalid(
+                                u64::from(edit.persist_directory_offset),
+                                "PPT persist object identifier overflow",
+                            )
+                        })?;
+                    if !edit_persist_ids.insert(persist_id) {
+                        return Err(Error::invalid(
+                            u64::from(edit.persist_directory_offset),
+                            "duplicate persist object identifier in PersistDirectoryAtom",
+                        ));
+                    }
+                    if stream_offset < edit.user_edit.offset_last_edit
+                        || stream_offset >= edit.persist_directory_offset
+                    {
+                        return Err(Error::invalid(
+                            u64::from(stream_offset),
+                            "PersistOffsetEntry is outside its corresponding user edit",
+                        ));
+                    }
+                    let record_index = *record_index_by_offset
+                        .get(&u64::from(stream_offset))
+                        .ok_or_else(|| {
+                            Error::invalid(
+                                u64::from(stream_offset),
+                                "PersistOffsetEntry does not reference a top-level record",
+                            )
+                        })?;
+                    if metadata[record_index].is_some() {
+                        return Err(Error::invalid(
+                            u64::from(stream_offset),
+                            "PersistOffsetEntry references incremental-save metadata",
+                        ));
+                    }
+                    let record = &self.records.records[record_index];
+                    if !is_persist_object_record(record) {
+                        return Err(Error::invalid(
+                            u64::from(stream_offset),
+                            "PersistOffsetEntry does not reference an MS-PPT persist object",
+                        ));
+                    }
+
+                    let status = if seen_persist_ids.insert(persist_id) {
+                        PersistObjectReferenceStatus::Current
+                    } else {
+                        PersistObjectReferenceStatus::Superseded
+                    };
+                    let reference = PersistObjectReference {
+                        persist_id,
+                        stream_offset,
+                        record_index,
+                        user_edit_offset: edit.user_edit_offset,
+                        persist_directory_offset: edit.persist_directory_offset,
+                        status,
+                    };
+                    match status {
+                        PersistObjectReferenceStatus::Current => {
+                            current_ids_by_record[record_index].push(persist_id);
+                            current_references.insert(persist_id, reference);
+                        }
+                        PersistObjectReferenceStatus::Superseded => {
+                            superseded_ids_by_record[record_index].push(persist_id);
+                        }
+                    }
+                    references.push(reference);
+                }
+            }
+        }
+
+        let top_level_records = self
+            .records
+            .records
+            .iter()
+            .enumerate()
+            .map(|(record_index, record)| {
+                current_ids_by_record[record_index].sort_unstable();
+                superseded_ids_by_record[record_index].sort_unstable();
+                let role = if let Some(kind) = metadata[record_index] {
+                    PptTopLevelRecordRole::IncrementalSaveMetadata(kind)
+                } else if !current_ids_by_record[record_index].is_empty()
+                    || !superseded_ids_by_record[record_index].is_empty()
+                {
+                    PptTopLevelRecordRole::PersistObject {
+                        current_persist_ids: std::mem::take(
+                            &mut current_ids_by_record[record_index],
+                        ),
+                        superseded_persist_ids: std::mem::take(
+                            &mut superseded_ids_by_record[record_index],
+                        ),
+                    }
+                } else {
+                    PptTopLevelRecordRole::Unreferenced
+                };
+                PptTopLevelRecordState {
+                    record_index,
+                    stream_offset: record.offset,
+                    record_type: record.header.record_type,
+                    role,
+                }
+            })
+            .collect();
+
+        Ok(PersistObjectDirectory {
+            incremental_save_chain: chain,
+            references,
+            current_references,
+            top_level_records,
+        })
+    }
+
+    /// Resolves the live top-level records by executing MS-PPT 2.1.2 Parts 1
+    /// through 11 against the current `DocumentContainer`.
+    pub fn live_presentation(&self, current_user: &CurrentUserAtom) -> Result<PptLivePresentation> {
+        let mut diagnostics = Vec::new();
+        self.live_presentation_with_policy(current_user, true, &mut diagnostics)
+    }
+
+    /// Resolves the live presentation while retaining explicitly diagnosed
+    /// producer compatibility shapes.
+    pub fn live_presentation_compatible(
+        &self,
+        current_user: &CurrentUserAtom,
+    ) -> Result<ParseOutcome<PptLivePresentation>> {
+        let mut diagnostics = Vec::new();
+        let value = self.live_presentation_with_policy(current_user, false, &mut diagnostics)?;
+        Ok(ParseOutcome::new(value, diagnostics))
+    }
+
+    fn live_presentation_with_policy(
+        &self,
+        current_user: &CurrentUserAtom,
+        strict: bool,
+        diagnostics: &mut Vec<ParseDiagnostic>,
+    ) -> Result<PptLivePresentation> {
+        let persist_object_directory = self.persist_object_directory(current_user)?;
+        let current_edit = persist_object_directory
+            .incremental_save_chain
+            .edits
+            .first()
+            .ok_or_else(|| Error::invalid(0, "PPT incremental-save chain is empty"))?;
+
+        let (document_reference, document_record) = self.resolve_live_persist_object(
+            &persist_object_directory,
+            current_edit.user_edit.doc_persist_id_ref,
+            u64::from(current_edit.user_edit_offset),
+            &[DOCUMENT_CONTAINER],
+            "docPersistIdRef does not resolve to DocumentContainer",
+        )?;
+        let document = PptLivePersistObject {
+            reference: document_reference,
+            role: PptLivePersistObjectRole::Document,
+            source_record_offset: u64::from(current_edit.user_edit_offset),
+        };
+        let document_children = ppt_container_children(document_record, "DocumentContainer")?;
+        let document_atom_record = required_direct_record(
+            document_children,
+            DOCUMENT_ATOM,
+            Some(0),
+            "DocumentContainer.documentAtom",
+        )?;
+        require_record_version(document_atom_record, 1, "DocumentAtom")?;
+        let PptRecordData::Document(document_atom) = &document_atom_record.data else {
+            return Err(Error::invalid(
+                document_atom_record.offset,
+                "DocumentContainer.documentAtom is not a conforming DocumentAtom",
+            ));
+        };
+
+        let notes_master_slide = optional_live_object(
+            self,
+            &persist_object_directory,
+            document_atom.notes_master_persist_id_ref,
+            document_atom_record.offset,
+            &[NOTES_CONTAINER],
+            PptLivePersistObjectRole::NotesMasterSlide,
+            "notesMasterPersistIdRef does not resolve to NotesContainer",
+        )?;
+        let handout_master_slide = optional_live_object(
+            self,
+            &persist_object_directory,
+            document_atom.handout_master_persist_id_ref,
+            document_atom_record.offset,
+            &[HANDOUT_CONTAINER],
+            PptLivePersistObjectRole::HandoutMasterSlide,
+            "handoutMasterPersistIdRef does not resolve to HandoutContainer",
+        )?;
+
+        let master_list_record = optional_direct_record(
+            document_children,
+            SLIDE_LIST_WITH_TEXT_CONTAINER,
+            Some(1),
+            "DocumentContainer.masterList",
+        )?;
+        let mut master_slides = Vec::new();
+        if let Some(master_list_record) = master_list_record {
+            let master_list =
+                ppt_container_children(master_list_record, "MasterListWithTextContainer")?;
+            for source in direct_slide_persist_atoms(master_list, "MasterListWithTextContainer")? {
+                let resolved = self.resolve_live_persist_object(
+                    &persist_object_directory,
+                    source.1.persist_id_ref,
+                    source.0.offset,
+                    &[MAIN_MASTER_CONTAINER, SLIDE_CONTAINER],
+                    "MasterPersistAtom.persistIdRef does not resolve to MasterOrSlideContainer",
+                );
+                let (reference, target) = match resolved {
+                    Ok(value) => value,
+                    Err(error) if !strict => {
+                        push_live_presentation_diagnostic(
+                            diagnostics,
+                            ParseDiagnosticCode::InvalidReference,
+                            source.0.offset,
+                            "MasterPersistAtom.persistIdRef",
+                            "2.4.14.2",
+                            error.to_string(),
+                        );
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                let role = match target.header.record_type {
+                    MAIN_MASTER_CONTAINER => PptLivePersistObjectRole::MainMasterSlide,
+                    SLIDE_CONTAINER => PptLivePersistObjectRole::TitleMasterSlide,
+                    _ => unreachable!("target record type was checked"),
+                };
+                master_slides.push(PptLivePersistObject {
+                    reference,
+                    role,
+                    source_record_offset: source.0.offset,
+                });
+            }
+        } else if strict {
+            return Err(Error::invalid(
+                document_record.offset,
+                "required DocumentContainer.masterList is missing",
+            ));
+        } else {
+            push_live_presentation_diagnostic(
+                diagnostics,
+                ParseDiagnosticCode::NonconformingRecord,
+                document_record.offset,
+                "DocumentContainer.masterList",
+                "2.4.1",
+                "required DocumentContainer.masterList is missing; treated as an empty master list",
+            );
+        }
+
+        let presentation_slides = resolve_list_persist_objects(
+            self,
+            &persist_object_directory,
+            document_children,
+            0,
+            SLIDE_CONTAINER,
+            PptLivePersistObjectRole::PresentationSlide,
+            "SlideListWithTextContainer",
+            "SlidePersistAtom.persistIdRef",
+            "2.4.14.5",
+            "SlidePersistAtom.persistIdRef does not resolve to SlideContainer",
+            strict,
+            diagnostics,
+        )?;
+        let notes_slides = resolve_list_persist_objects(
+            self,
+            &persist_object_directory,
+            document_children,
+            2,
+            NOTES_CONTAINER,
+            PptLivePersistObjectRole::NotesSlide,
+            "NotesListWithTextContainer",
+            "NotesPersistAtom.persistIdRef",
+            "2.4.14.7",
+            "NotesPersistAtom.persistIdRef does not resolve to NotesContainer",
+            strict,
+            diagnostics,
+        )?;
+
+        let mut active_x_controls = Vec::new();
+        let mut embedded_ole_objects = Vec::new();
+        let mut linked_ole_objects = Vec::new();
+        if let Some(external_object_list_record) = optional_direct_record(
+            document_children,
+            EXTERNAL_OBJECT_LIST_CONTAINER,
+            Some(0),
+            "DocumentContainer.exObjList",
+        )? {
+            let external_object_list =
+                ppt_container_children(external_object_list_record, "ExObjListContainer")?;
+            resolve_external_persist_objects(
+                self,
+                &persist_object_directory,
+                external_object_list,
+                EXTERNAL_OLE_CONTROL_CONTAINER,
+                PptLivePersistObjectRole::ActiveXControl,
+                "ExControlContainer",
+                &mut active_x_controls,
+            )?;
+            resolve_external_persist_objects(
+                self,
+                &persist_object_directory,
+                external_object_list,
+                EXTERNAL_OLE_EMBED_CONTAINER,
+                PptLivePersistObjectRole::EmbeddedOleObject,
+                "ExOleEmbedContainer",
+                &mut embedded_ole_objects,
+            )?;
+            resolve_external_persist_objects(
+                self,
+                &persist_object_directory,
+                external_object_list,
+                EXTERNAL_OLE_LINK_CONTAINER,
+                PptLivePersistObjectRole::LinkedOleObject,
+                "ExOleLinkContainer",
+                &mut linked_ole_objects,
+            )?;
+        }
+
+        let vba_project = if let Some(document_info_list_record) = optional_direct_record(
+            document_children,
+            DOCUMENT_INFO_LIST_CONTAINER,
+            Some(0),
+            "DocumentContainer.docInfoList",
+        )? {
+            let document_info_list =
+                ppt_container_children(document_info_list_record, "DocInfoListContainer")?;
+            if let Some(vba_info_record) = optional_direct_record(
+                document_info_list,
+                VBA_INFO_CONTAINER,
+                Some(1),
+                "DocInfoListContainer.vbaInfo",
+            )? {
+                let vba_info = ppt_container_children(vba_info_record, "VBAInfoContainer")?;
+                let vba_info_atom_record = required_direct_record(
+                    vba_info,
+                    VBA_INFO_ATOM,
+                    Some(0),
+                    "VBAInfoContainer.vbaInfoAtom",
+                )?;
+                require_record_version(vba_info_atom_record, 2, "VBAInfoAtom")?;
+                let PptRecordData::VbaInfo(vba_info_atom) = &vba_info_atom_record.data else {
+                    return Err(Error::invalid(
+                        vba_info_atom_record.offset,
+                        "VBAInfoContainer.vbaInfoAtom is not a conforming VBAInfoAtom",
+                    ));
+                };
+                if vba_info_atom.has_macros > 1 || vba_info_atom.version != 2 {
+                    let message = format!(
+                        "VBAInfoAtom fHasMacros {} or version {} violates MS-PPT 2.4.11",
+                        vba_info_atom.has_macros, vba_info_atom.version
+                    );
+                    if strict {
+                        return Err(Error::invalid(vba_info_atom_record.offset, message));
+                    }
+                    diagnostics.push(ParseDiagnostic::warning(
+                        ParseDiagnosticCode::NonconformingRecord,
+                        BinaryFormat::Ppt,
+                        Some("/PowerPoint Document"),
+                        Some(vba_info_atom_record.offset),
+                        "VBAInfoAtom",
+                        SpecificationReference {
+                            document: "MS-PPT",
+                            section: "2.4.11",
+                        },
+                        message,
+                    ));
+                }
+                if vba_info_atom.persist_id_ref == 0 {
+                    if vba_info_atom.has_macros != 0 {
+                        let message = "nonempty VBAInfoAtom has a null persistIdRef";
+                        if strict {
+                            return Err(Error::invalid(vba_info_atom_record.offset, message));
+                        }
+                        diagnostics.push(ParseDiagnostic::warning(
+                            ParseDiagnosticCode::InvalidReference,
+                            BinaryFormat::Ppt,
+                            Some("/PowerPoint Document"),
+                            Some(vba_info_atom_record.offset),
+                            "VBAInfoAtom.persistIdRef",
+                            SpecificationReference {
+                                document: "MS-PPT",
+                                section: "2.4.11",
+                            },
+                            message,
+                        ));
+                    }
+                    None
+                } else {
+                    let (reference, _) = self.resolve_live_persist_object(
+                        &persist_object_directory,
+                        vba_info_atom.persist_id_ref,
+                        vba_info_atom_record.offset,
+                        &[EXTERNAL_OLE_OBJECT_STORAGE],
+                        "VBAInfoAtom.persistIdRef does not resolve to VbaProjectStg",
+                    )?;
+                    Some(PptLivePersistObject {
+                        reference,
+                        role: PptLivePersistObjectRole::VbaProject,
+                        source_record_offset: vba_info_atom_record.offset,
+                    })
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut live_persist_ids = vec![BTreeSet::new(); self.records.records.len()];
+        let mut live_roles = vec![BTreeSet::new(); self.records.records.len()];
+        let mut add_live_object = |object: PptLivePersistObject| {
+            live_persist_ids[object.reference.record_index].insert(object.reference.persist_id);
+            live_roles[object.reference.record_index].insert(object.role);
+        };
+        add_live_object(document);
+        if let Some(value) = notes_master_slide {
+            add_live_object(value);
+        }
+        if let Some(value) = handout_master_slide {
+            add_live_object(value);
+        }
+        for value in master_slides
+            .iter()
+            .chain(&presentation_slides)
+            .chain(&notes_slides)
+            .chain(&active_x_controls)
+            .chain(&embedded_ole_objects)
+            .chain(&linked_ole_objects)
+        {
+            add_live_object(*value);
+        }
+        if let Some(value) = vba_project {
+            add_live_object(value);
+        }
+
+        let top_level_records = persist_object_directory
+            .top_level_records
+            .iter()
+            .map(|record| {
+                let status = match &record.role {
+                    PptTopLevelRecordRole::IncrementalSaveMetadata(kind) => {
+                        PptTopLevelLiveRecordStatus::LiveIncrementalSaveMetadata(*kind)
+                    }
+                    _ if !live_roles[record.record_index].is_empty() => {
+                        PptTopLevelLiveRecordStatus::LivePersistObject {
+                            persist_ids: live_persist_ids[record.record_index]
+                                .iter()
+                                .copied()
+                                .collect(),
+                            roles: live_roles[record.record_index].iter().copied().collect(),
+                        }
+                    }
+                    _ => PptTopLevelLiveRecordStatus::Dead,
+                };
+                PptTopLevelLiveRecordState {
+                    record_index: record.record_index,
+                    stream_offset: record.stream_offset,
+                    record_type: record.record_type,
+                    status,
+                }
+            })
+            .collect();
+
+        Ok(PptLivePresentation {
+            persist_object_directory,
+            document,
+            notes_master_slide,
+            handout_master_slide,
+            master_slides,
+            presentation_slides,
+            notes_slides,
+            active_x_controls,
+            embedded_ole_objects,
+            linked_ole_objects,
+            vba_project,
+            top_level_records,
+        })
+    }
+
+    pub(crate) fn relocate_picture_references(
+        &mut self,
+        pictures_layout: Option<&OfficeArtBStoreDelayLayout>,
+        preserve_compatibility: bool,
+    ) -> Result<usize> {
+        let mut relocated = 0usize;
+        for record in &mut self.records.records {
+            relocate_ppt_record_picture_references(
+                record,
+                pictures_layout,
+                preserve_compatibility,
+                &mut relocated,
+            )?;
+        }
+        Ok(relocated)
+    }
+
+    fn resolve_live_persist_object<'a>(
+        &'a self,
+        directory: &PersistObjectDirectory,
+        persist_id: u32,
+        source_record_offset: u64,
+        expected_record_types: &[u16],
+        message: &'static str,
+    ) -> Result<(PersistObjectReference, &'a PptRecord)> {
+        let reference = directory
+            .current_reference(persist_id)
+            .copied()
+            .ok_or_else(|| Error::invalid(source_record_offset, message))?;
+        let record = self
+            .records
+            .records
+            .get(reference.record_index)
+            .ok_or_else(|| Error::invalid(u64::from(reference.stream_offset), message))?;
+        if !expected_record_types.contains(&record.header.record_type)
+            || !ppt_live_target_has_conforming_shape(record)
+        {
+            return Err(Error::invalid(u64::from(reference.stream_offset), message));
+        }
+        Ok((reference, record))
+    }
+
     fn top_level_record(&self, offset: u32) -> Option<&PptRecord> {
         self.records
             .records
             .iter()
             .find(|record| record.offset == u64::from(offset))
     }
+}
+
+fn relocate_ppt_record_picture_references(
+    record: &mut PptRecord,
+    pictures_layout: Option<&OfficeArtBStoreDelayLayout>,
+    preserve_compatibility: bool,
+    relocated: &mut usize,
+) -> Result<()> {
+    match &mut record.data {
+        PptRecordData::Container(children)
+        | PptRecordData::ProgTags(children)
+        | PptRecordData::BinaryTagData(BinaryTagData::Records(children)) => {
+            for child in &mut children.records {
+                relocate_ppt_record_picture_references(
+                    child,
+                    pictures_layout,
+                    preserve_compatibility,
+                    relocated,
+                )?;
+            }
+        }
+        PptRecordData::ProgBinaryTag(value) => {
+            for child in &mut value.records.records {
+                relocate_ppt_record_picture_references(
+                    child,
+                    pictures_layout,
+                    preserve_compatibility,
+                    relocated,
+                )?;
+            }
+        }
+        PptRecordData::OfficeArt(value) => {
+            relocate_office_art_picture_references(
+                value,
+                pictures_layout,
+                preserve_compatibility,
+                relocated,
+            )?;
+        }
+        PptRecordData::BlipEntity9(value) => {
+            relocate_office_art_picture_references(
+                &mut value.blip,
+                pictures_layout,
+                preserve_compatibility,
+                relocated,
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn relocate_office_art_picture_references(
+    record: &mut OfficeArtRecord,
+    pictures_layout: Option<&OfficeArtBStoreDelayLayout>,
+    preserve_compatibility: bool,
+    relocated: &mut usize,
+) -> Result<()> {
+    match &mut record.data {
+        OfficeArtRecordData::Container(children)
+        | OfficeArtRecordData::CompatibilityContainer(children) => {
+            for child in children {
+                relocate_office_art_picture_references(
+                    child,
+                    pictures_layout,
+                    preserve_compatibility,
+                    relocated,
+                )?;
+            }
+        }
+        OfficeArtRecordData::Fbse(fbse) => {
+            if let Some(blip) = &mut fbse.embedded_blip {
+                relocate_office_art_picture_references(
+                    blip,
+                    pictures_layout,
+                    preserve_compatibility,
+                    relocated,
+                )?;
+                return Ok(());
+            }
+            if fbse.reference_count == 0 {
+                return Ok(());
+            }
+            if fbse.delay_offset == u32::MAX {
+                if fbse.reference_count != 0 {
+                    return Err(Error::invalid(
+                        0,
+                        "OfficeArtFBSE.foDelay is 0xFFFFFFFF but cRef is nonzero",
+                    ));
+                }
+                return Ok(());
+            }
+            let Some(layout) = pictures_layout else {
+                if preserve_compatibility {
+                    return Ok(());
+                }
+                return Err(Error::invalid(
+                    u64::from(fbse.delay_offset),
+                    "OfficeArtFBSE.foDelay requires a Pictures Stream",
+                ));
+            };
+            let file_block = layout.file_block_at_old_offset(fbse.delay_offset);
+            let Some(file_block) = file_block else {
+                if preserve_compatibility {
+                    return Ok(());
+                }
+                return Err(Error::invalid(
+                    u64::from(fbse.delay_offset),
+                    "OfficeArtFBSE.foDelay does not reference a Pictures Stream file block",
+                ));
+            };
+            if !(0xf018..=0xf117).contains(&file_block.record_type) {
+                if preserve_compatibility {
+                    return Ok(());
+                }
+                return Err(Error::invalid(
+                    u64::from(fbse.delay_offset),
+                    "OfficeArtFBSE.foDelay does not reference an OfficeArtBlip",
+                ));
+            }
+            if file_block.old_offset != file_block.new_offset {
+                fbse.delay_offset = file_block.new_offset;
+            }
+            if file_block.old_size != file_block.new_size {
+                fbse.declared_blip_size = file_block.new_size;
+            }
+            *relocated = relocated
+                .checked_add(1)
+                .ok_or_else(|| Error::Limit("OfficeArtFBSE reference count overflow".into()))?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+impl PersistObjectDirectory {
+    pub fn current_reference(&self, persist_id: u32) -> Option<&PersistObjectReference> {
+        self.current_references.get(&persist_id)
+    }
+
+    pub fn top_level_record(&self, record_index: usize) -> Option<&PptTopLevelRecordState> {
+        self.top_level_records.get(record_index)
+    }
+}
+
+fn set_incremental_save_metadata(
+    metadata: &mut [Option<IncrementalSaveMetadataKind>],
+    record_index: usize,
+    kind: IncrementalSaveMetadataKind,
+    offset: u32,
+) -> Result<()> {
+    if metadata[record_index].replace(kind).is_some() {
+        return Err(Error::invalid(
+            u64::from(offset),
+            "incremental-save metadata record is referenced more than once",
+        ));
+    }
+    Ok(())
+}
+
+fn persist_directory_entries(
+    offsets_by_id: &BTreeMap<u32, u32>,
+) -> Result<Vec<PersistDirectoryEntry>> {
+    let mut entries = Vec::<PersistDirectoryEntry>::new();
+    for (&persist_id, &stream_offset) in offsets_by_id {
+        if persist_id > 0x000f_fffe {
+            return Err(Error::invalid(
+                u64::from(stream_offset),
+                "live persist object identifier exceeds 0xFFFFE",
+            ));
+        }
+        let can_extend = entries.last().is_some_and(|entry| {
+            entry.stream_offsets.len() < 0x0fff
+                && entry.first_persist_id
+                    + u32::try_from(entry.stream_offsets.len()).expect("cPersist fits u32")
+                    == persist_id
+        });
+        if can_extend {
+            entries
+                .last_mut()
+                .expect("entry was checked above")
+                .stream_offsets
+                .push(stream_offset);
+        } else {
+            entries.push(PersistDirectoryEntry {
+                first_persist_id: persist_id,
+                stream_offsets: vec![stream_offset],
+            });
+        }
+    }
+    Ok(entries)
+}
+
+fn is_persist_object_record(record: &PptRecord) -> bool {
+    match &record.data {
+        PptRecordData::Container(_) => matches!(
+            record.header.record_type,
+            DOCUMENT_CONTAINER
+                | SLIDE_CONTAINER
+                | NOTES_CONTAINER
+                | MAIN_MASTER_CONTAINER
+                | HANDOUT_CONTAINER
+        ),
+        // Part 1 indexes the top-level storage record. Strict/compatible
+        // auditing of its compressed or compound-file payload is separate.
+        PptRecordData::ExternalStorage(_) => {
+            record.header.record_type == EXTERNAL_OLE_OBJECT_STORAGE
+        }
+        _ => false,
+    }
+}
+
+fn ppt_live_target_has_conforming_shape(record: &PptRecord) -> bool {
+    if record.header.record_type == EXTERNAL_OLE_OBJECT_STORAGE {
+        record.header.version == 0
+            && record.header.instance <= 1
+            && matches!(record.data, PptRecordData::ExternalStorage(_))
+    } else {
+        record.header.version == 0x0f
+            && record.header.instance == 0
+            && matches!(record.data, PptRecordData::Container(_))
+    }
+}
+
+fn require_record_version(record: &PptRecord, version: u8, structure: &str) -> Result<()> {
+    if record.header.version != version {
+        return Err(Error::invalid(
+            record.offset,
+            format!("{structure}.rh.recVer must be 0x{version:X}"),
+        ));
+    }
+    Ok(())
+}
+
+fn push_live_presentation_diagnostic(
+    diagnostics: &mut Vec<ParseDiagnostic>,
+    code: ParseDiagnosticCode,
+    offset: u64,
+    structure: &'static str,
+    section: &'static str,
+    message: impl Into<String>,
+) {
+    diagnostics.push(ParseDiagnostic::warning(
+        code,
+        BinaryFormat::Ppt,
+        Some("/PowerPoint Document"),
+        Some(offset),
+        structure,
+        SpecificationReference {
+            document: "MS-PPT",
+            section,
+        },
+        message,
+    ));
+}
+
+fn ppt_container_children<'a>(
+    record: &'a PptRecord,
+    structure: &str,
+) -> Result<&'a PptRecordSequence> {
+    let PptRecordData::Container(children) = &record.data else {
+        return Err(Error::invalid(
+            record.offset,
+            format!("{structure} is not a conforming container record"),
+        ));
+    };
+    Ok(children)
+}
+
+fn optional_direct_record<'a>(
+    sequence: &'a PptRecordSequence,
+    record_type: u16,
+    instance: Option<u16>,
+    field: &str,
+) -> Result<Option<&'a PptRecord>> {
+    let mut matching = sequence.records.iter().filter(|record| {
+        record.header.record_type == record_type
+            && instance.is_none_or(|instance| record.header.instance == instance)
+    });
+    let first = matching.next();
+    if let Some(duplicate) = matching.next() {
+        return Err(Error::invalid(
+            duplicate.offset,
+            format!("{field} occurs more than once"),
+        ));
+    }
+    Ok(first)
+}
+
+fn required_direct_record<'a>(
+    sequence: &'a PptRecordSequence,
+    record_type: u16,
+    instance: Option<u16>,
+    field: &str,
+) -> Result<&'a PptRecord> {
+    optional_direct_record(sequence, record_type, instance, field)?.ok_or_else(|| {
+        Error::invalid(
+            sequence.records.first().map_or(0, |record| record.offset),
+            format!("required {field} is missing"),
+        )
+    })
+}
+
+fn direct_slide_persist_atoms<'a>(
+    sequence: &'a PptRecordSequence,
+    structure: &str,
+) -> Result<Vec<(&'a PptRecord, &'a SlidePersistAtom)>> {
+    let mut values = Vec::new();
+    for record in &sequence.records {
+        if record.header.record_type != SLIDE_PERSIST_ATOM {
+            continue;
+        }
+        let PptRecordData::SlidePersist(value) = &record.data else {
+            return Err(Error::invalid(
+                record.offset,
+                format!("{structure} contains a nonconforming persist atom"),
+            ));
+        };
+        require_record_version(record, 0, "SlidePersistAtom")?;
+        if record.header.instance != 0 {
+            return Err(Error::invalid(
+                record.offset,
+                "SlidePersistAtom.rh.recInstance must be 0",
+            ));
+        }
+        values.push((record, value));
+    }
+    Ok(values)
+}
+
+fn optional_live_object(
+    document: &PowerPointDocument,
+    directory: &PersistObjectDirectory,
+    persist_id: u32,
+    source_record_offset: u64,
+    expected_record_types: &[u16],
+    role: PptLivePersistObjectRole,
+    message: &'static str,
+) -> Result<Option<PptLivePersistObject>> {
+    if persist_id == 0 {
+        return Ok(None);
+    }
+    let (reference, _) = document.resolve_live_persist_object(
+        directory,
+        persist_id,
+        source_record_offset,
+        expected_record_types,
+        message,
+    )?;
+    Ok(Some(PptLivePersistObject {
+        reference,
+        role,
+        source_record_offset,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_list_persist_objects(
+    document: &PowerPointDocument,
+    directory: &PersistObjectDirectory,
+    document_children: &PptRecordSequence,
+    list_instance: u16,
+    target_record_type: u16,
+    role: PptLivePersistObjectRole,
+    list_name: &str,
+    source_field: &'static str,
+    specification_section: &'static str,
+    error_message: &'static str,
+    strict: bool,
+    diagnostics: &mut Vec<ParseDiagnostic>,
+) -> Result<Vec<PptLivePersistObject>> {
+    let Some(list_record) = optional_direct_record(
+        document_children,
+        SLIDE_LIST_WITH_TEXT_CONTAINER,
+        Some(list_instance),
+        list_name,
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+    let list = ppt_container_children(list_record, list_name)?;
+    let mut objects = Vec::new();
+    for (source_record, source) in direct_slide_persist_atoms(list, list_name)? {
+        let resolved = document.resolve_live_persist_object(
+            directory,
+            source.persist_id_ref,
+            source_record.offset,
+            &[target_record_type],
+            error_message,
+        );
+        let (reference, _) = match resolved {
+            Ok(value) => value,
+            Err(error) if !strict => {
+                push_live_presentation_diagnostic(
+                    diagnostics,
+                    ParseDiagnosticCode::InvalidReference,
+                    source_record.offset,
+                    source_field,
+                    specification_section,
+                    error.to_string(),
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        objects.push(PptLivePersistObject {
+            reference,
+            role,
+            source_record_offset: source_record.offset,
+        });
+    }
+    Ok(objects)
+}
+
+fn resolve_external_persist_objects(
+    document: &PowerPointDocument,
+    directory: &PersistObjectDirectory,
+    external_object_list: &PptRecordSequence,
+    container_record_type: u16,
+    role: PptLivePersistObjectRole,
+    container_name: &str,
+    output: &mut Vec<PptLivePersistObject>,
+) -> Result<()> {
+    for container_record in external_object_list
+        .records
+        .iter()
+        .filter(|record| record.header.record_type == container_record_type)
+    {
+        let container = ppt_container_children(container_record, container_name)?;
+        let source_record = required_direct_record(
+            container,
+            EXTERNAL_OLE_OBJECT_ATOM,
+            Some(0),
+            &format!("{container_name}.exOleObjAtom"),
+        )?;
+        let PptRecordData::ExternalOleObject(source) = &source_record.data else {
+            return Err(Error::invalid(
+                source_record.offset,
+                format!("{container_name}.exOleObjAtom is not conforming"),
+            ));
+        };
+        require_record_version(source_record, 1, "ExOleObjAtom")?;
+        let (reference, _) = document.resolve_live_persist_object(
+            directory,
+            source.persist_id_ref,
+            source_record.offset,
+            &[EXTERNAL_OLE_OBJECT_STORAGE],
+            "ExOleObjAtom.persistIdRef does not resolve to an external storage record",
+        )?;
+        output.push(PptLivePersistObject {
+            reference,
+            role,
+            source_record_offset: source_record.offset,
+        });
+    }
+    Ok(())
 }
 
 impl CurrentUserStream {
@@ -2056,11 +3809,23 @@ impl PicturesStream {
     }
 
     pub fn from_bytes_with_limits(bytes: &[u8], limits: Limits) -> Result<Self> {
-        match OfficeArtStream::from_bytes_with_limits(bytes, limits) {
+        match OfficeArtBStoreDelay::from_bytes_with_limits(bytes, limits) {
             Ok(stream) => Ok(Self::Complete(stream)),
             Err(error) => {
-                OfficeArtPartialStream::from_bytes_with_limits(bytes, limits, error.to_string())
-                    .map(Self::Partial)
+                if let Ok(stream) = OfficeArtStream::from_bytes_with_limits(bytes, limits) {
+                    return Ok(Self::Compatibility {
+                        stream,
+                        reason: error.to_string(),
+                    });
+                }
+                match OfficeArtPartialStream::from_bytes_with_limits(
+                    bytes,
+                    limits,
+                    error.to_string(),
+                ) {
+                    Ok(stream) => Ok(Self::Partial(stream)),
+                    Err(_) => Err(error),
+                }
             }
         }
     }
@@ -2068,7 +3833,18 @@ impl PicturesStream {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         match self {
             Self::Complete(stream) => stream.to_bytes(),
+            Self::Compatibility { stream, .. } => stream.to_bytes(),
             Self::Partial(stream) => stream.to_bytes(),
+        }
+    }
+
+    pub fn relayout(&mut self) -> Result<OfficeArtBStoreDelayLayout> {
+        match self {
+            Self::Complete(stream) => stream.relayout(),
+            Self::Compatibility { .. } | Self::Partial(_) => Err(Error::invalid(
+                0,
+                "cannot relayout a nonconforming OfficeArtBStoreDelay",
+            )),
         }
     }
 }
@@ -2137,7 +3913,7 @@ impl PptRecordSequence {
                     PptRecordData::Container(children)
                 }
             } else if header.record_type == USER_EDIT_ATOM {
-                UserEditAtom::parse(body)
+                parse_fixed(body)
                     .map(PptRecordData::UserEdit)
                     .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == DOCUMENT_ATOM && body.len() == 40 {
@@ -2246,9 +4022,7 @@ impl PptRecordSequence {
                     .map(PptRecordData::TextMasterStyle10)
                     .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == TEXT_DEFAULTS10_ATOM {
-                let mut body_cursor = 0usize;
-                TextCharacterException10::parse(body, &mut body_cursor)
-                    .filter(|_| body_cursor == body.len())
+                parse_fixed(body)
                     .map(PptRecordData::TextDefaults10)
                     .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == STYLE_TEXT_PROP11_ATOM {
@@ -2339,7 +4113,7 @@ impl PptRecordSequence {
                     parse_fixed(body).expect("fixed TimeIterateDataAtom"),
                 )
             } else if header.record_type == TEXT_DEFAULTS9_ATOM {
-                TextDefaults9Atom::parse(body)
+                parse_fixed(body)
                     .map(PptRecordData::TextDefaults9)
                     .unwrap_or_else(|| malformed_spec_record(header.record_type, body))
             } else if header.record_type == EXTERNAL_OLE_LINK_ATOM && body.len() == 12 {
@@ -2676,6 +4450,41 @@ impl PptRecordSequence {
         Ok(bytes)
     }
 
+    fn relayout(
+        &mut self,
+        base_offset: u64,
+        mut top_level_layout: Option<&mut PptTopLevelLayout>,
+        preserve_compatibility: bool,
+    ) -> Result<u64> {
+        let mut offset = base_offset;
+        for record in &mut self.records {
+            let old_offset = record.offset;
+            record.relayout_children(offset, preserve_compatibility)?;
+            let body = record.body_bytes()?;
+            if !matches!(record.data, PptRecordData::Truncated(_)) {
+                record.header.declared_length = u32::try_from(body.len())
+                    .map_err(|_| Error::Limit("PPT record body exceeds u32".into()))?;
+            }
+            record.offset = offset;
+            if let Some(layout) = top_level_layout.as_deref_mut() {
+                layout.insert(
+                    u32::try_from(old_offset)
+                        .map_err(|_| Error::Limit("PPT source record offset exceeds u32".into()))?,
+                    u32::try_from(offset)
+                        .map_err(|_| Error::Limit("PPT record offset exceeds u32".into()))?,
+                    PptTopLevelRecordKind::from_data(&record.data),
+                );
+            }
+            offset = offset
+                .checked_add(HEADER_LEN as u64)
+                .and_then(|value| value.checked_add(body.len() as u64))
+                .ok_or_else(|| Error::Limit("PPT record sequence length overflow".into()))?;
+        }
+        offset
+            .checked_add(self.trailing_header_bytes.len() as u64)
+            .ok_or_else(|| Error::Limit("PPT record sequence tail overflow".into()))
+    }
+
     pub fn visit(&self, visitor: &mut impl FnMut(&PptRecord)) {
         for record in &self.records {
             visitor(record);
@@ -2692,32 +4501,211 @@ impl PptRecordSequence {
     }
 }
 
+fn collect_ppt_office_art_drawing_components(
+    record: &PptRecord,
+    drawing_groups: &mut Vec<OfficeArtDggBlock>,
+    blip_stores: &mut Vec<OfficeArtGraphBlipStoreInput>,
+    drawing_group_blip_references: &mut Vec<OfficeArtBlipReference>,
+    drawing_group_incomplete_property_tables: &mut Vec<OfficeArtPropertyTableLocation>,
+    drawings: &mut Vec<OfficeArtGraphDrawingInput>,
+) -> Result<()> {
+    let PptRecordData::Container(children) = &record.data else {
+        return Ok(());
+    };
+    if record.header.record_type == 0xf000 {
+        let mut property_table_index = 0usize;
+        children.visit(&mut |child| {
+            if let PptRecordData::OfficeArt(value) = &child.data {
+                if let OfficeArtRecordData::DggBlock(value) = &value.data {
+                    drawing_groups.push(value.clone());
+                }
+                collect_office_art_record_blip_references(
+                    value,
+                    None,
+                    &mut property_table_index,
+                    drawing_group_blip_references,
+                    drawing_group_incomplete_property_tables,
+                );
+            }
+        });
+        for child in &children.records {
+            if child.header.record_type != 0xf001 {
+                continue;
+            }
+            let PptRecordData::Container(file_blocks) = &child.data else {
+                continue;
+            };
+            blip_stores.push(OfficeArtGraphBlipStoreInput {
+                declared_entry_count: child.header.instance,
+                entries: file_blocks
+                    .records
+                    .iter()
+                    .map(|file_block| OfficeArtGraphBlipStoreEntryInput {
+                        record_type: file_block.header.record_type,
+                        fbse: match &file_block.data {
+                            PptRecordData::OfficeArt(value) => match &value.data {
+                                OfficeArtRecordData::Fbse(value) => Some((
+                                    value.reference_count,
+                                    value.delay_offset,
+                                    value.embedded_blip.is_some(),
+                                )),
+                                _ => None,
+                            },
+                            _ => None,
+                        },
+                    })
+                    .collect(),
+            });
+        }
+    } else if record.header.record_type == 0xf002 {
+        let mut fdg_records = Vec::new();
+        let mut shapes = Vec::new();
+        let mut blip_references = Vec::new();
+        let mut incomplete_property_tables = Vec::new();
+        let mut property_table_index = 0usize;
+        children.visit(&mut |child| {
+            if let PptRecordData::OfficeArt(value) = &child.data {
+                match &value.data {
+                    OfficeArtRecordData::Drawing(value) => {
+                        fdg_records.push((child.header.instance, *value));
+                    }
+                    OfficeArtRecordData::Shape(value) => shapes.push(*value),
+                    _ => {}
+                }
+                collect_office_art_record_blip_references(
+                    value,
+                    fdg_records.first().map(|(drawing_id, _)| *drawing_id),
+                    &mut property_table_index,
+                    &mut blip_references,
+                    &mut incomplete_property_tables,
+                );
+            }
+        });
+        let [(drawing_id, drawing)] = fdg_records.as_slice() else {
+            return Err(Error::invalid(
+                record.offset,
+                format!(
+                    "PPT OfficeArtDgContainer contains {} OfficeArtFDG records, expected 1",
+                    fdg_records.len()
+                ),
+            ));
+        };
+        for reference in &mut blip_references {
+            reference.drawing_id = Some(*drawing_id);
+        }
+        drawings.push(OfficeArtGraphDrawingInput {
+            drawing_id: *drawing_id,
+            drawing: *drawing,
+            shapes,
+            blip_references,
+            incomplete_property_tables,
+        });
+    }
+    for child in &children.records {
+        collect_ppt_office_art_drawing_components(
+            child,
+            drawing_groups,
+            blip_stores,
+            drawing_group_blip_references,
+            drawing_group_incomplete_property_tables,
+            drawings,
+        )?;
+    }
+    Ok(())
+}
+
+impl PptTopLevelRecordKind {
+    fn from_data(data: &PptRecordData) -> Self {
+        match data {
+            PptRecordData::UserEdit(_) => Self::UserEdit,
+            PptRecordData::PersistDirectory(_) => Self::PersistDirectory,
+            _ => Self::Other,
+        }
+    }
+}
+
 impl PptRecordHeader {
     fn from_bytes(bytes: &[u8]) -> Self {
         debug_assert_eq!(bytes.len(), HEADER_LEN);
-        let version_instance = u16::from_le_bytes([bytes[0], bytes[1]]);
+        let wire = parse_fixed::<PptRecordHeaderWire>(bytes)
+            .expect("an eight-byte PPT record header is a complete fixed layout");
         Self {
-            version: (version_instance & 0x000f) as u8,
-            instance: version_instance >> 4,
-            record_type: u16::from_le_bytes([bytes[2], bytes[3]]),
-            declared_length: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            version: wire.version_instance.version,
+            instance: wire.version_instance.instance,
+            record_type: wire.record_type,
+            declared_length: wire.declared_length,
         }
     }
 
     fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
-        if self.version > 0x0f || self.instance > 0x0fff {
-            return Err(Error::invalid(0, "PPT record header bit field overflow"));
-        }
-        let version_instance = u16::from(self.version) | (self.instance << 4);
-        bytes.extend_from_slice(&version_instance.to_le_bytes());
-        bytes.extend_from_slice(&self.record_type.to_le_bytes());
-        bytes.extend_from_slice(&self.declared_length.to_le_bytes());
+        bytes.extend_from_slice(&write_fixed(&PptRecordHeaderWire {
+            version_instance: PptRecordVersionInstance {
+                version: self.version,
+                instance: self.instance,
+            },
+            record_type: self.record_type,
+            declared_length: self.declared_length,
+        })?);
         Ok(())
     }
 }
 
 impl PptRecord {
-    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+    fn relayout_children(&mut self, body_offset: u64, preserve_compatibility: bool) -> Result<()> {
+        let body_offset = body_offset
+            .checked_add(HEADER_LEN as u64)
+            .ok_or_else(|| Error::Limit("PPT child record offset overflow".into()))?;
+        match &mut self.data {
+            PptRecordData::Container(children) => {
+                children.relayout(body_offset, None, preserve_compatibility)?;
+                if self.header.record_type == 0xf001 && !preserve_compatibility {
+                    if children.records.iter().any(|child| {
+                        child.header.record_type != 0xf007
+                            && !(0xf018..=0xf117).contains(&child.header.record_type)
+                    }) {
+                        return Err(Error::invalid(
+                            self.offset,
+                            "OfficeArtBStoreContainer contains an invalid file-block record type",
+                        ));
+                    }
+                    if children.records.len() > 0x0fff {
+                        return Err(Error::Limit(
+                            "OfficeArtBStoreContainer file-block count exceeds recInstance".into(),
+                        ));
+                    }
+                    self.header.instance = children.records.len() as u16;
+                }
+            }
+            PptRecordData::ProgTags(children)
+            | PptRecordData::BinaryTagData(BinaryTagData::Records(children)) => {
+                children.relayout(body_offset, None, preserve_compatibility)?;
+            }
+            PptRecordData::ProgBinaryTag(value) => {
+                value
+                    .records
+                    .relayout(body_offset, None, preserve_compatibility)?;
+            }
+            PptRecordData::OfficeArt(value) => {
+                if value.header.version != self.header.version
+                    || value.header.instance != self.header.instance
+                    || value.header.record_type != self.header.record_type
+                {
+                    return Err(Error::invalid(
+                        self.offset,
+                        "embedded OfficeArt record header changed",
+                    ));
+                }
+                value.relayout()?;
+                self.header.instance = value.header.instance;
+                self.header.declared_length = value.header.declared_length;
+            }
+            PptRecordData::BlipEntity9(value) => value.blip.relayout()?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn body_bytes(&self) -> Result<Vec<u8>> {
         macro_rules! fixed_record_body {
             ($expected:expr, $value:expr, $message:literal) => {{
                 if self.header.record_type != $expected {
@@ -2758,7 +4746,7 @@ impl PptRecord {
                 if self.header.record_type != USER_EDIT_ATOM || self.header.version == 0x0f {
                     return Err(Error::invalid(0, "UserEditAtom record header changed"));
                 }
-                value.to_bytes()
+                write_fixed(value)?
             }
             PptRecordData::Document(value) => {
                 if self.header.record_type != DOCUMENT_ATOM || self.header.version == 0x0f {
@@ -2988,9 +4976,7 @@ impl PptRecord {
                 if self.header.record_type != TEXT_DEFAULTS10_ATOM {
                     return Err(Error::invalid(0, "TextDefaults10Atom header changed"));
                 }
-                let mut bytes = Vec::new();
-                value.write(&mut bytes)?;
-                bytes
+                write_fixed(value)?
             }
             PptRecordData::StyleTextProp11(value) => {
                 if self.header.record_type != STYLE_TEXT_PROP11_ATOM {
@@ -3143,7 +5129,7 @@ impl PptRecord {
                 if self.header.record_type != TEXT_DEFAULTS9_ATOM {
                     return Err(Error::invalid(0, "TextDefaults9Atom header changed"));
                 }
-                value.to_bytes()?
+                write_fixed(value)?
             }
             PptRecordData::ExternalOleLink(value) => fixed_record_body!(
                 EXTERNAL_OLE_LINK_ATOM,
@@ -3693,6 +5679,11 @@ impl PptRecord {
             }
             PptRecordData::Truncated(value) => value.clone(),
         };
+        Ok(body)
+    }
+
+    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        let body = self.body_bytes()?;
         let declared = usize::try_from(self.header.declared_length)
             .map_err(|_| Error::Limit("PPT record length exceeds usize".into()))?;
         match self.data {
@@ -3734,49 +5725,6 @@ fn parse_office_art_atom(
         None
     } else {
         Some(record)
-    }
-}
-
-impl UserEditAtom {
-    fn parse(bytes: &[u8]) -> Option<Self> {
-        if !matches!(bytes.len(), 28 | 32) {
-            return None;
-        }
-        Some(Self {
-            last_slide_id_ref: read_u32(bytes, 0),
-            version: read_u16(bytes, 4),
-            minor_version: bytes[6],
-            major_version: bytes[7],
-            offset_last_edit: read_u32(bytes, 8),
-            offset_persist_directory: read_u32(bytes, 12),
-            doc_persist_id_ref: read_u32(bytes, 16),
-            persist_id_seed: read_u32(bytes, 20),
-            last_view: read_u16(bytes, 24),
-            unused: read_u16(bytes, 26),
-            encrypt_session_persist_id_ref: (bytes.len() == 32).then(|| read_u32(bytes, 28)),
-        })
-    }
-
-    fn to_bytes(self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(if self.encrypt_session_persist_id_ref.is_some() {
-            32
-        } else {
-            28
-        });
-        bytes.extend_from_slice(&self.last_slide_id_ref.to_le_bytes());
-        bytes.extend_from_slice(&self.version.to_le_bytes());
-        bytes.push(self.minor_version);
-        bytes.push(self.major_version);
-        bytes.extend_from_slice(&self.offset_last_edit.to_le_bytes());
-        bytes.extend_from_slice(&self.offset_persist_directory.to_le_bytes());
-        bytes.extend_from_slice(&self.doc_persist_id_ref.to_le_bytes());
-        bytes.extend_from_slice(&self.persist_id_seed.to_le_bytes());
-        bytes.extend_from_slice(&self.last_view.to_le_bytes());
-        bytes.extend_from_slice(&self.unused.to_le_bytes());
-        if let Some(value) = self.encrypt_session_persist_id_ref {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        bytes
     }
 }
 
@@ -3893,32 +5841,11 @@ impl TextSpecialInfoAtom {
 
 impl StyleTextProp9Atom {
     fn parse(bytes: &[u8]) -> Option<Self> {
-        const BULLET_BLIP: u32 = 0x0080_0000;
-        const BULLET_SCHEME: u32 = 0x0100_0000;
-        const BULLET_HAS_SCHEME: u32 = 0x0200_0000;
-        const CF_PP10_EXTENSION: u32 = 0x0010_0000;
-
         let mut cursor = 0usize;
         let mut runs = Vec::new();
         while cursor < bytes.len() {
-            let paragraph_mask = read_u32_checked(bytes, &mut cursor)?;
-            let bullet_blip_ref =
-                read_optional_u16(bytes, &mut cursor, paragraph_mask & BULLET_BLIP != 0)?;
-            let bullet_has_auto_number =
-                read_optional_i16(bytes, &mut cursor, paragraph_mask & BULLET_HAS_SCHEME != 0)?;
-            let auto_number_scheme = if paragraph_mask & BULLET_SCHEME != 0 {
-                Some(TextAutoNumberScheme {
-                    scheme: read_u16_checked(bytes, &mut cursor)?,
-                    start_number: read_u16_checked(bytes, &mut cursor)? as i16,
-                })
-            } else {
-                None
-            };
-
-            let character_mask = read_u32_checked(bytes, &mut cursor)?;
-            let pp10_character_extension =
-                read_optional_u32(bytes, &mut cursor, character_mask & CF_PP10_EXTENSION != 0)?;
-
+            let paragraph = parse_at(bytes, &mut cursor)?;
+            let character = parse_at(bytes, &mut cursor)?;
             let special_mask = read_u32_checked(bytes, &mut cursor)?;
             let spelling_flags =
                 read_optional_u16(bytes, &mut cursor, special_mask & 0x0000_0001 != 0)?;
@@ -3943,16 +5870,8 @@ impl StyleTextProp9Atom {
                 None
             };
             runs.push(StyleTextProp9 {
-                paragraph: TextParagraphException9 {
-                    mask: paragraph_mask,
-                    bullet_blip_ref,
-                    bullet_has_auto_number,
-                    auto_number_scheme,
-                },
-                character: TextCharacterException9 {
-                    mask: character_mask,
-                    pp10_extension: pp10_character_extension,
-                },
+                paragraph,
+                character,
                 special_info: TextSpecialInfoException {
                     mask: special_mask,
                     spelling_flags,
@@ -3968,42 +5887,10 @@ impl StyleTextProp9Atom {
     }
 
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        const BULLET_BLIP: u32 = 0x0080_0000;
-        const BULLET_SCHEME: u32 = 0x0100_0000;
-        const BULLET_HAS_SCHEME: u32 = 0x0200_0000;
-        const CF_PP10_EXTENSION: u32 = 0x0010_0000;
-
         let mut bytes = Vec::new();
         for run in &self.runs {
-            validate_mask_option(
-                run.paragraph.mask,
-                BULLET_BLIP,
-                run.paragraph.bullet_blip_ref.is_some(),
-            )?;
-            validate_mask_option(
-                run.paragraph.mask,
-                BULLET_HAS_SCHEME,
-                run.paragraph.bullet_has_auto_number.is_some(),
-            )?;
-            validate_mask_option(
-                run.paragraph.mask,
-                BULLET_SCHEME,
-                run.paragraph.auto_number_scheme.is_some(),
-            )?;
-            bytes.extend_from_slice(&run.paragraph.mask.to_le_bytes());
-            write_optional_u16(&mut bytes, run.paragraph.bullet_blip_ref);
-            write_optional_i16(&mut bytes, run.paragraph.bullet_has_auto_number);
-            if let Some(value) = run.paragraph.auto_number_scheme {
-                bytes.extend_from_slice(&write_fixed(&value)?);
-            }
-
-            validate_mask_option(
-                run.character.mask,
-                CF_PP10_EXTENSION,
-                run.character.pp10_extension.is_some(),
-            )?;
-            bytes.extend_from_slice(&run.character.mask.to_le_bytes());
-            write_optional_u32(&mut bytes, run.character.pp10_extension);
+            bytes.extend_from_slice(&write_fixed(&run.paragraph)?);
+            bytes.extend_from_slice(&write_fixed(&run.character)?);
 
             let special = &run.special_info;
             for (bit, present) in [
@@ -4035,81 +5922,6 @@ impl StyleTextProp9Atom {
                 }
             }
         }
-        Ok(bytes)
-    }
-}
-
-impl TextParagraphException9 {
-    fn parse(bytes: &[u8], cursor: &mut usize) -> Option<Self> {
-        let mask = read_u32_checked(bytes, cursor)?;
-        let bullet_blip_ref = read_optional_u16(bytes, cursor, mask & 0x0080_0000 != 0)?;
-        let bullet_has_auto_number = read_optional_i16(bytes, cursor, mask & 0x0200_0000 != 0)?;
-        let auto_number_scheme = if mask & 0x0100_0000 != 0 {
-            Some(TextAutoNumberScheme {
-                scheme: read_u16_checked(bytes, cursor)?,
-                start_number: read_u16_checked(bytes, cursor)? as i16,
-            })
-        } else {
-            None
-        };
-        Some(Self {
-            mask,
-            bullet_blip_ref,
-            bullet_has_auto_number,
-            auto_number_scheme,
-        })
-    }
-
-    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
-        validate_mask_option(self.mask, 0x0080_0000, self.bullet_blip_ref.is_some())?;
-        validate_mask_option(
-            self.mask,
-            0x0200_0000,
-            self.bullet_has_auto_number.is_some(),
-        )?;
-        validate_mask_option(self.mask, 0x0100_0000, self.auto_number_scheme.is_some())?;
-        bytes.extend_from_slice(&self.mask.to_le_bytes());
-        write_optional_u16(bytes, self.bullet_blip_ref);
-        write_optional_i16(bytes, self.bullet_has_auto_number);
-        if let Some(value) = self.auto_number_scheme {
-            bytes.extend_from_slice(&write_fixed(&value)?);
-        }
-        Ok(())
-    }
-}
-
-impl TextCharacterException9 {
-    fn parse(bytes: &[u8], cursor: &mut usize) -> Option<Self> {
-        let mask = read_u32_checked(bytes, cursor)?;
-        Some(Self {
-            mask,
-            pp10_extension: read_optional_u32(bytes, cursor, mask & 0x0010_0000 != 0)?,
-        })
-    }
-
-    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
-        validate_mask_option(self.mask, 0x0010_0000, self.pp10_extension.is_some())?;
-        bytes.extend_from_slice(&self.mask.to_le_bytes());
-        write_optional_u32(bytes, self.pp10_extension);
-        Ok(())
-    }
-}
-
-impl TextDefaults9Atom {
-    fn parse(bytes: &[u8]) -> Option<Self> {
-        let mut cursor = 0usize;
-        let character = TextCharacterException9::parse(bytes, &mut cursor)?;
-        let paragraph = TextParagraphException9::parse(bytes, &mut cursor)?;
-        (cursor == bytes.len()).then_some(Self {
-            character,
-            paragraph,
-        })
-    }
-
-    fn to_bytes(self) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        self.character.write(&mut bytes)?;
-        self.paragraph.write(&mut bytes)?;
         Ok(bytes)
     }
 }
@@ -4364,37 +6176,6 @@ impl TimeColorBehaviorAtom {
     }
 }
 
-impl TextCharacterException10 {
-    fn parse(bytes: &[u8], cursor: &mut usize) -> Option<Self> {
-        let mask = read_u32_checked(bytes, cursor)?;
-        Some(Self {
-            mask,
-            new_east_asian_font_ref: read_optional_u16(bytes, cursor, mask & 0x0100_0000 != 0)?,
-            complex_script_font_ref: read_optional_u16(bytes, cursor, mask & 0x0200_0000 != 0)?,
-            pp11_extension: read_optional_u32(bytes, cursor, mask & 0x0400_0000 != 0)?,
-        })
-    }
-
-    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
-        validate_mask_option(
-            self.mask,
-            0x0100_0000,
-            self.new_east_asian_font_ref.is_some(),
-        )?;
-        validate_mask_option(
-            self.mask,
-            0x0200_0000,
-            self.complex_script_font_ref.is_some(),
-        )?;
-        validate_mask_option(self.mask, 0x0400_0000, self.pp11_extension.is_some())?;
-        bytes.extend_from_slice(&self.mask.to_le_bytes());
-        write_optional_u16(bytes, self.new_east_asian_font_ref);
-        write_optional_u16(bytes, self.complex_script_font_ref);
-        write_optional_u32(bytes, self.pp11_extension);
-        Ok(())
-    }
-}
-
 impl TextMasterStyle9Atom {
     fn parse(bytes: &[u8], text_type: u16) -> Option<Self> {
         let mut cursor = 0usize;
@@ -4404,10 +6185,7 @@ impl TextMasterStyle9Atom {
         }
         let mut levels = Vec::with_capacity(count);
         for _ in 0..count {
-            levels.push(TextMasterStyle9Level {
-                paragraph: TextParagraphException9::parse(bytes, &mut cursor)?,
-                character: TextCharacterException9::parse(bytes, &mut cursor)?,
-            });
+            levels.push(parse_at(bytes, &mut cursor)?);
         }
         (cursor == bytes.len()).then_some(Self { text_type, levels })
     }
@@ -4422,8 +6200,7 @@ impl TextMasterStyle9Atom {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(self.levels.len() as u16).to_le_bytes());
         for level in &self.levels {
-            level.paragraph.write(&mut bytes)?;
-            level.character.write(&mut bytes)?;
+            bytes.extend_from_slice(&write_fixed(level)?);
         }
         Ok(bytes)
     }
@@ -4434,7 +6211,7 @@ impl StyleTextProp10Atom {
         let mut cursor = 0usize;
         let mut runs = Vec::new();
         while cursor < bytes.len() {
-            runs.push(TextCharacterException10::parse(bytes, &mut cursor)?);
+            runs.push(parse_at(bytes, &mut cursor)?);
         }
         Some(Self { runs })
     }
@@ -4442,7 +6219,7 @@ impl StyleTextProp10Atom {
     fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         for run in &self.runs {
-            run.write(&mut bytes)?;
+            bytes.extend_from_slice(&write_fixed(run)?);
         }
         Ok(bytes)
     }
@@ -4457,7 +6234,7 @@ impl TextMasterStyle10Atom {
         }
         let mut levels = Vec::with_capacity(count);
         for _ in 0..count {
-            levels.push(TextCharacterException10::parse(bytes, &mut cursor)?);
+            levels.push(parse_at(bytes, &mut cursor)?);
         }
         (cursor == bytes.len()).then_some(Self { text_type, levels })
     }
@@ -4472,7 +6249,7 @@ impl TextMasterStyle10Atom {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(self.levels.len() as u16).to_le_bytes());
         for level in &self.levels {
-            level.write(&mut bytes)?;
+            bytes.extend_from_slice(&write_fixed(level)?);
         }
         Ok(bytes)
     }
@@ -5509,19 +7286,28 @@ impl PersistDirectoryAtom {
         let mut cursor = 0usize;
         let mut entries = Vec::new();
         let mut offset_count = 0usize;
+        let mut persist_ids = BTreeSet::new();
         while cursor < bytes.len() {
             let info = read_u32_checked(bytes, &mut cursor)?;
             let count = usize::try_from(info >> 20).ok()?;
+            let first_persist_id = info & 0x000f_ffff;
+            if count == 0 || first_persist_id > 0x000f_fffe {
+                return None;
+            }
             offset_count = offset_count.checked_add(count)?;
             if entries.len() >= limits.max_entries || offset_count > limits.max_entries {
                 return None;
             }
             let mut stream_offsets = Vec::with_capacity(count);
-            for _ in 0..count {
+            for index in 0..count {
+                let persist_id = first_persist_id.checked_add(u32::try_from(index).ok()?)?;
+                if !persist_ids.insert(persist_id) {
+                    return None;
+                }
                 stream_offsets.push(read_u32_checked(bytes, &mut cursor)?);
             }
             entries.push(PersistDirectoryEntry {
-                first_persist_id: info & 0x000f_ffff,
+                first_persist_id,
                 stream_offsets,
             });
         }
@@ -5530,9 +7316,30 @@ impl PersistDirectoryAtom {
 
     fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
+        let mut persist_ids = BTreeSet::new();
         for entry in &self.entries {
-            if entry.first_persist_id > 0x000f_ffff || entry.stream_offsets.len() > 0x0fff {
+            if entry.first_persist_id > 0x000f_fffe
+                || entry.stream_offsets.is_empty()
+                || entry.stream_offsets.len() > 0x0fff
+            {
                 return Err(Error::invalid(0, "PPT persist-directory entry overflow"));
+            }
+            for index in 0..entry.stream_offsets.len() {
+                let persist_id =
+                    entry
+                        .first_persist_id
+                        .checked_add(u32::try_from(index).map_err(|_| {
+                            Error::Limit("PPT persist offset index exceeds u32".into())
+                        })?)
+                        .ok_or_else(|| {
+                            Error::invalid(0, "PPT persist-directory identifier overflow")
+                        })?;
+                if !persist_ids.insert(persist_id) {
+                    return Err(Error::invalid(
+                        0,
+                        "duplicate persist object identifier in PersistDirectoryAtom",
+                    ));
+                }
             }
             let count = u32::try_from(entry.stream_offsets.len())
                 .map_err(|_| Error::Limit("PPT persist offset count exceeds u32".into()))?;
@@ -5640,6 +7447,19 @@ fn parse_fixed<T: SdkRead>(bytes: &[u8]) -> Option<T> {
     let mut reader = Reader::new(Cursor::new(bytes)).ok()?;
     let value = T::read_from(&mut reader).ok()?;
     (reader.remaining().ok()? == 0).then_some(value)
+}
+
+fn parse_at<T: SdkRead>(bytes: &[u8], cursor: &mut usize) -> Option<T> {
+    let remaining = bytes.len().checked_sub(*cursor)?;
+    let mut reader = Reader::with_bounds(
+        Cursor::new(bytes),
+        u64::try_from(*cursor).ok()?,
+        u64::try_from(remaining).ok()?,
+    )
+    .ok()?;
+    let value = T::read_from(&mut reader).ok()?;
+    *cursor = usize::try_from(reader.position().ok()?).ok()?;
+    Some(value)
 }
 
 fn write_fixed<T: SdkWrite>(value: &T) -> Result<Vec<u8>> {
@@ -5956,7 +7776,7 @@ mod tests {
             }],
         };
         let persist_body = persist.to_bytes().unwrap();
-        let user_body = user_edit.to_bytes();
+        let user_body = write_fixed(&user_edit).unwrap();
         let mut child_bytes = Vec::new();
         PptRecordHeader {
             version: 0,
@@ -6001,6 +7821,48 @@ mod tests {
             PptRecordData::UserEdit(_)
         ));
         assert_eq!(parsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn record_header_and_user_edit_derive_enforce_spec_layout() {
+        for header in [
+            PptRecordHeader {
+                version: 0x10,
+                instance: 0,
+                record_type: USER_EDIT_ATOM,
+                declared_length: 28,
+            },
+            PptRecordHeader {
+                version: 0,
+                instance: 0x1000,
+                record_type: USER_EDIT_ATOM,
+                declared_length: 28,
+            },
+        ] {
+            assert!(header.write(&mut Vec::new()).is_err());
+        }
+
+        let user_edit = UserEditAtom {
+            last_slide_id_ref: 7,
+            version: 0,
+            minor_version: 0,
+            major_version: 3,
+            offset_last_edit: 0,
+            offset_persist_directory: 8,
+            doc_persist_id_ref: 1,
+            persist_id_seed: 4,
+            last_view: 1,
+            unused: 0,
+            encrypt_session_persist_id_ref: Some(9),
+        };
+        let bytes = write_fixed(&user_edit).unwrap();
+        assert_eq!(bytes.len(), 32);
+        assert_eq!(parse_fixed::<UserEditAtom>(&bytes), Some(user_edit));
+        assert!(parse_fixed::<UserEditAtom>(&bytes[..31]).is_none());
+
+        let mut invalid = user_edit;
+        invalid.last_view = 0;
+        assert!(write_fixed(&invalid).is_err());
     }
 
     #[test]
@@ -6077,11 +7939,11 @@ mod tests {
             offset_persist_directory: persist_offset,
             doc_persist_id_ref: 1,
             persist_id_seed: 3,
-            last_view: 0,
+            last_view: 1,
             unused: 0,
             encrypt_session_persist_id_ref: None,
         };
-        let user_body = user.to_bytes();
+        let user_body = write_fixed(&user).unwrap();
         let mut bytes = Vec::new();
         PptRecordHeader {
             version: 0,
@@ -6139,6 +8001,618 @@ mod tests {
         };
         user_edit.offset_persist_directory = 0;
         assert!(document.incremental_save_chain(&current).is_err());
+    }
+
+    #[test]
+    fn persist_object_directory_classifies_physical_history_without_claiming_liveness() {
+        fn append_record(bytes: &mut Vec<u8>, version: u8, record_type: u16, body: &[u8]) -> u32 {
+            let offset = u32::try_from(bytes.len()).unwrap();
+            PptRecordHeader {
+                version,
+                instance: 0,
+                record_type,
+                declared_length: u32::try_from(body.len()).unwrap(),
+            }
+            .write(bytes)
+            .unwrap();
+            bytes.extend_from_slice(body);
+            offset
+        }
+
+        let mut bytes = Vec::new();
+        let old_document_offset = append_record(&mut bytes, 0x0f, DOCUMENT_CONTAINER, &[]);
+        let slide_offset = append_record(&mut bytes, 0x0f, SLIDE_CONTAINER, &[]);
+        let old_directory_body = PersistDirectoryAtom {
+            entries: vec![PersistDirectoryEntry {
+                first_persist_id: 1,
+                stream_offsets: vec![old_document_offset, slide_offset],
+            }],
+        }
+        .to_bytes()
+        .unwrap();
+        let old_directory_offset =
+            append_record(&mut bytes, 0, PERSIST_DIRECTORY_ATOM, &old_directory_body);
+        let old_user_edit = UserEditAtom {
+            last_slide_id_ref: 0,
+            version: 0,
+            minor_version: 0,
+            major_version: 3,
+            offset_last_edit: 0,
+            offset_persist_directory: old_directory_offset,
+            doc_persist_id_ref: 1,
+            persist_id_seed: 3,
+            last_view: 1,
+            unused: 0,
+            encrypt_session_persist_id_ref: None,
+        };
+        let old_user_edit_offset = append_record(
+            &mut bytes,
+            0,
+            USER_EDIT_ATOM,
+            &write_fixed(&old_user_edit).unwrap(),
+        );
+
+        let current_document_offset = append_record(&mut bytes, 0x0f, DOCUMENT_CONTAINER, &[]);
+        let unreferenced_offset = append_record(&mut bytes, 0, 0x779f, &[]);
+        let current_directory_body = PersistDirectoryAtom {
+            entries: vec![PersistDirectoryEntry {
+                first_persist_id: 1,
+                stream_offsets: vec![current_document_offset],
+            }],
+        }
+        .to_bytes()
+        .unwrap();
+        let current_directory_offset = append_record(
+            &mut bytes,
+            0,
+            PERSIST_DIRECTORY_ATOM,
+            &current_directory_body,
+        );
+        let current_user_edit = UserEditAtom {
+            offset_last_edit: old_user_edit_offset,
+            offset_persist_directory: current_directory_offset,
+            persist_id_seed: 3,
+            ..old_user_edit
+        };
+        let current_user_edit_offset = append_record(
+            &mut bytes,
+            0,
+            USER_EDIT_ATOM,
+            &write_fixed(&current_user_edit).unwrap(),
+        );
+        assert_eq!(
+            (
+                old_document_offset,
+                slide_offset,
+                old_directory_offset,
+                old_user_edit_offset,
+                current_document_offset,
+                unreferenced_offset,
+                current_directory_offset,
+                current_user_edit_offset,
+            ),
+            (0, 8, 16, 36, 72, 80, 88, 104)
+        );
+
+        let document = PowerPointDocument::from_bytes(&bytes).unwrap();
+        let current_user = CurrentUserAtom {
+            fixed_size: 20,
+            header_token: 0xe391_c05f,
+            offset_to_current_edit: current_user_edit_offset,
+            declared_user_name_byte_length: 0,
+            document_file_version: 0x03f4,
+            major_version: 3,
+            minor_version: 0,
+            unused: 0,
+            ansi_user_name: Vec::new(),
+            release_version: 8,
+            unicode_user_name: None,
+            trailing: Vec::new(),
+        };
+        let directory = document.persist_object_directory(&current_user).unwrap();
+        assert_eq!(
+            directory
+                .references
+                .iter()
+                .map(|reference| (
+                    reference.persist_id,
+                    reference.stream_offset,
+                    reference.status,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, 72, PersistObjectReferenceStatus::Current),
+                (1, 0, PersistObjectReferenceStatus::Superseded),
+                (2, 8, PersistObjectReferenceStatus::Current),
+            ]
+        );
+        assert_eq!(directory.current_reference(1).unwrap().record_index, 4);
+        assert_eq!(directory.current_reference(2).unwrap().record_index, 1);
+        assert!(matches!(
+            &directory.top_level_record(0).unwrap().role,
+            PptTopLevelRecordRole::PersistObject {
+                current_persist_ids,
+                superseded_persist_ids,
+            } if current_persist_ids.is_empty() && superseded_persist_ids == &[1]
+        ));
+        assert!(matches!(
+            &directory.top_level_record(1).unwrap().role,
+            PptTopLevelRecordRole::PersistObject {
+                current_persist_ids,
+                superseded_persist_ids,
+            } if current_persist_ids == &[2] && superseded_persist_ids.is_empty()
+        ));
+        assert!(matches!(
+            directory.top_level_record(2).unwrap().role,
+            PptTopLevelRecordRole::IncrementalSaveMetadata(
+                IncrementalSaveMetadataKind::PersistDirectoryAtom
+            )
+        ));
+        assert!(matches!(
+            directory.top_level_record(3).unwrap().role,
+            PptTopLevelRecordRole::IncrementalSaveMetadata(
+                IncrementalSaveMetadataKind::UserEditAtom
+            )
+        ));
+        assert!(matches!(
+            directory.top_level_record(5).unwrap().role,
+            PptTopLevelRecordRole::Unreferenced
+        ));
+
+        let mut invalid = document.clone();
+        let PptRecordData::PersistDirectory(value) = &mut invalid.records.records[6].data else {
+            unreachable!()
+        };
+        value.entries[0].stream_offsets[0] = old_user_edit_offset;
+        assert!(invalid.persist_object_directory(&current_user).is_err());
+
+        let mut duplicate = document;
+        let PptRecordData::PersistDirectory(value) = &mut duplicate.records.records[2].data else {
+            unreachable!()
+        };
+        value.entries.push(PersistDirectoryEntry {
+            first_persist_id: 2,
+            stream_offsets: vec![slide_offset],
+        });
+        assert!(duplicate.persist_object_directory(&current_user).is_err());
+
+        assert!(
+            PersistDirectoryAtom {
+                entries: vec![PersistDirectoryEntry {
+                    first_persist_id: 1,
+                    stream_offsets: Vec::new(),
+                }],
+            }
+            .to_bytes()
+            .is_err()
+        );
+
+        // MS-PPT constrains the encoded starting persistId to 20 bits, but
+        // defines following identifiers by addition and does not impose a
+        // second 20-bit limit on persistId + cPersist - 1.
+        let crossing_twenty_bits = PersistDirectoryAtom {
+            entries: vec![PersistDirectoryEntry {
+                first_persist_id: 0x000f_fffe,
+                stream_offsets: vec![0, 8, 16],
+            }],
+        };
+        let bytes = crossing_twenty_bits.to_bytes().unwrap();
+        assert_eq!(
+            PersistDirectoryAtom::parse(&bytes, Limits::default()).unwrap(),
+            crossing_twenty_bits
+        );
+    }
+
+    #[test]
+    fn live_presentation_follows_parts_two_through_eleven_and_keeps_dead_objects() {
+        fn append_record(
+            bytes: &mut Vec<u8>,
+            version: u8,
+            instance: u16,
+            record_type: u16,
+            body: &[u8],
+        ) -> u32 {
+            let offset = u32::try_from(bytes.len()).unwrap();
+            PptRecordHeader {
+                version,
+                instance,
+                record_type,
+                declared_length: u32::try_from(body.len()).unwrap(),
+            }
+            .write(bytes)
+            .unwrap();
+            bytes.extend_from_slice(body);
+            offset
+        }
+
+        fn slide_persist_list(instance: u16, persist_ids: &[u32]) -> Vec<u8> {
+            let mut body = Vec::new();
+            for (index, persist_id) in persist_ids.iter().copied().enumerate() {
+                let atom = SlidePersistAtom {
+                    persist_id_ref: persist_id,
+                    flags: 0,
+                    text_count: 0,
+                    slide_id: u32::try_from(index + 1).unwrap(),
+                    reserved: 0,
+                };
+                append_record(
+                    &mut body,
+                    0,
+                    0,
+                    SLIDE_PERSIST_ATOM,
+                    &write_fixed(&atom).unwrap(),
+                );
+            }
+            let mut record = Vec::new();
+            append_record(
+                &mut record,
+                0x0f,
+                instance,
+                SLIDE_LIST_WITH_TEXT_CONTAINER,
+                &body,
+            );
+            record
+        }
+
+        fn external_object_container(record_type: u16, persist_id: u32) -> Vec<u8> {
+            let atom = ExternalOleObjectAtom {
+                draw_aspect: 1,
+                object_type: 0,
+                external_object_id: persist_id,
+                object_subtype: 0,
+                persist_id_ref: persist_id,
+                unused: 0,
+            };
+            let mut body = Vec::new();
+            append_record(
+                &mut body,
+                1,
+                0,
+                EXTERNAL_OLE_OBJECT_ATOM,
+                &write_fixed(&atom).unwrap(),
+            );
+            let mut record = Vec::new();
+            append_record(&mut record, 0x0f, 0, record_type, &body);
+            record
+        }
+
+        let document_atom = DocumentAtom {
+            slide_size: PptPoint { x: 720, y: 540 },
+            notes_size: PptPoint { x: 540, y: 720 },
+            server_zoom: PptPoint { x: 1, y: 1 },
+            notes_master_persist_id_ref: 2,
+            handout_master_persist_id_ref: 3,
+            first_slide_number: 1,
+            slide_size_type: 0,
+            save_with_fonts: 0,
+            omit_title_placeholders: 0,
+            right_to_left: 0,
+            show_comments: 0,
+        };
+        let mut document_body = Vec::new();
+        append_record(
+            &mut document_body,
+            1,
+            0,
+            DOCUMENT_ATOM,
+            &write_fixed(&document_atom).unwrap(),
+        );
+        document_body.extend_from_slice(&slide_persist_list(1, &[4, 5]));
+        document_body.extend_from_slice(&slide_persist_list(0, &[6]));
+        document_body.extend_from_slice(&slide_persist_list(2, &[7]));
+
+        let mut external_object_list_body = Vec::new();
+        external_object_list_body.extend_from_slice(&external_object_container(
+            EXTERNAL_OLE_CONTROL_CONTAINER,
+            8,
+        ));
+        external_object_list_body
+            .extend_from_slice(&external_object_container(EXTERNAL_OLE_EMBED_CONTAINER, 9));
+        external_object_list_body
+            .extend_from_slice(&external_object_container(EXTERNAL_OLE_LINK_CONTAINER, 10));
+        append_record(
+            &mut document_body,
+            0x0f,
+            0,
+            EXTERNAL_OBJECT_LIST_CONTAINER,
+            &external_object_list_body,
+        );
+
+        let vba_info_atom = VbaInfoAtom {
+            persist_id_ref: 11,
+            has_macros: 1,
+            version: 2,
+        };
+        let mut vba_info_body = Vec::new();
+        append_record(
+            &mut vba_info_body,
+            2,
+            0,
+            VBA_INFO_ATOM,
+            &write_fixed(&vba_info_atom).unwrap(),
+        );
+        let mut document_info_list_body = Vec::new();
+        append_record(
+            &mut document_info_list_body,
+            0x0f,
+            1,
+            VBA_INFO_CONTAINER,
+            &vba_info_body,
+        );
+        append_record(
+            &mut document_body,
+            0x0f,
+            0,
+            DOCUMENT_INFO_LIST_CONTAINER,
+            &document_info_list_body,
+        );
+
+        let mut bytes = Vec::new();
+        let document_offset =
+            append_record(&mut bytes, 0x0f, 0, DOCUMENT_CONTAINER, &document_body);
+        let notes_master_offset = append_record(&mut bytes, 0x0f, 0, NOTES_CONTAINER, &[]);
+        let handout_master_offset = append_record(&mut bytes, 0x0f, 0, HANDOUT_CONTAINER, &[]);
+        let main_master_offset = append_record(&mut bytes, 0x0f, 0, MAIN_MASTER_CONTAINER, &[]);
+        let title_master_offset = append_record(&mut bytes, 0x0f, 0, SLIDE_CONTAINER, &[]);
+        let slide_offset = append_record(&mut bytes, 0x0f, 0, SLIDE_CONTAINER, &[]);
+        let notes_offset = append_record(&mut bytes, 0x0f, 0, NOTES_CONTAINER, &[]);
+        let control_offset = append_record(&mut bytes, 0, 0, EXTERNAL_OLE_OBJECT_STORAGE, &[]);
+        let embedded_ole_offset = append_record(&mut bytes, 0, 0, EXTERNAL_OLE_OBJECT_STORAGE, &[]);
+        let linked_ole_offset = append_record(&mut bytes, 0, 0, EXTERNAL_OLE_OBJECT_STORAGE, &[]);
+        let vba_offset = append_record(&mut bytes, 0, 0, EXTERNAL_OLE_OBJECT_STORAGE, &[]);
+        let directory_current_but_dead_offset =
+            append_record(&mut bytes, 0x0f, 0, SLIDE_CONTAINER, &[]);
+        let unreferenced_offset = append_record(&mut bytes, 0, 0, 0x779f, &[]);
+        let persist_offsets = vec![
+            document_offset,
+            notes_master_offset,
+            handout_master_offset,
+            main_master_offset,
+            title_master_offset,
+            slide_offset,
+            notes_offset,
+            control_offset,
+            embedded_ole_offset,
+            linked_ole_offset,
+            vba_offset,
+            directory_current_but_dead_offset,
+        ];
+        let directory_body = PersistDirectoryAtom {
+            entries: vec![PersistDirectoryEntry {
+                first_persist_id: 1,
+                stream_offsets: persist_offsets,
+            }],
+        }
+        .to_bytes()
+        .unwrap();
+        let directory_offset =
+            append_record(&mut bytes, 0, 0, PERSIST_DIRECTORY_ATOM, &directory_body);
+        let user_edit = UserEditAtom {
+            last_slide_id_ref: 1,
+            version: 0,
+            minor_version: 0,
+            major_version: 3,
+            offset_last_edit: 0,
+            offset_persist_directory: directory_offset,
+            doc_persist_id_ref: 1,
+            persist_id_seed: 13,
+            last_view: 1,
+            unused: 0,
+            encrypt_session_persist_id_ref: None,
+        };
+        let user_edit_offset = append_record(
+            &mut bytes,
+            0,
+            0,
+            USER_EDIT_ATOM,
+            &write_fixed(&user_edit).unwrap(),
+        );
+        let current_user = CurrentUserAtom {
+            fixed_size: 20,
+            header_token: 0xe391_c05f,
+            offset_to_current_edit: user_edit_offset,
+            declared_user_name_byte_length: 0,
+            document_file_version: 0x03f4,
+            major_version: 3,
+            minor_version: 0,
+            unused: 0,
+            ansi_user_name: Vec::new(),
+            release_version: 8,
+            unicode_user_name: None,
+            trailing: Vec::new(),
+        };
+
+        let document = PowerPointDocument::from_bytes(&bytes).unwrap();
+        let presentation = document.live_presentation(&current_user).unwrap();
+        assert_eq!(presentation.document.reference.persist_id, 1);
+        assert_eq!(
+            presentation
+                .notes_master_slide
+                .unwrap()
+                .reference
+                .persist_id,
+            2
+        );
+        assert_eq!(
+            presentation
+                .handout_master_slide
+                .unwrap()
+                .reference
+                .persist_id,
+            3
+        );
+        assert_eq!(
+            presentation
+                .master_slides
+                .iter()
+                .map(|value| (value.reference.persist_id, value.role))
+                .collect::<Vec<_>>(),
+            vec![
+                (4, PptLivePersistObjectRole::MainMasterSlide),
+                (5, PptLivePersistObjectRole::TitleMasterSlide),
+            ]
+        );
+        assert_eq!(presentation.presentation_slides[0].reference.persist_id, 6);
+        assert_eq!(presentation.notes_slides[0].reference.persist_id, 7);
+        assert_eq!(presentation.active_x_controls[0].reference.persist_id, 8);
+        assert_eq!(presentation.embedded_ole_objects[0].reference.persist_id, 9);
+        assert_eq!(presentation.linked_ole_objects[0].reference.persist_id, 10);
+        assert_eq!(presentation.vba_project.unwrap().reference.persist_id, 11);
+        assert!(matches!(
+            presentation.top_level_records[11].status,
+            PptTopLevelLiveRecordStatus::Dead
+        ));
+        assert_eq!(
+            presentation.top_level_records[11].stream_offset,
+            u64::from(directory_current_but_dead_offset)
+        );
+        assert!(matches!(
+            presentation.top_level_records[12].status,
+            PptTopLevelLiveRecordStatus::Dead
+        ));
+        assert_eq!(
+            presentation.top_level_records[12].stream_offset,
+            u64::from(unreferenced_offset)
+        );
+        assert!(matches!(
+            presentation.top_level_records[13].status,
+            PptTopLevelLiveRecordStatus::LiveIncrementalSaveMetadata(
+                IncrementalSaveMetadataKind::PersistDirectoryAtom
+            )
+        ));
+        assert!(matches!(
+            presentation.top_level_records[14].status,
+            PptTopLevelLiveRecordStatus::LiveIncrementalSaveMetadata(
+                IncrementalSaveMetadataKind::UserEditAtom
+            )
+        ));
+
+        let mut compact = document.clone();
+        let mut compact_current_user = current_user.clone();
+        compact
+            .rebuild_current_live_state(&mut compact_current_user)
+            .unwrap();
+        assert_eq!(compact.records.records.len(), 13);
+        let compact_presentation = compact.live_presentation(&compact_current_user).unwrap();
+        assert_eq!(
+            compact_presentation
+                .persist_object_directory
+                .current_references
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            (1..=11).collect::<Vec<_>>()
+        );
+        assert!(
+            compact_presentation
+                .top_level_records
+                .iter()
+                .all(|record| { !matches!(record.status, PptTopLevelLiveRecordStatus::Dead) })
+        );
+        assert_eq!(
+            compact_presentation
+                .top_level_records
+                .iter()
+                .filter(|record| matches!(
+                    record.status,
+                    PptTopLevelLiveRecordStatus::LiveIncrementalSaveMetadata(_)
+                ))
+                .count(),
+            2
+        );
+        assert_eq!(
+            compact_presentation
+                .persist_object_directory
+                .incremental_save_chain
+                .edits
+                .len(),
+            1
+        );
+        assert_eq!(
+            compact_presentation
+                .persist_object_directory
+                .incremental_save_chain
+                .edits[0]
+                .user_edit
+                .offset_last_edit,
+            0
+        );
+        let reopened_compact =
+            PowerPointDocument::from_bytes(&compact.to_bytes().unwrap()).unwrap();
+        let reopened_presentation = reopened_compact
+            .live_presentation(&compact_current_user)
+            .unwrap();
+        assert_eq!(reopened_presentation, compact_presentation);
+
+        let mut legacy_empty_vba = document.clone();
+        let PptRecordData::Container(document_children) =
+            &mut legacy_empty_vba.records.records[0].data
+        else {
+            unreachable!()
+        };
+        let document_info_list = document_children
+            .records
+            .iter_mut()
+            .find(|record| record.header.record_type == DOCUMENT_INFO_LIST_CONTAINER)
+            .unwrap();
+        let PptRecordData::Container(document_info_list) = &mut document_info_list.data else {
+            unreachable!()
+        };
+        let vba_info = document_info_list
+            .records
+            .iter_mut()
+            .find(|record| record.header.record_type == VBA_INFO_CONTAINER)
+            .unwrap();
+        let PptRecordData::Container(vba_info) = &mut vba_info.data else {
+            unreachable!()
+        };
+        let PptRecordData::VbaInfo(vba_info_atom) = &mut vba_info.records[0].data else {
+            unreachable!()
+        };
+        vba_info_atom.persist_id_ref = 0;
+        vba_info_atom.has_macros = 0;
+        vba_info_atom.version = 1;
+        assert!(legacy_empty_vba.live_presentation(&current_user).is_err());
+        let compatible = legacy_empty_vba
+            .live_presentation_compatible(&current_user)
+            .unwrap();
+        assert!(compatible.value.vba_project.is_none());
+        assert_eq!(compatible.diagnostics.len(), 1);
+        assert_eq!(
+            compatible.diagnostics[0].code,
+            ParseDiagnosticCode::NonconformingRecord
+        );
+
+        let mut wrong_target = document.clone();
+        let PptRecordData::Container(document_children) = &mut wrong_target.records.records[0].data
+        else {
+            unreachable!()
+        };
+        let slide_list = document_children
+            .records
+            .iter_mut()
+            .find(|record| {
+                record.header.record_type == SLIDE_LIST_WITH_TEXT_CONTAINER
+                    && record.header.instance == 0
+            })
+            .unwrap();
+        let PptRecordData::Container(slide_list) = &mut slide_list.data else {
+            unreachable!()
+        };
+        let PptRecordData::SlidePersist(slide) = &mut slide_list.records[0].data else {
+            unreachable!()
+        };
+        slide.persist_id_ref = 7;
+        assert!(wrong_target.live_presentation(&current_user).is_err());
+        let unchanged_wrong_target = wrong_target.clone();
+        let mut unchanged_current_user = current_user.clone();
+        assert!(
+            wrong_target
+                .rebuild_current_live_state(&mut unchanged_current_user)
+                .is_err()
+        );
+        assert_eq!(wrong_target, unchanged_wrong_target);
+        assert_eq!(unchanged_current_user, current_user);
     }
 
     #[test]
@@ -6261,5 +8735,50 @@ mod tests {
                 _ => unreachable!(),
             }
         );
+    }
+
+    #[test]
+    fn relayout_synchronizes_office_art_instances_and_bstore_counts() {
+        use crate::office_art::{OfficeArtProperty, OfficeArtPropertyValue};
+
+        let mut fopt_bytes = Vec::new();
+        fopt_bytes.extend_from_slice(&3u16.to_le_bytes());
+        fopt_bytes.extend_from_slice(&0xf00bu16.to_le_bytes());
+        fopt_bytes.extend_from_slice(&0u32.to_le_bytes());
+        let mut document = PowerPointDocument::from_bytes(&fopt_bytes).unwrap();
+        {
+            let PptRecordData::OfficeArt(office_art) = &mut document.records.records[0].data else {
+                panic!("expected OfficeArtFOPT");
+            };
+            let OfficeArtRecordData::PropertyTable(table) = &mut office_art.data else {
+                panic!("expected typed OfficeArt property table");
+            };
+            table.properties.push(OfficeArtProperty {
+                property_id: 1,
+                is_blip_id: false,
+                value: OfficeArtPropertyValue::Simple(7),
+            });
+        }
+        document.records.relayout(0, None, false).unwrap();
+        assert_eq!(document.records.records[0].header.instance, 1);
+        let PptRecordData::OfficeArt(office_art) = &document.records.records[0].data else {
+            panic!("expected OfficeArtFOPT");
+        };
+        assert_eq!(office_art.header.instance, 1);
+        assert_eq!(document.records.records[0].header.declared_length, 6);
+        let written = document.to_bytes().unwrap();
+        assert_eq!(PowerPointDocument::from_bytes(&written).unwrap(), document);
+
+        let mut bstore_bytes = Vec::new();
+        bstore_bytes.extend_from_slice(&0x001fu16.to_le_bytes());
+        bstore_bytes.extend_from_slice(&0xf001u16.to_le_bytes());
+        bstore_bytes.extend_from_slice(&0u32.to_le_bytes());
+        let mut document = PowerPointDocument::from_bytes(&bstore_bytes).unwrap();
+        document.records.relayout(0, None, true).unwrap();
+        assert_eq!(document.records.records[0].header.instance, 1);
+        document.records.relayout(0, None, false).unwrap();
+        assert_eq!(document.records.records[0].header.instance, 0);
+        let written = document.to_bytes().unwrap();
+        assert_eq!(PowerPointDocument::from_bytes(&written).unwrap(), document);
     }
 }
