@@ -47,7 +47,7 @@ pub trait SdkRead: Sized {
 }
 
 pub trait SdkWrite {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()>;
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()>;
 }
 
 pub trait SdkSize {
@@ -257,21 +257,34 @@ impl<R: Read + Seek> Read for Reader<R> {
 
 pub struct Writer<W> {
     inner: W,
+    position: u64,
     context: IoContext,
 }
 
-impl<W: Write + Seek> Writer<W> {
+impl<W: Write> Writer<W> {
     pub fn new(inner: W) -> Self {
         Self {
             inner,
+            position: 0,
+            context: IoContext::default(),
+        }
+    }
+    pub fn with_position(inner: W, position: u64) -> Self {
+        Self {
+            inner,
+            position,
             context: IoContext::default(),
         }
     }
     pub fn with_context(inner: W, context: IoContext) -> Self {
-        Self { inner, context }
+        Self {
+            inner,
+            position: 0,
+            context,
+        }
     }
-    pub fn position(&mut self) -> Result<u64> {
-        Ok(self.inner.stream_position()?)
+    pub fn position(&self) -> Result<u64> {
+        Ok(self.position)
     }
     pub fn into_inner(self) -> W {
         self.inner
@@ -327,9 +340,16 @@ impl<W: Write + Seek> Writer<W> {
     }
 }
 
-impl<W: Write + Seek> Write for Writer<W> {
+impl<W: Write> Write for Writer<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.inner.write(buf)
+        let requested = u64::try_from(buf.len())
+            .map_err(|_| std::io::Error::other("writer request length does not fit u64"))?;
+        self.position
+            .checked_add(requested)
+            .ok_or_else(|| std::io::Error::other("writer position overflow"))?;
+        let written = self.inner.write(buf)?;
+        self.position += written as u64;
+        Ok(written)
     }
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
@@ -389,7 +409,7 @@ mod tests {
     }
 
     impl SdkWrite for MisreportedSize {
-        fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+        fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
             writer.write_u16(0)
         }
     }
@@ -739,11 +759,26 @@ mod tests {
 
         let mut output = Cursor::new(vec![0, 0]);
         output.set_position(2);
-        let mut writer = Writer::new(output);
+        let mut writer = Writer::with_position(output, 2);
         let write_error = PositionedObject { value: 7 }
             .write_to(&mut writer)
             .unwrap_err();
         assert_eq!(write_error.offset(), Some(2));
+    }
+
+    #[test]
+    fn writer_tracks_position_without_a_seekable_sink() {
+        let value = Header {
+            a: 1,
+            b: 2,
+            raw: [3, 4, 5],
+            sectors: [6, 7, 8],
+        };
+        let mut bytes = Vec::new();
+        let mut writer = Writer::new(&mut bytes);
+        value.write_to(&mut writer).unwrap();
+        assert_eq!(writer.position().unwrap(), value.sdk_size());
+        assert_eq!(writer.into_inner().len() as u64, value.sdk_size());
     }
 
     #[test]

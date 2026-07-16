@@ -13,6 +13,8 @@ mod allocation;
 mod directory;
 mod header;
 mod name;
+mod owned_stream;
+mod reader;
 mod sector;
 mod stream;
 mod writer;
@@ -23,6 +25,8 @@ pub use directory::{
 };
 pub use header::Header;
 pub use name::compare_names;
+pub use owned_stream::OwnedCfbStream;
+pub use reader::{CfbStream, CompoundFileReader, EntryInfo};
 pub use sector::{MiniSectorId, SectorId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,23 +120,24 @@ impl CompoundFile {
             .ok_or_else(|| Error::Limit("padded CFB length overflow".into()))?;
         let mut padded_bytes = bytes.to_vec();
         padded_bytes.resize(padded_len, 0);
-        let sectors = sector::SectorSource::new(&padded_bytes, bytes.len(), &header)?;
+        let mut sectors = sector::SectorSource::new(&padded_bytes, bytes.len(), &header)?;
         if sectors.sector_count() > u32::MAX as usize {
             return Err(Error::Limit("CFB sector count exceeds u32".into()));
         }
         sectors.full_sector(SectorId::new(header.first_directory_sector)?)?;
-        let difat = Difat::read(&header, &sectors, limits)?;
-        let fat = Fat::read(&difat, &sectors)?;
+        let difat = Difat::read(&header, &mut sectors, limits)?;
+        let fat = Fat::read(&difat, &mut sectors)?;
         let directory_sectors = fat.chain(header.first_directory_sector, sectors.sector_count())?;
-        let mini_fat = MiniFat::read(&header, &fat, &sectors, limits)?;
+        let mini_fat = MiniFat::read(&header, &fat, &mut sectors, limits)?;
         let directory = Directory::read(
             directory_sectors,
             header.number_of_directory_sectors,
-            &sectors,
+            &mut sectors,
             limits,
         )?;
         let version = header.version();
-        let entries = stream::read_entries(&header, &fat, &mini_fat, &directory, &sectors, limits)?;
+        let entries =
+            stream::read_entries(&header, &fat, &mini_fat, &directory, &mut sectors, limits)?;
         let mut unallocated_sectors = Vec::new();
         let mut unallocated_bytes = 0usize;
         for index in 0..sectors.sector_count() {
@@ -313,13 +318,16 @@ impl CompoundFile {
             .is_stream()
             .then_some(&mut self.entries[index].data)
     }
-    /// Opens an owned-model stream through the standard `Read + Write + Seek` cursor API.
-    pub fn open_stream_mut(&mut self, path: impl AsRef<Path>) -> Result<Cursor<&mut Vec<u8>>> {
+    /// Opens a fully materialized stream for `Read + Write + Seek` and `set_len` edits.
+    pub fn open_stream_mut(&mut self, path: impl AsRef<Path>) -> Result<OwnedCfbStream<'_>> {
         let index = self.required_entry_index(path.as_ref())?;
         if !self.entries[index].is_stream() {
             return Err(Error::invalid(0, "CFB entry is not a stream"));
         }
-        Ok(Cursor::new(&mut self.entries[index].data))
+        Ok(OwnedCfbStream::new(
+            &mut self.entries[index].data,
+            self.version,
+        ))
     }
     pub fn replace_stream(&mut self, path: impl AsRef<Path>, data: Vec<u8>) -> Result<Vec<u8>> {
         let path = path.as_ref();
@@ -629,8 +637,7 @@ impl CompoundFile {
     }
 
     pub fn write_to(&self, mut writer: impl Write) -> Result<()> {
-        writer.write_all(&self.to_bytes()?)?;
-        Ok(())
+        writer::write_compound_to(self, &mut writer)
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
@@ -776,6 +783,32 @@ mod tests {
                 reopened.stream("/Data/Large"),
                 Some(vec![0x33; 63].as_slice())
             );
+        }
+    }
+
+    #[test]
+    fn owned_stream_set_len_zero_fills_and_crosses_the_mini_stream_cutoff() {
+        for version in [Version::V3, Version::V4] {
+            let mut compound = CompoundFile::new(version).unwrap();
+            compound.create_stream("/Data", vec![0x11; 1_000]).unwrap();
+            {
+                let mut stream = compound.open_stream_mut("/Data").unwrap();
+                stream.set_len(5_000).unwrap();
+                assert_eq!(stream.len(), 5_000);
+                stream.seek(SeekFrom::Start(4_999)).unwrap();
+                stream.write_all(&[0x22]).unwrap();
+                stream.seek(SeekFrom::Start(999)).unwrap();
+                let mut boundary = [0; 2];
+                stream.read_exact(&mut boundary).unwrap();
+                assert_eq!(boundary, [0x11, 0]);
+                stream.set_len(500).unwrap();
+                assert_eq!(stream.len(), 500);
+                assert_eq!(stream.stream_position().unwrap(), 500);
+            }
+
+            let bytes = compound.to_bytes().unwrap();
+            let reopened = CompoundFile::from_bytes_strict(&bytes).unwrap();
+            assert_eq!(reopened.stream("/Data"), Some([0x11; 500].as_slice()));
         }
     }
 

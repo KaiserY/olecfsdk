@@ -9,17 +9,17 @@ use super::{
     allocation::{END_OF_CHAIN, Fat, MiniFat},
     directory::{Directory, DirectoryObjectType},
     header::{FREE_SECTOR, Header, MINI_STREAM_CUTOFF},
-    sector::SectorSource,
+    sector::SectorRead,
 };
 
 const MINI_SECTOR_LEN: usize = 64;
 
-pub(crate) fn read_entries(
+pub(crate) fn read_entries<S: SectorRead + ?Sized>(
     header: &Header,
     fat: &Fat,
     mini_fat: &MiniFat,
     directory: &Directory,
-    source: &SectorSource<'_>,
+    source: &mut S,
     limits: Limits,
 ) -> Result<Vec<Entry>> {
     let root = directory.root();
@@ -95,9 +95,9 @@ pub(crate) fn read_entries(
     Ok(entries)
 }
 
-fn read_regular_stream(
+fn read_regular_stream<S: SectorRead + ?Sized>(
     fat: &Fat,
-    source: &SectorSource<'_>,
+    source: &mut S,
     start: u32,
     len: usize,
     limits: Limits,
@@ -134,9 +134,11 @@ fn read_regular_stream(
         if remaining == 0 {
             break;
         }
+        let valid_len = source.valid_len(sector);
         let bytes = source.sector(sector)?;
+        let bytes = bytes.as_ref();
         let needed = remaining.min(bytes.len());
-        if needed > source.valid_len(sector) {
+        if needed > valid_len {
             return Err(Error::invalid(
                 0,
                 "stream data is truncated at physical EOF",

@@ -1057,7 +1057,7 @@ impl VectorValue {
         )
     }
 
-    fn write_to<W: Write + std::io::Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let count = match self {
             Self::I8(values) => values.len(),
             Self::U8(values) => values.len(),
@@ -1203,7 +1203,7 @@ impl ArrayValue {
         )
     }
 
-    fn write_to<W: Write + std::io::Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         match self {
             Self::I8(values) => values.iter().try_for_each(|value| writer.write_i8(*value)),
             Self::U8(values) => writer.write_all(values).map_err(Into::into),
@@ -1531,10 +1531,7 @@ fn read_variant_scalar<R: std::io::Read + std::io::Seek>(
     Ok(value)
 }
 
-fn validate_and_write_padding<W: Write + std::io::Seek>(
-    writer: &mut Writer<W>,
-    padding: &[u8],
-) -> Result<()> {
+fn validate_and_write_padding<W: Write>(writer: &mut Writer<W>, padding: &[u8]) -> Result<()> {
     let expected = writer.alignment_padding(4)?;
     if !padding.is_empty() && padding.len() != expected {
         return Err(Error::invalid(
@@ -1754,7 +1751,7 @@ fn read_array_values<R: std::io::Read + std::io::Seek>(
     })
 }
 
-fn write_type<W: Write + std::io::Seek>(
+fn write_type<W: Write>(
     writer: &mut Writer<W>,
     property_type: PropertyType,
     reserved: u16,

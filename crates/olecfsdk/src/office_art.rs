@@ -121,7 +121,7 @@ impl SdkRead for OfficeArtRecordHeader {
 }
 
 impl SdkWrite for OfficeArtRecordHeader {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         OfficeArtRecordHeaderOptions {
             version: self.version,
             instance: self.instance,

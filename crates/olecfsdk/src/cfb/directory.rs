@@ -7,7 +7,7 @@ use crate::{
     limits::Limits,
 };
 
-use super::{SectorId, Version, name, sector::SectorSource};
+use super::{SectorId, Version, name, sector::SectorRead};
 
 pub const DIRECTORY_ENTRY_LEN: usize = 128;
 pub const NO_STREAM: u32 = 0xffff_ffff;
@@ -64,7 +64,7 @@ impl SdkRead for DirectoryPointer {
 }
 
 impl SdkWrite for DirectoryPointer {
-    fn write_to<W: std::io::Write + std::io::Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u32(self.raw())
     }
 }
@@ -151,10 +151,10 @@ pub struct Directory {
 }
 
 impl Directory {
-    pub(crate) fn read(
+    pub(crate) fn read<S: SectorRead + ?Sized>(
         sectors: Vec<SectorId>,
         header_declared_sector_count: u32,
-        source: &SectorSource<'_>,
+        source: &mut S,
         limits: Limits,
     ) -> Result<Self> {
         let entry_count = sectors
@@ -169,10 +169,8 @@ impl Directory {
         }
         let mut entries = Vec::with_capacity(entry_count);
         for &sector in &sectors {
-            for raw in source
-                .full_sector(sector)?
-                .chunks_exact(DIRECTORY_ENTRY_LEN)
-            {
+            let bytes = source.full_sector(sector)?;
+            for raw in bytes.as_ref().chunks_exact(DIRECTORY_ENTRY_LEN) {
                 let mut reader = Reader::new(Cursor::new(raw))?;
                 let entry = DirectoryEntry::read_from(&mut reader)?;
                 debug_assert_eq!(entry.sdk_size(), DIRECTORY_ENTRY_LEN as u64);

@@ -156,7 +156,7 @@ fn expand_sdk_bitfield(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
         }
 
         impl ::olecfsdk::io::SdkWrite for #name {
-            fn write_to<W: ::std::io::Write + ::std::io::Seek>(
+            fn write_to<W: ::std::io::Write>(
                 &self,
                 writer: &mut ::olecfsdk::io::Writer<W>,
             ) -> ::olecfsdk::Result<()> {
@@ -907,7 +907,7 @@ fn expand_sdk_object(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
         }
 
         impl ::olecfsdk::io::SdkWrite for #name {
-            fn write_to<W: ::std::io::Write + ::std::io::Seek>(
+            fn write_to<W: ::std::io::Write>(
                 &self,
                 writer: &mut ::olecfsdk::io::Writer<W>,
             ) -> ::olecfsdk::Result<()> {
@@ -1314,7 +1314,7 @@ fn expand_sdk_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         }
 
         impl ::olecfsdk::io::SdkWrite for #name {
-            fn write_to<W: ::std::io::Write + ::std::io::Seek>(
+            fn write_to<W: ::std::io::Write>(
                 &self,
                 writer: &mut ::olecfsdk::io::Writer<W>,
             ) -> ::olecfsdk::Result<()> {

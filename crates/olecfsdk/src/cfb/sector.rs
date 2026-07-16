@@ -1,4 +1,7 @@
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    io::{Read, Seek, SeekFrom},
+};
 
 use crate::{Error, Result};
 
@@ -41,6 +44,28 @@ impl MiniSectorId {
 
     pub fn get(self) -> u32 {
         self.0
+    }
+}
+
+pub(crate) trait SectorRead {
+    type Sector<'a>: AsRef<[u8]>
+    where
+        Self: 'a;
+
+    fn sector_count(&self) -> usize;
+    fn sector_len(&self) -> usize;
+    fn valid_len(&self, id: SectorId) -> usize;
+    fn has_partial_sector(&self) -> bool;
+    fn sector(&mut self, id: SectorId) -> Result<Self::Sector<'_>>;
+
+    fn full_sector(&mut self, id: SectorId) -> Result<Self::Sector<'_>> {
+        if self.valid_len(id) != self.sector_len() {
+            return Err(Error::invalid(
+                0,
+                "truncated CFB allocation or directory sector",
+            ));
+        }
+        self.sector(id)
     }
 }
 
@@ -147,6 +172,143 @@ impl<'a> SectorSource<'a> {
         }
         let start = self.bytes.len() - self.sector_len;
         &self.bytes[start..start + self.partial_len]
+    }
+}
+
+impl SectorRead for SectorSource<'_> {
+    type Sector<'a>
+        = &'a [u8]
+    where
+        Self: 'a;
+
+    fn sector_count(&self) -> usize {
+        self.sector_count()
+    }
+
+    fn sector_len(&self) -> usize {
+        self.sector_len()
+    }
+
+    fn valid_len(&self, id: SectorId) -> usize {
+        self.valid_len(id)
+    }
+
+    fn has_partial_sector(&self) -> bool {
+        self.has_partial_sector()
+    }
+
+    fn sector(&mut self, id: SectorId) -> Result<Self::Sector<'_>> {
+        SectorSource::sector(self, id)
+    }
+
+    fn full_sector(&mut self, id: SectorId) -> Result<Self::Sector<'_>> {
+        SectorSource::full_sector(self, id)
+    }
+}
+
+pub(crate) struct SeekSectorSource<R> {
+    reader: R,
+    sector_len: usize,
+    sector_count: usize,
+    partial_sector: Option<SectorId>,
+    partial_len: usize,
+    buffer: Vec<u8>,
+}
+
+impl<R: Read + Seek> SeekSectorSource<R> {
+    pub(crate) fn new(reader: R, original_len: u64, header: &Header) -> Result<Self> {
+        let sector_len = header.sector_len();
+        if original_len < sector_len as u64 {
+            return Err(Error::invalid(
+                0,
+                "CFB file is shorter than its header sector",
+            ));
+        }
+        let sector_len_u64 = sector_len as u64;
+        let padded_len = original_len
+            .checked_add(sector_len_u64 - 1)
+            .map(|len| len / sector_len_u64 * sector_len_u64)
+            .ok_or_else(|| Error::Limit("padded CFB length overflow".into()))?;
+        let complete_sector_count = usize::try_from(padded_len / sector_len_u64)
+            .map_err(|_| Error::Limit("CFB sector count does not fit usize".into()))?;
+        let partial_len = usize::try_from(original_len % sector_len_u64)
+            .map_err(|_| Error::Limit("partial sector length does not fit usize".into()))?;
+        let partial_sector = if partial_len == 0 {
+            None
+        } else {
+            let id = complete_sector_count
+                .checked_sub(2)
+                .ok_or_else(|| Error::invalid(0, "partial CFB header sector"))?;
+            Some(SectorId::new(u32::try_from(id).map_err(|_| {
+                Error::Limit("partial sector ID does not fit u32".into())
+            })?)?)
+        };
+        Ok(Self {
+            reader,
+            sector_len,
+            sector_count: complete_sector_count - 1,
+            partial_sector,
+            partial_len,
+            buffer: vec![0; sector_len],
+        })
+    }
+
+    pub(crate) fn into_inner(self) -> R {
+        self.reader
+    }
+
+    fn sector_offset(&self, id: SectorId) -> Result<u64> {
+        let index = usize::try_from(id.get())
+            .map_err(|_| Error::invalid(0, "sector ID does not fit usize"))?;
+        if index >= self.sector_count {
+            return Err(Error::invalid(
+                0,
+                format!("sector {index} is beyond EOF ({})", self.sector_count),
+            ));
+        }
+        let physical_index = index
+            .checked_add(1)
+            .ok_or_else(|| Error::invalid(0, "sector index overflow"))?;
+        u64::try_from(physical_index)
+            .ok()
+            .and_then(|value| value.checked_mul(self.sector_len as u64))
+            .ok_or_else(|| Error::invalid(0, "sector offset overflow"))
+    }
+}
+
+impl<R: Read + Seek> SectorRead for SeekSectorSource<R> {
+    type Sector<'a>
+        = &'a [u8]
+    where
+        Self: 'a;
+
+    fn sector_count(&self) -> usize {
+        self.sector_count
+    }
+
+    fn sector_len(&self) -> usize {
+        self.sector_len
+    }
+
+    fn valid_len(&self, id: SectorId) -> usize {
+        if self.partial_sector == Some(id) {
+            self.partial_len
+        } else {
+            self.sector_len
+        }
+    }
+
+    fn has_partial_sector(&self) -> bool {
+        self.partial_sector.is_some()
+    }
+
+    fn sector(&mut self, id: SectorId) -> Result<Self::Sector<'_>> {
+        let offset = self.sector_offset(id)?;
+        let valid_len = self.valid_len(id);
+        self.buffer.fill(0);
+        self.reader.seek(SeekFrom::Start(offset))?;
+        self.reader.read_exact(&mut self.buffer[..valid_len])?;
+        Ok(&self.buffer)
     }
 }
 

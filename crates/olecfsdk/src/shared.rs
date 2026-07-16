@@ -80,7 +80,7 @@ impl SdkRead for PbString {
 }
 
 impl SdkWrite for PbString {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         validate_pb_string(self, writer.position()?)?;
         match &self.characters {
             PbStringCharacters::Ansi(values) => {
@@ -483,7 +483,7 @@ impl EnvelopeMinuteTime {
         Ok(value)
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         self.validate()?;
         writer.write_i32(self.0)
     }
@@ -548,11 +548,7 @@ impl EnvelopeString {
         }
     }
 
-    fn write<W: Write + Seek>(
-        &self,
-        writer: &mut Writer<W>,
-        version: MsoEnvelopeVersion,
-    ) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>, version: MsoEnvelopeVersion) -> Result<()> {
         match (version, self) {
             (MsoEnvelopeVersion::Ansi6, Self::Ansi(value)) => {
                 writer.write_u16(checked_u16(value.len(), "envelope ANSI string")?)?;
@@ -601,7 +597,7 @@ impl EnvelopeRecipientCollection {
         Ok(Self { recipients })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u32(Self::TAG)?;
         writer.write_u32(Self::VERSION)?;
         writer.write_u32(checked_u32(self.recipients.len(), "recipient count")?)?;
@@ -627,7 +623,7 @@ impl EnvelopeRecipient {
         })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u32(checked_u32(
             self.properties.len(),
             "recipient property count",
@@ -648,7 +644,7 @@ impl EnvelopeRecipientProperty {
         Ok(Self { property_id, value })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u32((u32::from(self.property_id) << 16) | u32::from(self.value.type_id()))?;
         self.value.write(writer)
     }
@@ -709,7 +705,7 @@ impl EnvelopeRecipientPropertyValue {
         }
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         match self {
             Self::Long(value) | Self::Null(value) | Self::Error(value) => writer.write_u32(*value),
             Self::Boolean(value) => writer.write_u16(*value),
@@ -757,7 +753,7 @@ impl EnvelopeAttachment {
         Ok(values)
     }
 
-    fn write_collection<W: Write + Seek>(writer: &mut Writer<W>, values: &[Self]) -> Result<()> {
+    fn write_collection<W: Write>(writer: &mut Writer<W>, values: &[Self]) -> Result<()> {
         writer.write_u32(checked_u32(values.len(), "attachment count")?)?;
         for value in values {
             writer.write_u32(value.method)?;
@@ -822,11 +818,7 @@ fn read_u16_bytes<R: Read + Seek>(reader: &mut Reader<R>, name: &str) -> Result<
         .map_err(|error| add_context(error, name))
 }
 
-fn write_u16_bytes<W: Write + Seek>(
-    writer: &mut Writer<W>,
-    value: &[u8],
-    name: &str,
-) -> Result<()> {
+fn write_u16_bytes<W: Write>(writer: &mut Writer<W>, value: &[u8], name: &str) -> Result<()> {
     writer.write_u16(checked_u16(value.len(), name)?)?;
     Ok(writer.write_all(value)?)
 }
@@ -839,11 +831,7 @@ fn read_u32_bytes<R: Read + Seek>(reader: &mut Reader<R>, name: &str) -> Result<
         .map_err(|error| add_context(error, name))
 }
 
-fn write_u32_bytes<W: Write + Seek>(
-    writer: &mut Writer<W>,
-    value: &[u8],
-    name: &str,
-) -> Result<()> {
+fn write_u32_bytes<W: Write>(writer: &mut Writer<W>, value: &[u8], name: &str) -> Result<()> {
     writer.write_u32(checked_u32(value.len(), name)?)?;
     Ok(writer.write_all(value)?)
 }
@@ -853,7 +841,7 @@ fn read_u16_utf16_bytes<R: Read + Seek>(reader: &mut Reader<R>, name: &str) -> R
     read_utf16_payload(reader, byte_count, name)
 }
 
-fn write_u16_utf16_bytes<W: Write + Seek>(
+fn write_u16_utf16_bytes<W: Write>(
     writer: &mut Writer<W>,
     value: &[u16],
     name: &str,
@@ -872,7 +860,7 @@ fn read_u32_utf16_bytes<R: Read + Seek>(reader: &mut Reader<R>, name: &str) -> R
     read_utf16_payload(reader, byte_count, name)
 }
 
-fn write_u32_utf16_bytes<W: Write + Seek>(
+fn write_u32_utf16_bytes<W: Write>(
     writer: &mut Writer<W>,
     value: &[u16],
     name: &str,
@@ -905,7 +893,7 @@ fn read_utf16_payload<R: Read + Seek>(
     Ok(value)
 }
 
-fn write_utf16_payload<W: Write + Seek>(writer: &mut Writer<W>, value: &[u16]) -> Result<()> {
+fn write_utf16_payload<W: Write>(writer: &mut Writer<W>, value: &[u16]) -> Result<()> {
     for character in value {
         writer.write_u16(*character)?;
     }

@@ -4,7 +4,7 @@ use crate::{Error, Result, limits::Limits};
 
 use super::{
     header::{FREE_SECTOR, Header},
-    sector::{MAX_REGULAR_SECTOR, MiniSectorId, SectorId, SectorSource},
+    sector::{MAX_REGULAR_SECTOR, MiniSectorId, SectorId, SectorRead},
 };
 
 pub const DIFAT_SECTOR: u32 = 0xffff_fffc;
@@ -82,7 +82,11 @@ pub struct Difat {
 }
 
 impl Difat {
-    pub(crate) fn read(header: &Header, source: &SectorSource<'_>, limits: Limits) -> Result<Self> {
+    pub(crate) fn read<S: SectorRead + ?Sized>(
+        header: &Header,
+        source: &mut S,
+        limits: Limits,
+    ) -> Result<Self> {
         let expected_fat = usize::try_from(header.number_of_fat_sectors)
             .map_err(|_| Error::Limit("FAT sector count does not fit usize".into()))?;
         if expected_fat > source.sector_count() {
@@ -137,7 +141,8 @@ impl Difat {
                 return Err(Error::invalid(68, "DIFAT sector chain contains a cycle"));
             }
             difat_sectors.push(id);
-            let values: Vec<_> = u32_entries(source.full_sector(id)?).collect();
+            let sector = source.full_sector(id)?;
+            let values: Vec<_> = u32_entries(sector.as_ref()).collect();
             let (chain, entries) = values
                 .split_last()
                 .ok_or_else(|| Error::invalid(0, "empty DIFAT sector"))?;
@@ -219,10 +224,10 @@ pub struct MiniFat {
 }
 
 impl MiniFat {
-    pub(crate) fn read(
+    pub(crate) fn read<S: SectorRead + ?Sized>(
         header: &Header,
         fat: &Fat,
-        source: &SectorSource<'_>,
+        source: &mut S,
         limits: Limits,
     ) -> Result<Self> {
         let sectors = if matches!(header.first_mini_fat_sector, END_OF_CHAIN | FREE_SECTOR) {
@@ -242,7 +247,8 @@ impl MiniFat {
         }
         let mut entries = Vec::with_capacity(allocation / 4);
         for &sector in &sectors {
-            entries.extend(u32_entries(source.full_sector(sector)?).map(MiniFatEntry::from_raw));
+            let bytes = source.full_sector(sector)?;
+            entries.extend(u32_entries(bytes.as_ref()).map(MiniFatEntry::from_raw));
         }
         Ok(Self {
             sectors,
@@ -348,7 +354,7 @@ impl MiniFat {
 }
 
 impl Fat {
-    pub(crate) fn read(difat: &Difat, source: &SectorSource<'_>) -> Result<Self> {
+    pub(crate) fn read<S: SectorRead + ?Sized>(difat: &Difat, source: &mut S) -> Result<Self> {
         let entries_per_sector = source.sector_len() / 4;
         let capacity = difat
             .fat_sectors
@@ -357,7 +363,8 @@ impl Fat {
             .ok_or_else(|| Error::Limit("FAT entry count overflow".into()))?;
         let mut entries = Vec::with_capacity(capacity);
         for &sector in &difat.fat_sectors {
-            entries.extend(u32_entries(source.full_sector(sector)?).map(FatEntry::from_raw));
+            let bytes = source.full_sector(sector)?;
+            entries.extend(u32_entries(bytes.as_ref()).map(FatEntry::from_raw));
         }
         if source.has_partial_sector() {
             let mut effective_len = entries.len();

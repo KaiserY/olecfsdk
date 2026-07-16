@@ -2748,7 +2748,7 @@ impl SdkRead for SxDbRecord {
 }
 
 impl SdkWrite for SxDbRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate()?;
         writer.write_i32(self.cache_record_count)?;
         writer.write_u16(self.stream_id)?;
@@ -2897,7 +2897,7 @@ impl SdkRead for PivotParsedFormula {
 }
 
 impl SdkWrite for PivotParsedFormula {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let token_bytes = self.tokens.to_bytes()?;
         if token_bytes.len() != usize::from(self.declared_token_size) {
             return Err(Error::invalid(
@@ -2927,7 +2927,7 @@ impl SdkRead for SxFmlaRecord {
 }
 
 impl SdkWrite for SxFmlaRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.formula.write_to(writer)
     }
 }
@@ -8801,7 +8801,7 @@ impl SdkRead for FormulaRecord {
 }
 
 impl SdkWrite for FormulaRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.cell.write_to(writer)?;
         writer.write_u64(self.cached_result.bits())?;
         writer.write_u16(self.flags)?;
@@ -8844,7 +8844,7 @@ impl SdkRead for SharedFormulaRecord {
 }
 
 impl SdkWrite for SharedFormulaRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.first_row)?;
         writer.write_u16(self.last_row)?;
         writer.write_u8(self.first_column)?;
@@ -8889,7 +8889,7 @@ impl SdkRead for ArrayRecord {
 }
 
 impl SdkWrite for ArrayRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let rgce = self.tokens.rgce.to_bytes()?;
         writer.write_u16(self.first_row)?;
         writer.write_u16(self.last_row)?;
@@ -8966,7 +8966,7 @@ impl SdkRead for SupBookRecord {
 }
 
 impl SdkWrite for SupBookRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.sheet_count)?;
         match &self.link {
             SupBookLink::SelfReference => writer.write_u16(0x0401)?,
@@ -9176,7 +9176,7 @@ impl ExternNameFormulaValue {
 }
 
 impl SdkWrite for ExternNameRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.name.character_count() != usize::from(self.declared_name_character_count) {
             return Err(Error::invalid(0, "ExternName name length mismatch"));
         }
@@ -9276,7 +9276,7 @@ impl SdkRead for HyperlinkRecord {
 }
 
 impl SdkWrite for HyperlinkRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.first_row)?;
         writer.write_u16(self.last_row)?;
         writer.write_u16(self.first_column)?;
@@ -9683,7 +9683,7 @@ impl SdkRead for XlUnicodeString {
 }
 
 impl SdkWrite for XlUnicodeString {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(
             u16::try_from(self.text.character_count())
                 .map_err(|_| Error::Limit("XLUnicodeString exceeds u16 characters".into()))?,
@@ -9713,7 +9713,7 @@ impl SdkRead for DataValidationFormula {
 }
 
 impl SdkWrite for DataValidationFormula {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let bytes = self.tokens.to_bytes()?;
         writer.write_u16(
             u16::try_from(bytes.len())
@@ -9753,7 +9753,7 @@ impl SdkRead for DataValidationRecord {
 }
 
 impl SdkWrite for DataValidationRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.options.write_to(writer)?;
         self.prompt_title.write_to(writer)?;
         self.error_title.write_to(writer)?;
@@ -9836,7 +9836,7 @@ impl SdkRead for DxfN {
 }
 
 impl SdkWrite for DxfN {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         for (flag, present, name) in [
             (
                 DxfFlags::NUMBER_FORMAT,
@@ -9929,7 +9929,7 @@ impl SdkRead for ConditionalFormattingRecord {
 }
 
 impl SdkWrite for ConditionalFormattingRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let formula1 = self.formula1.to_bytes()?;
         let formula2 = self.formula2.to_bytes()?;
         writer.write_u8(self.condition_type)?;
@@ -9977,7 +9977,7 @@ impl SdkRead for ConditionalFormattingGroupRecord {
 }
 
 impl SdkWrite for ConditionalFormattingGroupRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.rule_count)?;
         writer.write_u16(self.flags_and_id)?;
         self.bounds.write_to(writer)?;
@@ -10012,7 +10012,7 @@ impl SdkRead for XfExtNoFrt {
 }
 
 impl SdkWrite for XfExtNoFrt {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.reserved1)?;
         writer.write_u16(self.reserved2)?;
         writer.write_u16(self.reserved3)?;
@@ -10056,7 +10056,7 @@ impl SdkRead for DxfN12 {
 }
 
 impl SdkWrite for DxfN12 {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         match self {
             Self::Empty { reserved } => {
                 writer.write_u32(0)?;
@@ -10106,7 +10106,7 @@ impl CfExTemplateParams {
         })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         match self {
             Self::Filter {
                 flags,
@@ -10173,7 +10173,7 @@ impl SdkRead for CfExNonCf12 {
 }
 
 impl SdkWrite for CfExNonCf12 {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.rule_index)?;
         writer.write_u8(self.comparison_operator)?;
         writer.write_u8(self.template_id)?;
@@ -10208,7 +10208,7 @@ impl SdkRead for ConditionalFormattingExtensionRecord {
 }
 
 impl SdkWrite for ConditionalFormattingExtensionRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if (self.is_cf12 == 0) != self.content.is_some() {
             return Err(Error::invalid(0, "CFEx fIsCF12 and content disagree"));
         }
@@ -10237,7 +10237,7 @@ impl CfVo {
         })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let formula = self.formula.to_bytes()?;
         let expects_value = formula.is_empty() && !matches!(self.value_type, 0x02 | 0x03);
         if expects_value != self.value_bits.is_some() {
@@ -10292,7 +10292,7 @@ impl SdkRead for CfGradient {
 }
 
 impl SdkWrite for CfGradient {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if usize::from(self.interpolation_count) != self.interpolation.len()
             || usize::from(self.gradient_count) != self.gradient.len()
         {
@@ -10333,7 +10333,7 @@ impl SdkRead for CfDataBar {
 }
 
 impl SdkWrite for CfDataBar {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.unused)?;
         writer.write_u8(self.reserved)?;
         writer.write_u8(self.flags.bits())?;
@@ -10391,7 +10391,7 @@ impl SdkRead for CfMultistate {
 }
 
 impl SdkWrite for CfMultistate {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if usize::from(self.state_count) != self.states.len() {
             return Err(Error::invalid(
                 writer.position()?,
@@ -10474,7 +10474,7 @@ impl SdkRead for ConditionalFormatting12Record {
 }
 
 impl SdkWrite for ConditionalFormatting12Record {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let formula1 = self.formula1.to_bytes()?;
         let formula2 = self.formula2.to_bytes()?;
         let active_formula = self.active_formula.to_bytes()?;
@@ -10551,7 +10551,7 @@ impl SdkRead for ConditionalFormattingGroup12Record {
 }
 
 impl SdkWrite for ConditionalFormattingGroup12Record {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.header.write_to(writer)?;
         self.group.write_to(writer)
     }
@@ -10576,7 +10576,7 @@ impl SdkRead for ChartLinkedDataRecord {
 }
 
 impl SdkWrite for ChartLinkedDataRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let formula = self.formula.to_bytes()?;
         writer.write_u8(self.link_type)?;
         writer.write_u8(self.reference_type)?;
@@ -10660,7 +10660,7 @@ impl SdkRead for HeaderFooterRecord {
 }
 
 impl SdkWrite for HeaderFooterRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         match self {
             Self::EmptyPayload => Ok(()),
             Self::EmptyCountOnly => writer.write_u16(0),
@@ -10726,7 +10726,7 @@ impl SdkRead for BoolErrRecord {
 }
 
 impl SdkWrite for BoolErrRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.cell.write_to(writer)?;
         match self.value {
             BoolErrValue::Byte(value) => writer.write_u8(value)?,
@@ -10794,7 +10794,7 @@ impl SdkRead for MulRkRecord {
 }
 
 impl SdkWrite for MulRkRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.row)?;
         writer.write_u16(self.first_column)?;
         for cell in &self.cells {
@@ -10833,7 +10833,7 @@ impl SdkRead for MulBlankRecord {
 }
 
 impl SdkWrite for MulBlankRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.row)?;
         writer.write_u16(self.first_column)?;
         for format_index in &self.format_indices {
@@ -10844,7 +10844,7 @@ impl SdkWrite for MulBlankRecord {
 }
 
 impl SdkWrite for ColInfoRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.first_column)?;
         writer.write_u16(self.last_column)?;
         writer.write_u16(self.width)?;
@@ -10897,7 +10897,7 @@ impl SdkRead for CrnRecord {
 }
 
 impl SdkWrite for CrnRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let expected = self
             .last_column
             .checked_sub(self.first_column)
@@ -11031,7 +11031,7 @@ impl SdkRead for HfPictureRecord {
 }
 
 impl SdkWrite for HfPictureRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.header.write_to(writer)?;
         writer.write_u8(self.flags.bits())?;
         writer.write_u8(self.reserved)?;
@@ -11083,7 +11083,7 @@ impl SdkRead for FeatureHeaderRecord {
 }
 
 impl SdkWrite for FeatureHeaderRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.header.write_to(writer)?;
         writer.write_u16(self.shared_feature_type)?;
         writer.write_u8(self.reserved)?;
@@ -11571,7 +11571,7 @@ impl SdkRead for SecurityDescriptorContainer {
 }
 
 impl SdkWrite for SecurityDescriptorContainer {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let size = usize::try_from(self.declared_size)
             .map_err(|_| Error::Limit("security descriptor size exceeds usize".into()))?;
         let bytes = self.descriptor.to_bytes(size)?;
@@ -11602,7 +11602,7 @@ impl SdkRead for FeatureProtection {
 }
 
 impl SdkWrite for FeatureProtection {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let has_descriptor = self
             .flags
             .contains(FeatureProtectionFlags::HAS_SECURITY_DESCRIPTOR);
@@ -11638,7 +11638,7 @@ impl SdkRead for FeatureSmartTag {
 }
 
 impl SdkWrite for FeatureSmartTag {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u32(self.hash_value)?;
         writer.write_u8(
             u8::try_from(self.factoids.len())
@@ -11699,7 +11699,7 @@ impl SdkRead for FeatureRecord {
 }
 
 impl SdkWrite for FeatureRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let expected_type = match self.data {
             FeatureData::Protection(_) => 0x0002,
             FeatureData::FormulaErrors(_) => 0x0003,
@@ -11768,7 +11768,7 @@ impl SdkRead for DConnUnicodeStringSegmented {
 }
 
 impl SdkWrite for DConnUnicodeStringSegmented {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let actual_count = self.segments.iter().try_fold(0usize, |count, segment| {
             if segment.text.character_count() == 0 {
                 return Err(Error::invalid(
@@ -11809,7 +11809,7 @@ impl SdkRead for DConnStringSequence {
 }
 
 impl SdkWrite for DConnStringSequence {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(
             u16::try_from(self.strings.len())
                 .map_err(|_| Error::Limit("DConn string sequence exceeds u16 entries".into()))?,
@@ -11948,7 +11948,7 @@ impl SdkRead for TextQuery {
 }
 
 impl SdkWrite for TextQuery {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.record_type)?;
         writer.write_u16(self.reserved)?;
         writer.write_u32(self.options.bits())?;
@@ -12001,7 +12001,7 @@ impl SdkRead for DConnOleDbConnection {
 }
 
 impl SdkWrite for DConnOleDbConnection {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let count = self.valid_connection_types.len();
         if count > 4
             || self.invalid_connection_types.len() != 4 - count
@@ -12041,7 +12041,7 @@ impl SdkRead for DConnWebConnection {
 }
 
 impl SdkWrite for DConnWebConnection {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.url.write_to(writer)?;
         self.post_method.write_to(writer)
     }
@@ -12110,7 +12110,7 @@ impl SdkRead for DConnParameter {
 }
 
 impl SdkWrite for DConnParameter {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let expected_type = match self.binding {
             DConnParameterBinding::Prompt(_) => 0,
             DConnParameterBinding::Value { .. } => 1,
@@ -12184,7 +12184,7 @@ impl SdkRead for DConnIdentifier {
 }
 
 impl SdkWrite for DConnIdentifier {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         match self {
             Self::None => writer.write_u8(0)?,
             Self::QueryTable(value) => {
@@ -12283,7 +12283,7 @@ impl SdkRead for DConnRecord {
 }
 
 impl SdkWrite for DConnRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if usize::from(self.parameters_count) != self.parameters.len() {
             return Err(Error::invalid(0, "DConn parameter count mismatch"));
         }
@@ -12379,7 +12379,7 @@ impl SdkRead for QsiSxTagRecord {
 }
 
 impl SdkWrite for QsiSxTagRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let future_flags = match (self.pivot_table, self.future_flags) {
             (DConBoolean::False, QsiSxTagFutureFlags::QueryTable(value)) => value.bits(),
             (DConBoolean::True, QsiSxTagFutureFlags::PivotTable(value)) => value.bits(),
@@ -12455,7 +12455,7 @@ impl SdkRead for DbQueryExtRecord {
 }
 
 impl SdkWrite for DbQueryExtRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if usize::from(self.parameter_count) != self.parameters.len() {
             return Err(Error::invalid(0, "DBQueryExt parameter count mismatch"));
         }
@@ -12566,7 +12566,7 @@ impl SdkRead for SxAddlRecord {
 }
 
 impl SdkWrite for SxAddlRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let matches_header = match &self.data {
             SxAddlData::End { .. } => self.header.data_type == 0xff,
             SxAddlData::ViewId(_) => (self.header.class, self.header.data_type) == (0x00, 0x00),
@@ -12728,7 +12728,7 @@ impl SdkRead for BookExtRecord {
 }
 
 impl SdkWrite for BookExtRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.conditional12.is_some() && self.conditional11.is_none() {
             return Err(Error::invalid(
                 0,
@@ -12800,7 +12800,7 @@ impl SdkRead for XmlTkRecord {
 }
 
 impl SdkWrite for XmlTkRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let data_type = match &self.data {
             XmlTkData::Start => 0x00,
             XmlTkData::End => 0x01,
@@ -12866,7 +12866,7 @@ impl SdkRead for XmlTkChain {
 }
 
 impl SdkWrite for XmlTkChain {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u8(self.record_version)?;
         writer.write_u8(self.unused)?;
         writer.write_u16(self.parent)?;
@@ -12893,7 +12893,7 @@ impl SdkRead for CrtMlFrtRecord {
 }
 
 impl SdkWrite for CrtMlFrtRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let mut child = Writer::new(Cursor::new(Vec::new()));
         self.chain.write_to(&mut child)?;
         let bytes = child.into_inner().into_inner();
@@ -12909,7 +12909,7 @@ impl SdkWrite for CrtMlFrtRecord {
 }
 
 impl SdkWrite for ExtendedHeaderFooterRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.header.write_to(writer)?;
         writer.write_all(&self.sheet_view_guid)?;
         writer.write_u16(self.flags.bits())?;
@@ -12942,7 +12942,7 @@ impl SdkWrite for ExtendedHeaderFooterRecord {
 }
 
 impl SdkWrite for XfExtRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.header.write_to(writer)?;
         writer.write_u16(self.reserved1)?;
         writer.write_u16(self.xf_index)?;
@@ -12999,7 +12999,7 @@ impl ExtProperty {
         })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let (property_type, payload) = match &self.data {
             ExtPropertyData::FullColor {
                 property_type,
@@ -13066,7 +13066,7 @@ impl SdkRead for XfProperty {
 }
 
 impl SdkWrite for XfProperty {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let payload = match &self.data {
             XfPropertyData::Color(value) => encode_sdk(value)?,
             XfPropertyData::Border(value) => encode_sdk(value)?,
@@ -13175,12 +13175,12 @@ impl BiffUnicodeString {
         }
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u8(self.flags)?;
         self.write_characters(writer)
     }
 
-    fn write_characters<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_characters<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         match &self.characters {
             XlStringCharacters::Compressed(values) => {
                 if self.flags & 1 != 0 {
@@ -13235,7 +13235,7 @@ impl SdkRead for SxviRecord {
 }
 
 impl SdkWrite for SxviRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let expected_name_length = match &self.name {
             None => u16::MAX,
             Some(name) => u16::try_from(name.character_count())
@@ -13312,7 +13312,7 @@ impl SxLiRecord {
 }
 
 impl SdkWrite for SxLiRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         for item in &self.items {
             if item.item_indices.len() != usize::from(self.axis_dimension_count) {
                 return Err(Error::invalid(
@@ -13369,7 +13369,7 @@ impl SdkRead for SxDiRecord {
 }
 
 impl SdkWrite for SxDiRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let expected_name_length = match &self.name {
             None => u16::MAX,
             Some(name) => u16::try_from(name.character_count())
@@ -13414,7 +13414,7 @@ impl SdkRead for SxStringRecord {
 }
 
 impl SdkWrite for SxStringRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let expected_count = match &self.segment {
             None => u16::MAX,
             Some(segment) => u16::try_from(segment.character_count())
@@ -13469,7 +13469,7 @@ impl SdkRead for SxRuleRecord {
 }
 
 impl SdkWrite for SxRuleRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.area_type > 6 {
             return Err(Error::invalid(
                 writer.position()?,
@@ -13509,7 +13509,7 @@ fn read_sx_ex_string<R: Read + Seek>(
     }
 }
 
-fn write_sx_ex_string<W: Write + Seek>(
+fn write_sx_ex_string<W: Write>(
     writer: &mut Writer<W>,
     declared_length: u16,
     value: &Option<BiffUnicodeString>,
@@ -13580,7 +13580,7 @@ impl SdkRead for SxExRecord {
 }
 
 impl SdkWrite for SxExRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.format_count)?;
         writer.write_u16(self.error_string_length)?;
         writer.write_u16(self.null_string_length)?;
@@ -13641,7 +13641,7 @@ impl SdkRead for SxFiltRecord {
 }
 
 impl SdkWrite for SxFiltRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.reserved1 > 0x03 || self.reserved3 > 0x0f {
             return Err(Error::invalid(
                 writer.position()?,
@@ -13674,7 +13674,7 @@ impl SdkRead for SxDxfRecord {
 }
 
 impl SdkWrite for SxDxfRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_all(&self.format.to_bytes()?)?;
         Ok(())
     }
@@ -13751,7 +13751,7 @@ impl DConFileReference {
         Ok(())
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate()?;
         writer.write_u16(self.declared_character_count)?;
         if let Some(file) = &self.file {
@@ -13783,7 +13783,7 @@ impl SdkRead for DConNameRecord {
 }
 
 impl SdkWrite for DConNameRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if !(1..=255).contains(&self.name.text.character_count()) {
             return Err(Error::invalid(
                 writer.position()?,
@@ -13815,7 +13815,7 @@ impl SdkRead for DConBinRecord {
 }
 
 impl SdkWrite for DConBinRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u8(self.built_in_name.raw())?;
         writer.write_u16(self.reserved1)?;
         writer.write_u8(self.reserved2)?;
@@ -13849,7 +13849,7 @@ impl SdkRead for DConRefRecord {
 }
 
 impl SdkWrite for DConRefRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let expected_count = u16::try_from(self.file.character_count())
             .map_err(|_| Error::Limit("DConRef file exceeds u16 characters".into()))?;
         if self.declared_file_character_count != expected_count {
@@ -13908,7 +13908,7 @@ impl SdkRead for FileSharingRecord {
 }
 
 impl SdkWrite for FileSharingRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let has_password = self.password_verifier != 0;
         if has_password != matches!(self.data, FileSharingData::Password { .. }) {
             return Err(Error::invalid(
@@ -13946,7 +13946,7 @@ impl ScenarioCellReference {
         })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.column > 0x00ff {
             return Err(Error::invalid(
                 writer.position()?,
@@ -14089,7 +14089,7 @@ impl SdkRead for ScenarioRecord {
 }
 
 impl SdkWrite for ScenarioRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u16(self.declared_cell_count)?;
         writer.write_u8(u8::from(self.locked))?;
@@ -14148,7 +14148,7 @@ impl ShortDtr {
         Ok(value)
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u16(self.year)?;
         writer.write_u8(self.month)?;
@@ -14203,7 +14203,7 @@ impl SdkRead for UsrInfoRecord {
 }
 
 impl SdkWrite for UsrInfoRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let position = writer.position()?;
         self.validate(position)?;
         writer.write_i32(self.user_id)?;
@@ -14255,7 +14255,7 @@ impl SdkRead for UsrExclRecord {
 }
 
 impl SdkWrite for UsrExclRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u32(u32::from(self.exclusive))?;
         self.changed_at.write(writer)?;
@@ -14315,7 +14315,7 @@ impl SdkRead for FileLockRecord {
 }
 
 impl SdkWrite for FileLockRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.purpose.write_to(writer)?;
         self.user_name.write_to(writer)?;
@@ -14356,7 +14356,7 @@ impl Rrd {
         Self::read_from(reader)
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         self.write_to(writer)
     }
 }
@@ -14399,7 +14399,7 @@ fn validate_fixed_biff_unicode(
     }
 }
 
-fn write_fixed_biff_unicode<W: Write + Seek>(
+fn write_fixed_biff_unicode<W: Write>(
     value: &BiffUnicodeString,
     byte_size: usize,
     field: &str,
@@ -14469,7 +14469,7 @@ impl SdkRead for RrdHeadRecord {
 }
 
 impl SdkWrite for RrdHeadRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.revision.write(writer)?;
         writer.write_all(&self.revision_set_guid)?;
@@ -14527,7 +14527,7 @@ impl SdkRead for RrdRenSheetRecord {
 }
 
 impl SdkWrite for RrdRenSheetRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.revision.write(writer)?;
         writer.write_u16(self.used_old_name_characters)?;
@@ -14552,7 +14552,7 @@ impl Ref8U {
         Self::read_from(reader)
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         self.write_to(writer)
     }
 }
@@ -14585,7 +14585,7 @@ impl Ref8U2007 {
         Ok(value)
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u32(self.first_row)?;
         writer.write_u32(self.last_row)?;
@@ -14648,7 +14648,7 @@ impl SdkRead for RrdTqsifRecord {
 }
 
 impl SdkWrite for RrdTqsifRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u16(self.record_type)?;
         writer.write_u16(self.future_flags)?;
@@ -14699,7 +14699,7 @@ impl RrdDefNameFlags {
         Ok(value)
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u16(self.declared_formula_size)?;
         writer.write_u16(
@@ -14765,7 +14765,7 @@ fn read_rrd_name_formula<R: Read + Seek>(
     Ok(formula)
 }
 
-fn write_rrd_name_formula<W: Write + Seek>(
+fn write_rrd_name_formula<W: Write>(
     formula: &FormulaTokenStream,
     declared_size: u16,
     writer: &mut Writer<W>,
@@ -14786,7 +14786,7 @@ impl RrdDefNameText {
         })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.custom_menu.write_to(writer)?;
         self.description.write_to(writer)?;
         self.help_topic.write_to(writer)?;
@@ -14933,7 +14933,7 @@ impl SdkRead for RrdDefNameRecord {
 }
 
 impl SdkWrite for RrdDefNameRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.revision.write(writer)?;
         writer.write_u16(self.local_sheet_id)?;
@@ -15002,7 +15002,7 @@ impl SqRefU {
         Ok(value)
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u16(self.declared_range_count)?;
         for range in &self.ranges {
@@ -15042,7 +15042,7 @@ impl SdkRead for RrAutoFmtRecord {
 }
 
 impl SdkWrite for RrAutoFmtRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.revision.write(writer)?;
         self.range.write(writer)?;
@@ -15090,7 +15090,7 @@ impl SdkRead for RrFormatRecord {
 }
 
 impl SdkWrite for RrFormatRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.revision.write(writer)?;
         writer.write_u16(self.flags.bits())?;
@@ -15141,7 +15141,7 @@ impl RkNumber {
         Ok(Self::from_bits(reader.read_u32()?))
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         let bits = self.bits(writer.position()?)?;
         writer.write_u32(bits)
     }
@@ -15172,7 +15172,7 @@ impl Xnum {
         Ok(value)
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u64(self.bits)
     }
@@ -15192,7 +15192,7 @@ impl Bes {
         }
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         match self {
             Self::Boolean(value) => {
                 writer.write_u8(u8::from(value))?;
@@ -15401,7 +15401,7 @@ impl SdkRead for XlUnicodeRichExtendedString {
 }
 
 impl SdkWrite for XlUnicodeRichExtendedString {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u16(self.declared_character_count)?;
         writer.write_u8(self.flags.bits())?;
@@ -15499,7 +15499,7 @@ impl SdkRead for CellParsedFormula {
 }
 
 impl SdkWrite for CellParsedFormula {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u16(self.declared_token_size)?;
         writer.write_all(&self.formula.to_bytes()?)?;
@@ -15567,7 +15567,7 @@ impl RrdCellValue {
         })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         match self {
             Self::Blank => Ok(()),
             Self::Rk(value) => value.write(writer),
@@ -15704,7 +15704,7 @@ impl SdkRead for RrdChgCellRecord {
 }
 
 impl SdkWrite for RrdChgCellRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.revision.write(writer)?;
         writer
@@ -15800,7 +15800,7 @@ impl Stxp {
         Ok(value)
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_i32(self.height_twips)?;
         let text_style_position = writer.position()?;
@@ -15841,7 +15841,7 @@ impl Icv {
         Ok(value)
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u16(self.value)
     }
@@ -15887,7 +15887,7 @@ impl SdkRead for RrdRstEtxpRecord {
 }
 
 impl SdkWrite for RrdRstEtxpRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u16(self.font_index)?;
         writer.write_u8(self.used_font_name_characters)?;
@@ -15935,7 +15935,7 @@ impl RgceLocation {
         })
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.row)?;
         let column = self.column.bits(writer.position()?)?;
         writer.write_u16(column)
@@ -15956,7 +15956,7 @@ impl RgceLocation8 {
         Ok(Self { location, reserved })
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         if self.reserved != 0 {
             return Err(Error::invalid(
                 writer.position()?,
@@ -15984,7 +15984,7 @@ impl RgceArea {
         })
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.first_row)?;
         writer.write_u16(self.last_row)?;
         let first_column = self.first_column.bits(writer.position()?)?;
@@ -16014,7 +16014,7 @@ impl RrLocation {
         Self::from_words(row, reader.read_u16()?, position)
     }
 
-    fn write<W: Write + Seek>(self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(self, writer: &mut Writer<W>) -> Result<()> {
         if self.column > 0x00ff {
             return Err(Error::invalid(
                 writer.position()?,
@@ -16167,7 +16167,7 @@ impl Duce {
         Ok(value)
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         match self.stacked {
             DuceStacked::Location(location) => location.write(writer)?,
@@ -16297,7 +16297,7 @@ impl Ducr {
         Ok(value)
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u32(self.reserved1)?;
         writer.write_u16(self.token_index)?;
@@ -16393,7 +16393,7 @@ impl SdkRead for RrdInsDelRecord {
 }
 
 impl SdkWrite for RrdInsDelRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.revision.write(writer)?;
         writer.write_u16(u16::from(self.end_of_list))?;
@@ -16456,7 +16456,7 @@ impl SdkRead for RrdMoveRecord {
 }
 
 impl SdkWrite for RrdMoveRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.revision.write(writer)?;
         self.source_range.write(writer)?;
@@ -16547,7 +16547,7 @@ impl SdkRead for RrSortRecord {
 }
 
 impl SdkWrite for RrSortRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.revision.write(writer)?;
         self.range.write(writer)?;
@@ -16598,7 +16598,7 @@ impl SdkRead for RrInsertShRecord {
 }
 
 impl SdkWrite for RrInsertShRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.revision.write(writer)?;
         writer.write_u16(self.sheet_position)?;
@@ -16669,7 +16669,7 @@ impl SdkRead for RrdInfoRecord {
 }
 
 impl SdkWrite for RrdInfoRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u16(self.biff_version)?;
         writer.write_u16(self.reserved1)?;
@@ -16704,7 +16704,7 @@ impl SdkRead for RrdUserViewRecord {
 }
 
 impl SdkWrite for RrdUserViewRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.revision.revision_id != 0
             || !matches!(
                 self.revision.revision_type,
@@ -16855,7 +16855,7 @@ impl SdkRead for DocRouteRecord {
 }
 
 impl SdkWrite for DocRouteRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let counts = [
             self.subject.len(),
             self.message.len(),
@@ -16944,7 +16944,7 @@ impl SdkRead for FrtWrapperRecord {
 }
 
 impl SdkWrite for FrtWrapperRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         validate_frt_header_old(self.header, FRT_WRAPPER, writer.position()?, "FrtWrapper")?;
         let (record_type, payload) = self.wrapped.encode()?;
         if !is_frt_wrapper_record_type(record_type) || payload.len() > MAX_BIFF_RECORD_DATA {
@@ -16989,7 +16989,7 @@ impl SdkRead for SxViewLinkRecord {
 }
 
 impl SdkWrite for SxViewLinkRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.record_type != SX_VIEW_LINK
             || self.reserved != 0
             || self.pivot_table_name.character_count() > 255
@@ -17080,7 +17080,7 @@ impl SdkRead for QsifRecord {
 }
 
 impl SdkWrite for QsifRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         validate_frt_header_old(self.header, QSIF, writer.position()?, "Qsif")?;
         if !(1..=0xffff).contains(&self.field_id) || self.title.text.character_count() > 255 {
             return Err(Error::invalid(
@@ -17234,7 +17234,7 @@ impl SdkRead for QsirRecord {
 }
 
 impl SdkWrite for QsirRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.header.record_type != QSIR
             || self.header.flags != FrtFlags::HAS_CELL_RANGE
             || usize::try_from(self.declared_field_count).ok() != Some(self.fields.len())
@@ -17287,7 +17287,7 @@ impl WebPubString {
         Ok(Self { text, padding })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let count = self.text.character_count();
         if count > 255 {
             return Err(Error::invalid(
@@ -17374,7 +17374,7 @@ impl SdkRead for WebPubRecord {
 }
 
 impl SdkWrite for WebPubRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let expected_header_flags = if self.source_type == WebPublishSourceType::CellRange {
             FrtFlags::HAS_CELL_RANGE
         } else {
@@ -17500,7 +17500,7 @@ impl SdkRead for CrErrRecord {
 }
 
 impl SdkWrite for CrErrRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let first = self
             .encode_physical()?
             .into_iter()
@@ -17625,7 +17625,7 @@ impl SdkRead for AutoFilter12Criterion {
 }
 
 impl SdkWrite for AutoFilter12Criterion {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if matches!(self.operand.value, AutoFilterOperandValue::Rk { .. }) {
             return Err(Error::invalid(
                 writer.position()?,
@@ -17712,7 +17712,7 @@ impl SdkRead for AutoFilter12DateGrouping {
 }
 
 impl SdkWrite for AutoFilter12DateGrouping {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         writer.write_u16(self.year)?;
         writer.write_u16(self.month)?;
@@ -17898,7 +17898,7 @@ impl SdkRead for AutoFilter12Record {
 }
 
 impl SdkWrite for AutoFilter12Record {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.header.write_to(writer)?;
         writer.write_u16(self.entry_index)?;
@@ -18287,7 +18287,7 @@ impl SdkRead for SxViewRecord {
 }
 
 impl SdkWrite for SxViewRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let table_name_length = u16::try_from(self.table_name.character_count())
             .map_err(|_| Error::Limit("SxView table name exceeds u16 characters".into()))?;
         let data_name_length = u16::try_from(self.data_name.character_count())
@@ -18366,7 +18366,7 @@ impl SdkRead for SxvdExRecord {
 }
 
 impl SdkWrite for SxvdExRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u32(self.flags.bits() | (u32::from(self.auto_show_count) << 24))?;
         writer.write_u16(self.auto_sort_data_item as u16)?;
         writer.write_u16(self.auto_show_data_item as u16)?;
@@ -18421,7 +18421,7 @@ impl SdkRead for SxvdRecord {
 }
 
 impl SdkWrite for SxvdRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let expected_name_length = match &self.name {
             None => u16::MAX,
             Some(name) => u16::try_from(name.character_count())
@@ -18486,7 +18486,7 @@ impl SdkRead for SxViewExRecord {
 }
 
 impl SdkWrite for SxViewExRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.header.record_type != SX_VIEW_EX
             || self.hierarchy_count < 1
             || self.page_axis_extension_count < 0
@@ -18650,7 +18650,7 @@ impl HiddenMemberSet {
         })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if usize::try_from(self.declared_member_count).ok() != Some(self.member_names.len()) {
             return Err(Error::invalid(
                 writer.position()?,
@@ -18801,7 +18801,7 @@ impl SdkRead for SxThRecord {
 }
 
 impl SdkWrite for SxThRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.header.write_to(writer)?;
         writer.write_u32(self.flags.bits())?;
@@ -18846,7 +18846,7 @@ impl SdkRead for SxPiExRecord {
 }
 
 impl SdkWrite for SxPiExRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.header.record_type != SX_PI_EX {
             return Err(Error::invalid(
                 writer.position()?,
@@ -18931,7 +18931,7 @@ impl SdkRead for SxvdTExRecord {
 }
 
 impl SdkWrite for SxvdTExRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.header.write_to(writer)?;
         writer.write_u16(self.flags.bits())?;
@@ -19004,7 +19004,7 @@ impl SdkRead for SheetExtRecord {
 }
 
 impl SdkWrite for SheetExtRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let expected_size = if self.optional.is_some() { 40 } else { 20 };
         if self.declared_size != expected_size {
             return Err(Error::invalid(
@@ -19042,7 +19042,7 @@ impl SdkRead for XlUnicodeStringMin2 {
 }
 
 impl SdkWrite for XlUnicodeStringMin2 {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let expected_count = match &self.text {
             None => 0,
             Some(text) => u16::try_from(text.character_count())
@@ -19090,7 +19090,7 @@ impl SdkRead for NameCommentRecord {
 }
 
 impl SdkWrite for NameCommentRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if usize::from(self.declared_name_length) != self.name.character_count()
             || usize::from(self.declared_comment_length) != self.comment.character_count()
         {
@@ -19158,7 +19158,7 @@ impl SdkRead for Feat11XMap {
 }
 
 impl SdkWrite for Feat11XMap {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.declared_entry_count > 1
             || usize::from(self.declared_entry_count) != self.entries.len()
         {
@@ -19196,7 +19196,7 @@ impl SdkRead for Feat11XMapEntry {
 }
 
 impl SdkWrite for Feat11XMapEntry {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if !self.flags.contains(Feat11XMapEntryFlags::LOAD_XMAP) {
             return Err(Error::invalid(
                 writer.position()?,
@@ -19285,7 +19285,7 @@ impl Feat11WssListInfo {
         })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>, web_data_type: u32) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>, web_data_type: u32) -> Result<()> {
         if (self.display_flags.bits() & Feat11WssDisplayFlags::READING_ORDER_MASK.bits()) >> 3 == 3
         {
             return Err(Error::invalid(
@@ -19370,7 +19370,7 @@ impl Feat11WssDefaultValue {
         }
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         match self {
             Self::Text(value) | Self::Choice(value) | Self::MultiChoice(value) => {
                 value.write_to(writer)
@@ -19401,7 +19401,7 @@ impl CachedDiskHeader {
         })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>, load_style_name: bool) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>, load_style_name: bool) -> Result<()> {
         if load_style_name != self.style_name.is_some() {
             return Err(Error::invalid(
                 writer.position()?,
@@ -19443,7 +19443,7 @@ impl SdkRead for ListParsedFormula {
 }
 
 impl SdkWrite for ListParsedFormula {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let bytes = self.formula.to_bytes()?;
         if self.declared_token_size == 0 || usize::from(self.declared_token_size) != bytes.len() {
             return Err(Error::invalid(
@@ -19493,7 +19493,7 @@ impl SdkRead for ListParsedArrayFormula {
 }
 
 impl SdkWrite for ListParsedArrayFormula {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let rgce = self.formula.to_bytes()?;
         if self.declared_token_size == 0 || usize::from(self.declared_token_size) != rgce.len() {
             return Err(Error::invalid(
@@ -19533,7 +19533,7 @@ impl SdkRead for Feat11Fmla {
 }
 
 impl SdkWrite for Feat11Fmla {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let bytes = encode_sdk(&self.formula)?;
         if usize::from(self.declared_size) != bytes.len() {
             return Err(Error::invalid(
@@ -19558,7 +19558,7 @@ impl Feat11TotalFmla {
         }
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>, array: bool) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>, array: bool) -> Result<()> {
         match (self, array) {
             (Self::Formula(value), false) => value.write_to(writer),
             (Self::ArrayFormula(value), true) => value.write_to(writer),
@@ -19602,7 +19602,7 @@ impl SdkRead for Feature11AutoFilter {
 }
 
 impl SdkWrite for Feature11AutoFilter {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let filter_bytes = self
             .filter
             .as_deref()
@@ -19779,7 +19779,7 @@ impl Feature11FieldDataItem {
         })
     }
 
-    fn write<W: Write + Seek>(
+    fn write<W: Write>(
         &self,
         writer: &mut Writer<W>,
         source_type: u32,
@@ -20074,7 +20074,7 @@ impl SdkRead for TableFeatureType {
 }
 
 impl SdkWrite for TableFeatureType {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.fixed_data_size != 64 || usize::from(self.field_count) != self.fields.len() {
             return Err(Error::invalid(
                 writer.position()?,
@@ -20195,7 +20195,7 @@ impl SdkRead for Feature11Record {
 }
 
 impl SdkWrite for Feature11Record {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if usize::from(self.reference_count) != self.references.len() {
             return Err(Error::invalid(
                 writer.position()?,
@@ -20267,7 +20267,7 @@ impl SdkRead for Feature12Record {
 }
 
 impl SdkWrite for Feature12Record {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.validate(writer.position()?)?;
         self.feature.write_to(writer)
     }
@@ -20344,7 +20344,7 @@ impl List12BlockLevel {
         })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         for value in [
             self.header_format_size,
             self.header_style_index,
@@ -20420,7 +20420,7 @@ impl List12BlockLevel {
     }
 }
 
-fn write_list12_dxf_list<W: Write + Seek>(
+fn write_list12_dxf_list<W: Write>(
     writer: &mut Writer<W>,
     size: i32,
     value: Option<&DxfN12List>,
@@ -20477,7 +20477,7 @@ impl SdkRead for List12Record {
 }
 
 impl SdkWrite for List12Record {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let expected_type = match &self.data {
             List12Data::BlockLevel(_) => 0,
             List12Data::TableStyle { .. } => 1,
@@ -20531,7 +20531,7 @@ impl SdkRead for LabelRecord {
 }
 
 impl SdkWrite for LabelRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.cell.write_to(writer)?;
         writer.write_u16(
             u16::try_from(self.text.character_count())
@@ -20555,7 +20555,7 @@ impl SdkRead for ChartSeriesTextRecord {
 }
 
 impl SdkWrite for ChartSeriesTextRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.reserved)?;
         writer.write_u8(
             u8::try_from(self.text.character_count())
@@ -20594,7 +20594,7 @@ impl SdkRead for FontRecord {
 }
 
 impl SdkWrite for FontRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.height_twips)?;
         writer.write_u16(self.attributes.bits())?;
         writer.write_u16(self.color_index)?;
@@ -20626,7 +20626,7 @@ impl SdkRead for FormatRecord {
 }
 
 impl SdkWrite for FormatRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.format_index)?;
         writer.write_u16(self.declared_character_count)?;
         self.format_string.write(writer)
@@ -20667,7 +20667,7 @@ impl SdkRead for StyleRecord {
 }
 
 impl SdkWrite for StyleRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.xf_and_flags)?;
         match &self.data {
             StyleData::BuiltIn {
@@ -20740,7 +20740,7 @@ impl SdkRead for WriteAccessRecord {
 }
 
 impl SdkWrite for WriteAccessRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let name_bytes = match &self.name {
             XlStringCharacters::Compressed(values) => values.len(),
             XlStringCharacters::Unicode(values) => values
@@ -20806,7 +20806,7 @@ impl SdkRead for Window2Record {
 }
 
 impl SdkWrite for Window2Record {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.flags.bits())?;
         writer.write_u16(self.top_row)?;
         writer.write_u16(self.left_column)?;
@@ -21499,7 +21499,7 @@ impl RtdTopicString {
         })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.flags & !1 != 0 {
             return Err(Error::invalid(0, "RTD topic has nonzero reserved flags"));
         }
@@ -21617,7 +21617,7 @@ impl SdkRead for RealTimeDataRecord {
 }
 
 impl SdkWrite for RealTimeDataRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.header.record_type != REAL_TIME_DATA {
             return Err(Error::invalid(0, "RealTimeData FRT record type mismatch"));
         }
@@ -21745,7 +21745,7 @@ impl SdkRead for SortRecord {
 }
 
 impl SdkWrite for SortRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.options.bits()?)?;
         for key in &self.keys {
             let count = key.as_ref().map_or(0, BiffUnicodeString::character_count);
@@ -21816,7 +21816,7 @@ impl SdkRead for SortDataRecord {
 }
 
 impl SdkWrite for SortDataRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.header.record_type != SORT_DATA {
             return Err(Error::invalid(0, "SortData FRT record type mismatch"));
         }
@@ -21879,7 +21879,7 @@ impl SdkRead for SortCondition {
 }
 
 impl SdkWrite for SortCondition {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.reserved > 0x07ff {
             return Err(Error::invalid(
                 0,
@@ -22038,7 +22038,7 @@ impl AutoFilterOperand {
         })
     }
 
-    fn write_fixed<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_fixed<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let value_type = match self.value {
             AutoFilterOperandValue::Unused { .. } => 0x00,
             AutoFilterOperandValue::Rk { .. } => 0x02,
@@ -22128,7 +22128,7 @@ impl SdkRead for AutoFilterRecord {
 }
 
 impl SdkWrite for AutoFilterRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u16(self.entry_index)?;
         writer.write_u16(self.options.bits()?)?;
         for operand in &self.operands {
@@ -22160,7 +22160,7 @@ impl SdkRead for SxFormatRecord {
 }
 
 impl SdkWrite for SxFormatRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.reserved > 0x0fff {
             return Err(Error::invalid(0, "SxFormat reserved flags exceed 12 bits"));
         }
@@ -22297,7 +22297,7 @@ impl LhSubrecordData {
 }
 
 impl SdkWrite for LhRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         for subrecord in &self.subrecords {
             let (subrecord_type, bytes) = subrecord.encode()?;
             writer.write_u16(subrecord_type)?;
@@ -22330,7 +22330,7 @@ impl ParamQryFixed {
         })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.parameter_type > 2 || self.unused2 > 0x0fff {
             return Err(Error::invalid(
                 0,
@@ -22377,7 +22377,7 @@ impl SdkRead for ParamQryRecord {
 }
 
 impl SdkWrite for ParamQryRecord {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let valid = matches!(
             (&self.data, self.fixed.parameter_type, self.fixed.value_type),
             (ParamQryData::Prompt { .. }, 0, _)

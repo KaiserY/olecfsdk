@@ -149,7 +149,7 @@ impl SdkRead for FileTime {
 }
 
 impl SdkWrite for FileTime {
-    fn write_to<W: Write + Seek>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_u64(self.ticks())
     }
 }
