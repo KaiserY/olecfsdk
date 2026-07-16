@@ -1,6 +1,7 @@
 use std::{
     cell::Cell,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
+    sync::Arc,
 };
 
 use crate::{Error, Result};
@@ -8,6 +9,104 @@ use crate::{Error, Result};
 use super::header::Header;
 
 pub const MAX_REGULAR_SECTOR: u32 = 0xffff_fffa;
+
+/// Positional read capability used by independent CFB stream cursors.
+///
+/// Unlike [`Read`] + [`Seek`], this operation does not mutate a shared file
+/// position, so different stream cursors can read through the same backing
+/// object without a global lock.
+pub trait CfbReadAt {
+    fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> std::io::Result<()>;
+}
+
+fn read_slice_at(bytes: &[u8], offset: u64, output: &mut [u8]) -> std::io::Result<()> {
+    if output.is_empty() {
+        return Ok(());
+    }
+    let start = usize::try_from(offset)
+        .map_err(|_| std::io::Error::other("CFB read offset does not fit usize"))?;
+    let end = start
+        .checked_add(output.len())
+        .ok_or_else(|| std::io::Error::other("CFB read range overflow"))?;
+    let input = bytes.get(start..end).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "positional CFB read extends beyond the backing object",
+        )
+    })?;
+    output.copy_from_slice(input);
+    Ok(())
+}
+
+impl CfbReadAt for [u8] {
+    fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> std::io::Result<()> {
+        read_slice_at(self, offset, output)
+    }
+}
+
+impl CfbReadAt for Vec<u8> {
+    fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> std::io::Result<()> {
+        read_slice_at(self, offset, output)
+    }
+}
+
+impl<T: AsRef<[u8]>> CfbReadAt for std::io::Cursor<T> {
+    fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> std::io::Result<()> {
+        read_slice_at(self.get_ref().as_ref(), offset, output)
+    }
+}
+
+impl<T: CfbReadAt + ?Sized> CfbReadAt for Arc<T> {
+    fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> std::io::Result<()> {
+        (**self).read_exact_at(offset, output)
+    }
+}
+
+#[cfg(unix)]
+impl CfbReadAt for std::fs::File {
+    fn read_exact_at(&self, offset: u64, mut output: &mut [u8]) -> std::io::Result<()> {
+        use std::os::unix::fs::FileExt;
+
+        let mut position = offset;
+        while !output.is_empty() {
+            let count = self.read_at(output, position)?;
+            if count == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "positional CFB file read reached EOF",
+                ));
+            }
+            position = position
+                .checked_add(count as u64)
+                .ok_or_else(|| std::io::Error::other("CFB file read offset overflow"))?;
+            output = &mut output[count..];
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl CfbReadAt for std::fs::File {
+    fn read_exact_at(&self, offset: u64, mut output: &mut [u8]) -> std::io::Result<()> {
+        use std::os::windows::fs::FileExt;
+
+        let mut position = offset;
+        while !output.is_empty() {
+            let count = self.seek_read(output, position)?;
+            if count == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "positional CFB file read reached EOF",
+                ));
+            }
+            position = position
+                .checked_add(count as u64)
+                .ok_or_else(|| std::io::Error::other("CFB file read offset overflow"))?;
+            output = &mut output[count..];
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SectorId(u32);
@@ -67,6 +166,14 @@ pub(crate) trait SectorRead {
         }
         self.sector(id)
     }
+}
+
+pub(crate) trait SectorWrite: SectorRead {
+    fn write_header_at(&mut self, offset: usize, bytes: &[u8]) -> Result<()>;
+    fn write_sector_at(&mut self, id: SectorId, offset: usize, bytes: &[u8]) -> Result<()>;
+    fn zero_sector(&mut self, id: SectorId) -> Result<()>;
+    fn append_zero_sector(&mut self) -> Result<SectorId>;
+    fn flush(&mut self) -> Result<()>;
 }
 
 pub(crate) struct SectorSource<'a> {
@@ -210,13 +317,80 @@ pub(crate) struct SeekSectorSource<R> {
     reader: R,
     sector_len: usize,
     sector_count: usize,
+    max_file_size: u64,
     partial_sector: Option<SectorId>,
     partial_len: usize,
     buffer: Vec<u8>,
 }
 
+pub(crate) struct ReadAtSectorSource<'a, R> {
+    reader: &'a R,
+    sector_len: usize,
+    sector_count: usize,
+    partial_sector: Option<SectorId>,
+    partial_len: usize,
+    buffer: Vec<u8>,
+}
+
+impl<R: CfbReadAt> ReadAtSectorSource<'_, R> {
+    fn sector_offset(&self, id: SectorId) -> Result<u64> {
+        let index = id.get() as usize;
+        if index >= self.sector_count {
+            return Err(Error::invalid(
+                0,
+                format!("sector {index} is beyond EOF ({})", self.sector_count),
+            ));
+        }
+        u64::from(id.get())
+            .checked_add(1)
+            .and_then(|value| value.checked_mul(self.sector_len as u64))
+            .ok_or_else(|| Error::invalid(0, "sector offset overflow"))
+    }
+}
+
+impl<R: CfbReadAt> SectorRead for ReadAtSectorSource<'_, R> {
+    type Sector<'a>
+        = &'a [u8]
+    where
+        Self: 'a;
+
+    fn sector_count(&self) -> usize {
+        self.sector_count
+    }
+
+    fn sector_len(&self) -> usize {
+        self.sector_len
+    }
+
+    fn valid_len(&self, id: SectorId) -> usize {
+        if self.partial_sector == Some(id) {
+            self.partial_len
+        } else {
+            self.sector_len
+        }
+    }
+
+    fn has_partial_sector(&self) -> bool {
+        self.partial_sector.is_some()
+    }
+
+    fn sector(&mut self, id: SectorId) -> Result<Self::Sector<'_>> {
+        let offset = self.sector_offset(id)?;
+        let valid_len = self.valid_len(id);
+        self.buffer.fill(0);
+        self.reader
+            .read_exact_at(offset, &mut self.buffer[..valid_len])?;
+        Ok(&self.buffer)
+    }
+}
+
 impl<R: Read + Seek> SeekSectorSource<R> {
-    pub(crate) fn new(reader: R, original_len: u64, header: &Header) -> Result<Self> {
+    pub(crate) fn new(
+        reader: R,
+        original_len: u64,
+        header: &Header,
+        max_file_size: u64,
+    ) -> Result<Self> {
         let sector_len = header.sector_len();
         if original_len < sector_len as u64 {
             return Err(Error::invalid(
@@ -247,6 +421,7 @@ impl<R: Read + Seek> SeekSectorSource<R> {
             reader,
             sector_len,
             sector_count: complete_sector_count - 1,
+            max_file_size,
             partial_sector,
             partial_len,
             buffer: vec![0; sector_len],
@@ -255,6 +430,45 @@ impl<R: Read + Seek> SeekSectorSource<R> {
 
     pub(crate) fn into_inner(self) -> R {
         self.reader
+    }
+
+    pub(crate) fn read_at_source(&self) -> ReadAtSectorSource<'_, R>
+    where
+        R: CfbReadAt,
+    {
+        ReadAtSectorSource {
+            reader: &self.reader,
+            sector_len: self.sector_len,
+            sector_count: self.sector_count,
+            partial_sector: self.partial_sector,
+            partial_len: self.partial_len,
+            buffer: vec![0; self.sector_len],
+        }
+    }
+
+    pub(crate) fn ensure_append_sector_count(&self, count: usize) -> Result<()> {
+        if self.partial_sector.is_some() {
+            return Err(Error::invalid(
+                0,
+                "cannot extend a CFB with trailing partial-sector data in place",
+            ));
+        }
+        let new_sector_count = self
+            .sector_count
+            .checked_add(count)
+            .ok_or_else(|| Error::Limit("CFB sector count overflow".into()))?;
+        let new_file_size = u64::try_from(new_sector_count)
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .and_then(|count| count.checked_mul(self.sector_len as u64))
+            .ok_or_else(|| Error::Limit("CFB file length overflow".into()))?;
+        if new_file_size > self.max_file_size {
+            return Err(Error::Limit(format!(
+                "file length {new_file_size} exceeds {}",
+                self.max_file_size
+            )));
+        }
+        Ok(())
     }
 
     fn sector_offset(&self, id: SectorId) -> Result<u64> {
@@ -309,6 +523,73 @@ impl<R: Read + Seek> SectorRead for SeekSectorSource<R> {
         self.reader.seek(SeekFrom::Start(offset))?;
         self.reader.read_exact(&mut self.buffer[..valid_len])?;
         Ok(&self.buffer)
+    }
+}
+
+impl<R: Read + Write + Seek> SectorWrite for SeekSectorSource<R> {
+    fn write_header_at(&mut self, offset: usize, bytes: &[u8]) -> Result<()> {
+        let end = offset
+            .checked_add(bytes.len())
+            .ok_or_else(|| Error::Limit("header write range overflow".into()))?;
+        if end > super::header::HEADER_LEN {
+            return Err(Error::invalid(0, "write extends beyond the CFB header"));
+        }
+        self.reader.seek(SeekFrom::Start(offset as u64))?;
+        self.reader.write_all(bytes)?;
+        Ok(())
+    }
+
+    fn write_sector_at(&mut self, id: SectorId, offset: usize, bytes: &[u8]) -> Result<()> {
+        let end = offset
+            .checked_add(bytes.len())
+            .ok_or_else(|| Error::Limit("sector write range overflow".into()))?;
+        if end > self.valid_len(id) {
+            return Err(Error::invalid(
+                0,
+                "sector write extends beyond the physical sector data",
+            ));
+        }
+        let physical = self
+            .sector_offset(id)?
+            .checked_add(offset as u64)
+            .ok_or_else(|| Error::Limit("sector write offset overflow".into()))?;
+        self.reader.seek(SeekFrom::Start(physical))?;
+        self.reader.write_all(bytes)?;
+        Ok(())
+    }
+
+    fn zero_sector(&mut self, id: SectorId) -> Result<()> {
+        if self.valid_len(id) != self.sector_len {
+            return Err(Error::invalid(
+                0,
+                "cannot allocate a partial physical sector",
+            ));
+        }
+        let offset = self.sector_offset(id)?;
+        self.reader.seek(SeekFrom::Start(offset))?;
+        let zeros = vec![0; self.sector_len];
+        self.reader.write_all(&zeros)?;
+        Ok(())
+    }
+
+    fn append_zero_sector(&mut self) -> Result<SectorId> {
+        self.ensure_append_sector_count(1)?;
+        let raw = u32::try_from(self.sector_count)
+            .map_err(|_| Error::Limit("appended sector ID does not fit u32".into()))?;
+        let id = SectorId::new(raw)?;
+        let offset = (self.sector_count as u64 + 1)
+            .checked_mul(self.sector_len as u64)
+            .ok_or_else(|| Error::Limit("appended sector offset overflow".into()))?;
+        self.reader.seek(SeekFrom::Start(offset))?;
+        let zeros = vec![0; self.sector_len];
+        self.reader.write_all(&zeros)?;
+        self.sector_count += 1;
+        Ok(id)
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.reader.flush()?;
+        Ok(())
     }
 }
 

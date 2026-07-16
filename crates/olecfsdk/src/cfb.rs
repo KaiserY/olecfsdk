@@ -26,8 +26,8 @@ pub use directory::{
 pub use header::Header;
 pub use name::compare_names;
 pub use owned_stream::OwnedCfbStream;
-pub use reader::{CfbStream, CompoundFileReader, EntryInfo};
-pub use sector::{MiniSectorId, SectorId};
+pub use reader::{CfbReadStream, CfbStreamMut, CompoundFileReader, EntryInfo};
+pub use sector::{CfbReadAt, MiniSectorId, SectorId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Version {

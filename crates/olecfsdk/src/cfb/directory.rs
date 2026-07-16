@@ -95,6 +95,70 @@ pub struct DirectoryEntry {
 }
 
 impl DirectoryEntry {
+    pub(crate) fn unallocated() -> Self {
+        Self {
+            name_buffer: [0; 32],
+            name_length: 0,
+            object_type: DirectoryObjectType::Unallocated,
+            color: DirectoryColor::Red,
+            left_sibling: DirectoryPointer::None,
+            right_sibling: DirectoryPointer::None,
+            child: DirectoryPointer::None,
+            clsid: Guid::ZERO,
+            state_bits: 0,
+            creation_time: FileTime::ZERO,
+            modified_time: FileTime::ZERO,
+            start_sector: 0,
+            stream_size: 0,
+        }
+    }
+
+    pub(crate) fn empty_named(name: &str, object_type: DirectoryObjectType) -> Result<Self> {
+        name::validate_entry_name(name)?;
+        if !matches!(
+            object_type,
+            DirectoryObjectType::Storage | DirectoryObjectType::Stream
+        ) {
+            return Err(Error::invalid(
+                0,
+                "new directory entry has invalid object type",
+            ));
+        }
+        let chars: Vec<_> = name.encode_utf16().collect();
+        let mut name_buffer = [0; 32];
+        name_buffer[..chars.len()].copy_from_slice(&chars);
+        Ok(Self {
+            name_buffer,
+            name_length: u16::try_from((chars.len() + 1) * 2)
+                .map_err(|_| Error::invalid(0, "CFB name length overflow"))?,
+            object_type,
+            color: DirectoryColor::Red,
+            left_sibling: DirectoryPointer::None,
+            right_sibling: DirectoryPointer::None,
+            child: DirectoryPointer::None,
+            clsid: Guid::ZERO,
+            state_bits: 0,
+            creation_time: FileTime::ZERO,
+            modified_time: FileTime::ZERO,
+            start_sector: if object_type == DirectoryObjectType::Stream {
+                super::allocation::END_OF_CHAIN
+            } else {
+                0
+            },
+            stream_size: 0,
+        })
+    }
+
+    pub(crate) fn set_name(&mut self, name: &str) -> Result<()> {
+        name::validate_entry_name(name)?;
+        let chars: Vec<_> = name.encode_utf16().collect();
+        self.name_buffer = [0; 32];
+        self.name_buffer[..chars.len()].copy_from_slice(&chars);
+        self.name_length = u16::try_from((chars.len() + 1) * 2)
+            .map_err(|_| Error::invalid(0, "CFB name length overflow"))?;
+        Ok(())
+    }
+
     pub fn name(&self) -> Result<String> {
         if self.object_type == DirectoryObjectType::Root {
             return Ok("Root Entry".to_string());
@@ -192,6 +256,48 @@ impl Directory {
 
     pub fn entries(&self) -> &[DirectoryEntry] {
         &self.entries
+    }
+
+    pub(crate) fn entry_mut(&mut self, stream_id: u32) -> Option<&mut DirectoryEntry> {
+        self.entries.get_mut(stream_id as usize)
+    }
+
+    pub(crate) fn rebuild_children(&mut self, parent: u32, children: &mut [u32]) -> Result<()> {
+        let mut named_children = Vec::with_capacity(children.len());
+        for &id in children.iter() {
+            let entry = self
+                .entries
+                .get(id as usize)
+                .ok_or_else(|| Error::invalid(0, "child stream ID is outside the directory"))?;
+            named_children.push((id, entry.name()?));
+        }
+        named_children.sort_by(|left, right| name::compare_names(&left.1, &right.1));
+        for pair in named_children.windows(2) {
+            if name::names_equal(&pair[0].1, &pair[1].1) {
+                return Err(Error::invalid(0, "duplicate case-insensitive CFB name"));
+            }
+        }
+        for (slot, (id, _)) in children.iter_mut().zip(named_children) {
+            *slot = id;
+        }
+        for &id in children.iter() {
+            let entry = &mut self.entries[id as usize];
+            entry.left_sibling = DirectoryPointer::None;
+            entry.right_sibling = DirectoryPointer::None;
+            entry.color = DirectoryColor::Black;
+        }
+        self.entries[parent as usize].child = build_sibling_tree(children, &mut self.entries);
+        Ok(())
+    }
+
+    pub(crate) fn push_sector(&mut self, sector: SectorId, entries_per_sector: usize) {
+        self.sectors.push(sector);
+        self.entries
+            .extend(std::iter::repeat_with(DirectoryEntry::unallocated).take(entries_per_sector));
+    }
+
+    pub(crate) fn set_declared_sector_count(&mut self, count: u32) {
+        self.declared_sector_count = count;
     }
 
     pub fn root(&self) -> &DirectoryEntry {
@@ -485,6 +591,41 @@ impl Directory {
         }
         Ok(())
     }
+}
+
+fn build_sibling_tree(ids: &[u32], records: &mut [DirectoryEntry]) -> DirectoryPointer {
+    fn build(
+        ids: &[u32],
+        records: &mut [DirectoryEntry],
+        depth: usize,
+        depths: &mut Vec<(u32, usize)>,
+    ) -> DirectoryPointer {
+        if ids.is_empty() {
+            return DirectoryPointer::None;
+        }
+        let middle = ids.len() / 2;
+        let id = ids[middle];
+        let left = build(&ids[..middle], records, depth + 1, depths);
+        let right = build(&ids[middle + 1..], records, depth + 1, depths);
+        records[id as usize].left_sibling = left;
+        records[id as usize].right_sibling = right;
+        depths.push((id, depth));
+        DirectoryPointer::Entry(id)
+    }
+
+    let mut depths = Vec::new();
+    let root = build(ids, records, 0, &mut depths);
+    let max_depth = depths.iter().map(|(_, depth)| *depth).max().unwrap_or(0);
+    if max_depth > 0 {
+        for (id, depth) in depths {
+            records[id as usize].color = if depth == max_depth {
+                DirectoryColor::Red
+            } else {
+                DirectoryColor::Black
+            };
+        }
+    }
+    root
 }
 
 #[cfg(test)]

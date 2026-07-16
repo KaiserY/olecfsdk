@@ -82,6 +82,22 @@ pub struct Difat {
 }
 
 impl Difat {
+    pub(crate) fn push_header_fat_sector(&mut self, sector: SectorId) -> Result<()> {
+        if self.fat_sectors.len() >= 109 {
+            return Err(Error::invalid(0, "header DIFAT is full"));
+        }
+        self.fat_sectors.push(sector);
+        Ok(())
+    }
+
+    pub(crate) fn push_external_fat_sector(&mut self, sector: SectorId) {
+        self.fat_sectors.push(sector);
+    }
+
+    pub(crate) fn push_difat_sector(&mut self, sector: SectorId) {
+        self.difat_sectors.push(sector);
+    }
+
     pub(crate) fn read<S: SectorRead + ?Sized>(
         header: &Header,
         source: &mut S,
@@ -224,6 +240,30 @@ pub struct MiniFat {
 }
 
 impl MiniFat {
+    pub(crate) fn entry(&self, id: MiniSectorId) -> Option<MiniFatEntry> {
+        self.entries.get(id.get() as usize).copied()
+    }
+
+    pub(crate) fn set_entry(&mut self, id: MiniSectorId, entry: MiniFatEntry) -> Result<()> {
+        let slot = self
+            .entries
+            .get_mut(id.get() as usize)
+            .ok_or_else(|| Error::invalid(0, "MiniFAT entry is outside the allocation table"))?;
+        *slot = entry;
+        Ok(())
+    }
+
+    pub(crate) fn allocation_capacity(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn push_sector(&mut self, sector: SectorId, entries_per_sector: usize) {
+        self.sectors.push(sector);
+        self.entries
+            .extend(std::iter::repeat_n(MiniFatEntry::Free, entries_per_sector));
+        self.declared_sector_count = self.sectors.len() as u32;
+    }
+
     pub(crate) fn read<S: SectorRead + ?Sized>(
         header: &Header,
         fat: &Fat,
@@ -354,6 +394,47 @@ impl MiniFat {
 }
 
 impl Fat {
+    pub(crate) fn entry(&self, id: SectorId) -> Option<FatEntry> {
+        self.entries.get(id.get() as usize).copied()
+    }
+
+    pub(crate) fn set_entry(&mut self, id: SectorId, entry: FatEntry) -> Result<()> {
+        let slot = self
+            .entries
+            .get_mut(id.get() as usize)
+            .ok_or_else(|| Error::invalid(0, "FAT entry is outside the allocation table"))?;
+        *slot = entry;
+        self.file_sector_count = self.file_sector_count.max(id.get() as usize + 1);
+        Ok(())
+    }
+
+    pub(crate) fn allocation_capacity(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn push_fat_sector(&mut self, sector: SectorId, entries_per_sector: usize) {
+        debug_assert_eq!(sector.get() as usize, self.entries.len());
+        self.entries.push(FatEntry::FatSector);
+        self.entries
+            .extend(std::iter::repeat_n(FatEntry::Free, entries_per_sector - 1));
+        self.file_sector_count = self.file_sector_count.max(sector.get() as usize + 1);
+    }
+
+    pub(crate) fn push_difat_and_fat_sectors(
+        &mut self,
+        difat_sector: SectorId,
+        fat_sector: SectorId,
+        entries_per_sector: usize,
+    ) {
+        debug_assert_eq!(difat_sector.get() as usize, self.entries.len());
+        debug_assert_eq!(fat_sector.get(), difat_sector.get() + 1);
+        self.entries.push(FatEntry::DifatSector);
+        self.entries.push(FatEntry::FatSector);
+        self.entries
+            .extend(std::iter::repeat_n(FatEntry::Free, entries_per_sector - 2));
+        self.file_sector_count = self.file_sector_count.max(fat_sector.get() as usize + 1);
+    }
+
     pub(crate) fn read<S: SectorRead + ?Sized>(difat: &Difat, source: &mut S) -> Result<Self> {
         let entries_per_sector = source.sector_len() / 4;
         let capacity = difat
