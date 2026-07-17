@@ -19,8 +19,8 @@ use crate::{
 
 use super::{
     BinaryTagData, CurrentUserData, CurrentUserStream, ExternalStorageAtom, PersistObjectDirectory,
-    PicturesStream, PowerPointDocument, PptLivePresentation, PptRecord, PptRecordData,
-    PptRecordSequence,
+    PicturesStream, PowerPointDocument, PptLivePresentation, PptLiveTextBodyMut, PptRecord,
+    PptRecordData, PptRecordSequence, PptSlideId,
 };
 
 const DOCUMENT_STREAM: &str = "/PowerPoint Document";
@@ -30,10 +30,12 @@ const PICTURES_STREAM: &str = "/Pictures";
 /// Complete typed root for a PowerPoint binary file.
 ///
 /// The document stream remains a recursive [`super::PptRecordSequence`]; no
-/// content is flattened into text, slide summaries, or image shortcuts.
+/// content is flattened into text, slide summaries, or image shortcuts. The
+/// source CFB image is private so it cannot compete with these typed streams
+/// as a write authority.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PptFile {
-    pub compound_file: CompoundFile,
+    compound_file: CompoundFile,
     pub document: PowerPointDocument,
     pub current_user: CurrentUserStream,
     pub pictures: Option<PicturesStream>,
@@ -62,6 +64,16 @@ pub enum PptHistoryStrategy {
 }
 
 impl PptFile {
+    /// Returns the immutable parse-time CFB backing used to preserve unknown
+    /// and externally-owned entries.
+    ///
+    /// Managed stream bytes in this snapshot do not reflect subsequent typed
+    /// edits. Use [`Self::to_compound_file`] to inspect the current serialized
+    /// file.
+    pub fn source_compound_file(&self) -> &CompoundFile {
+        &self.compound_file
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self::open_with_options(path, ParseOptions::default())?.into_value())
     }
@@ -207,7 +219,7 @@ impl PptFile {
     }
 
     /// Resolves the MS-PPT live presentation from the current user edit.
-    pub fn live_presentation(&self) -> Result<PptLivePresentation> {
+    pub fn live_presentation(&self) -> Result<PptLivePresentation<'_>> {
         let CurrentUserData::Parsed(current_user) = &self.current_user.data else {
             return Err(Error::invalid(
                 0,
@@ -229,7 +241,7 @@ impl PptFile {
         self.document.live_drawing_graph(current_user)
     }
 
-    pub fn live_presentation_compatible(&self) -> Result<ParseOutcome<PptLivePresentation>> {
+    pub fn live_presentation_compatible(&self) -> Result<ParseOutcome<PptLivePresentation<'_>>> {
         let CurrentUserData::Parsed(current_user) = &self.current_user.data else {
             return Err(Error::invalid(
                 0,
@@ -237,6 +249,82 @@ impl PptFile {
             ));
         };
         self.document.live_presentation_compatible(current_user)
+    }
+
+    /// Transactionally edits the complete static record group for one list
+    /// text body selected by the normative `SlidePersistAtom.slideId`.
+    /// Failed edits, layout, or relationship validation leave the file root
+    /// unchanged.
+    pub fn edit_slide_text_body<T>(
+        &mut self,
+        slide_id: PptSlideId,
+        text_body_index: usize,
+        edit: impl FnOnce(PptLiveTextBodyMut<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.edit_slide_text_body_with_policy(slide_id, text_body_index, false, edit)
+    }
+
+    pub fn edit_slide_text_body_preserving_compatibility<T>(
+        &mut self,
+        slide_id: PptSlideId,
+        text_body_index: usize,
+        edit: impl FnOnce(PptLiveTextBodyMut<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.edit_slide_text_body_with_policy(slide_id, text_body_index, true, edit)
+    }
+
+    fn edit_slide_text_body_with_policy<T>(
+        &mut self,
+        slide_id: PptSlideId,
+        text_body_index: usize,
+        preserve_compatibility: bool,
+        edit: impl FnOnce(PptLiveTextBodyMut<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let mut rebuilt = self.clone();
+        let source_offset = {
+            let presentation = if preserve_compatibility {
+                rebuilt.live_presentation_compatible()?.into_value()
+            } else {
+                rebuilt.live_presentation()?
+            };
+            let slides = if preserve_compatibility {
+                presentation.slides_compatible()?
+            } else {
+                presentation.slides()?
+            };
+            let mut matches = slides.iter().filter(|slide| slide.id() == slide_id);
+            let source = matches.next().ok_or_else(|| {
+                Error::invalid(
+                    0,
+                    format!("presentation has no slide ID {}", slide_id.value()),
+                )
+            })?;
+            if matches.next().is_some() {
+                return Err(Error::invalid(
+                    source.object.source_record.offset,
+                    format!("presentation slide ID {} is ambiguous", slide_id.value()),
+                ));
+            }
+            source.object.source_record.offset
+        };
+        let result = rebuilt
+            .document
+            .edit_list_text_body(source_offset, text_body_index, edit)?;
+        rebuilt.relayout_with_policy(preserve_compatibility)?;
+        let presentation = if preserve_compatibility {
+            rebuilt.live_presentation_compatible()?.into_value()
+        } else {
+            rebuilt.live_presentation()?
+        };
+        if preserve_compatibility {
+            presentation.slides_compatible()?;
+        } else {
+            for slide in presentation.slides()? {
+                slide.object.outline_text_references()?;
+            }
+        }
+        *self = rebuilt;
+        Ok(result)
     }
 
     /// Replaces the PowerPoint Document physical history with one current
@@ -1389,9 +1477,13 @@ mod tests {
     #[test]
     fn file_root_appends_repeatable_user_edit_checkpoints() {
         fn set_first_slide_number(file: &mut PptFile, value: u16) {
-            let presentation = file.live_presentation().unwrap();
-            let record =
-                &mut file.document.records.records[presentation.document.reference.record_index];
+            let record_index = file
+                .live_presentation()
+                .unwrap()
+                .document
+                .reference
+                .record_index;
+            let record = &mut file.document.records.records[record_index];
             let PptRecordData::Container(children) = &mut record.data else {
                 unreachable!()
             };

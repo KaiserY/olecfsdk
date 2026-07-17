@@ -7,11 +7,18 @@
 mod file;
 
 pub use file::{
-    DocChpxRun, DocDataNode, DocDataNodeValue, DocDataStream, DocDirectCharacterFormatting,
-    DocDirectFormatting, DocDirectParagraphFormatting, DocDirectTableState,
-    DocEmbeddedObjectStorage, DocFile, DocFkpPage, DocLocated, DocLocatedBookmarks,
-    DocObjectPoolStorage, DocPapxRun, DocSectionProperties, DocStyleProperties, DocTableStream,
-    DocTableStreamName, DocTextPiece, DocWordDocumentStream,
+    DocAnnotationBookmarkRef, DocBookmarkRef, DocBookmarks, DocCharacterRunRef, DocChpxRun,
+    DocCommentRef, DocComments, DocCompatibilityObjectStorage, DocContentTree, DocCp, DocCpRange,
+    DocDataNode, DocDataNodeValue, DocDataStream, DocDirectCharacterFormatting,
+    DocDirectFormatting, DocDirectFormattingRef, DocDirectParagraphFormatting, DocDirectTableState,
+    DocDocumentPartRef, DocEmbeddedObjectStorage, DocFc, DocFcRange, DocFieldRef, DocFile,
+    DocFkpPage, DocLocated, DocLocatedBookmarks, DocNoteKind, DocNoteRef, DocNotes,
+    DocObjectPoolStorage, DocOfficeArtShapeRef, DocPapxRun, DocParagraphKind, DocParagraphRef,
+    DocRelationshipDiagnostic, DocSectionProperties, DocShapeAnchorRef, DocSpecialContentLink,
+    DocSpecialContentRef, DocStyleProperties, DocTableCellRef, DocTableCells, DocTableDiagnostic,
+    DocTableRef, DocTableRowRef, DocTableRows, DocTableStream, DocTableStreamName, DocTables,
+    DocTextPiece, DocTextPieceCharactersRef, DocTextPieceRef, DocTextRangeRef, DocTextboxBreakRef,
+    DocTextboxShapeLink, DocTextboxStoryRef, DocTextboxes, DocWordDocumentStream,
 };
 
 use std::{

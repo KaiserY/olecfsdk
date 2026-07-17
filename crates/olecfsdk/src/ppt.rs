@@ -1999,28 +1999,152 @@ pub enum IncrementalSaveMetadataKind {
 /// descendant of a live top-level record has the same live status by the
 /// specification; dead records remain present in `PowerPointDocument` for
 /// physical-history preservation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PptLivePresentation {
+#[derive(Clone, Debug, PartialEq)]
+pub struct PptLivePresentation<'a> {
     pub persist_object_directory: PersistObjectDirectory,
-    pub document: PptLivePersistObject,
-    pub notes_master_slide: Option<PptLivePersistObject>,
-    pub handout_master_slide: Option<PptLivePersistObject>,
-    pub master_slides: Vec<PptLivePersistObject>,
-    pub presentation_slides: Vec<PptLivePersistObject>,
-    pub notes_slides: Vec<PptLivePersistObject>,
-    pub active_x_controls: Vec<PptLivePersistObject>,
-    pub embedded_ole_objects: Vec<PptLivePersistObject>,
-    pub linked_ole_objects: Vec<PptLivePersistObject>,
-    pub vba_project: Option<PptLivePersistObject>,
+    pub document: PptLivePersistObject<'a>,
+    pub notes_master_slide: Option<PptLivePersistObject<'a>>,
+    pub handout_master_slide: Option<PptLivePersistObject<'a>>,
+    pub master_slides: Vec<PptLivePersistObject<'a>>,
+    pub presentation_slides: Vec<PptLivePersistObject<'a>>,
+    pub notes_slides: Vec<PptLivePersistObject<'a>>,
+    pub active_x_controls: Vec<PptLivePersistObject<'a>>,
+    pub embedded_ole_objects: Vec<PptLivePersistObject<'a>>,
+    pub linked_ole_objects: Vec<PptLivePersistObject<'a>>,
+    pub vba_project: Option<PptLivePersistObject<'a>>,
     pub top_level_records: Vec<PptTopLevelLiveRecordState>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PptLivePersistObject {
+/// One live persist object joined directly to both the record containing its
+/// `PersistIdRef` and the current target record selected by the newest-wins
+/// persist object directory. The records remain owned exactly once by the
+/// [`PowerPointDocument`] physical tree.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PptLivePersistObject<'a> {
     pub reference: PersistObjectReference,
     pub role: PptLivePersistObjectRole,
     /// Record containing the `PersistIdRef` that made this object live.
-    pub source_record_offset: u64,
+    pub source_record: &'a PptRecord,
+    /// Current top-level persist object reached by that reference.
+    pub record: &'a PptRecord,
+    /// Records following a `SlidePersistAtom` up to the next persist atom in
+    /// its owning `SlideListWithTextContainer`. Empty for objects not reached
+    /// through a slide/master/notes list.
+    pub list_records: &'a [PptRecord],
+}
+
+/// One complete text-body group beginning at a `TextHeaderAtom` and ending
+/// immediately before the next header or slide persist, as defined by
+/// MS-PPT 2.9.79. All records borrow the physical presentation tree.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PptLiveTextBodyRef<'a> {
+    pub header_record: &'a PptRecord,
+    pub header: &'a TextHeaderAtom,
+    pub records: &'a [PptRecord],
+}
+
+/// Mutable static record group for one list text body. It deliberately does
+/// not collapse text, styles, bookmarks, special information, or interactive
+/// records into a string projection.
+pub struct PptLiveTextBodyMut<'a> {
+    records: &'a mut [PptRecord],
+}
+
+impl<'a> PptLiveTextBodyMut<'a> {
+    pub fn header_mut(&mut self) -> &mut TextHeaderAtom {
+        let PptRecordData::TextHeader(value) = &mut self.records[0].data else {
+            unreachable!("a text body begins with TextHeaderAtom")
+        };
+        value
+    }
+
+    pub fn records(&self) -> &[PptRecord] {
+        self.records
+    }
+
+    pub fn records_mut(&mut self) -> &mut [PptRecord] {
+        self.records
+    }
+}
+
+/// One `OutlineTextRefAtom` in a live persist object, joined to the indexed
+/// text body in the corresponding `SlideListWithTextContainer`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PptLiveOutlineTextRef<'a> {
+    pub shape_record: Option<&'a PptRecord>,
+    pub source_record: &'a PptRecord,
+    pub value: &'a OutlineTextRefAtom,
+    pub text_body: PptLiveTextBodyRef<'a>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PptLiveOutlineTextLink<'a> {
+    Resolved(PptLiveOutlineTextRef<'a>),
+    Unresolved {
+        shape_record: Option<&'a PptRecord>,
+        source_record: &'a PptRecord,
+        value: &'a OutlineTextRefAtom,
+        text_body_count: usize,
+    },
+}
+
+/// A live presentation slide joined to its list identity, concrete
+/// `SlideContainer`/`SlideAtom`, master, and notes relationships.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PptLiveSlideRef<'view, 'a> {
+    pub object: &'view PptLivePersistObject<'a>,
+    pub persist: &'a SlidePersistAtom,
+    pub slide_atom_record: &'a PptRecord,
+    pub slide_atom: &'a SlideAtom,
+    pub master: PptLiveMasterLink<'view, 'a>,
+    pub notes: PptLiveNotesLink<'view, 'a>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PptSlideId(u32);
+
+impl PptSlideId {
+    pub const fn value(self) -> u32 {
+        self.0
+    }
+}
+
+impl PptLiveSlideRef<'_, '_> {
+    pub const fn id(self) -> PptSlideId {
+        PptSlideId(self.persist.slide_id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PptLiveMasterLink<'view, 'a> {
+    Resolved(&'view PptLivePersistObject<'a>),
+    NotSpecified,
+    Missing { master_id: u32 },
+    Ambiguous { master_id: u32 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PptLiveNotesLink<'view, 'a> {
+    Resolved {
+        object: &'view PptLivePersistObject<'a>,
+        notes_atom_record: &'a PptRecord,
+        notes_atom: &'a NotesAtom,
+    },
+    NotSpecified,
+    Missing {
+        notes_id: u32,
+    },
+    Ambiguous {
+        notes_id: u32,
+    },
+    SlideMismatch {
+        object: &'view PptLivePersistObject<'a>,
+        notes_atom_record: &'a PptRecord,
+        notes_atom: &'a NotesAtom,
+        notes_id: u32,
+        expected_slide_id: u32,
+        actual_slide_id: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -2036,6 +2160,274 @@ pub enum PptLivePersistObjectRole {
     EmbeddedOleObject,
     LinkedOleObject,
     VbaProject,
+}
+
+impl<'a> PptLivePersistObject<'a> {
+    pub const fn source_record(self) -> &'a PptRecord {
+        self.source_record
+    }
+
+    pub const fn record(self) -> &'a PptRecord {
+        self.record
+    }
+
+    pub const fn slide_persist(self) -> Option<&'a SlidePersistAtom> {
+        match &self.source_record.data {
+            PptRecordData::SlidePersist(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Returns every `TextHeaderAtom` group following this object's
+    /// `SlidePersistAtom`. The returned vector contains only small borrowed
+    /// handles and does not copy text or formatting records.
+    pub fn text_bodies(self) -> Vec<PptLiveTextBodyRef<'a>> {
+        let mut bodies = Vec::new();
+        let mut cursor = 0usize;
+        while cursor < self.list_records.len() {
+            let record = &self.list_records[cursor];
+            let PptRecordData::TextHeader(header) = &record.data else {
+                cursor += 1;
+                continue;
+            };
+            let end = self.list_records[cursor + 1..]
+                .iter()
+                .position(|candidate| matches!(candidate.data, PptRecordData::TextHeader(_)))
+                .map_or(self.list_records.len(), |relative| cursor + 1 + relative);
+            bodies.push(PptLiveTextBodyRef {
+                header_record: record,
+                header,
+                records: &self.list_records[cursor..end],
+            });
+            cursor = end;
+        }
+        bodies
+    }
+
+    /// Resolves every live `OutlineTextRefAtom.index` in this persist object
+    /// to the exact text-body group following its `SlidePersistAtom`.
+    pub fn outline_text_references(self) -> Result<Vec<PptLiveOutlineTextRef<'a>>> {
+        self.outline_text_references_compatible()
+            .into_iter()
+            .map(|link| match link {
+                PptLiveOutlineTextLink::Resolved(value) => Ok(value),
+                PptLiveOutlineTextLink::Unresolved {
+                    source_record,
+                    value,
+                    ..
+                } => Err(Error::invalid(
+                    source_record.offset,
+                    format!(
+                        "OutlineTextRefAtom.index {} has no corresponding TextHeaderAtom",
+                        value.index
+                    ),
+                )),
+            })
+            .collect()
+    }
+
+    /// Preserves dangling producer references explicitly instead of guessing
+    /// a text body by proximity or clamping the index.
+    pub fn outline_text_references_compatible(self) -> Vec<PptLiveOutlineTextLink<'a>> {
+        let text_bodies = self.text_bodies();
+        let mut references = Vec::new();
+        collect_live_outline_text_links(self.record, None, &text_bodies, &mut references);
+        references
+    }
+}
+
+impl<'a> PptLivePresentation<'a> {
+    /// Resolves every presentation slide relationship required by MS-PPT
+    /// 2.4.14.5 and 2.5.1. Missing, duplicate, or inconsistent targets are
+    /// rejected rather than selected by list position.
+    pub fn slides(&self) -> Result<Vec<PptLiveSlideRef<'_, 'a>>> {
+        self.slides_compatible()?
+            .into_iter()
+            .map(|slide| match slide.master {
+                PptLiveMasterLink::Resolved(_) => match slide.notes {
+                    PptLiveNotesLink::Resolved { .. } | PptLiveNotesLink::NotSpecified => Ok(slide),
+                    PptLiveNotesLink::Missing { notes_id } => Err(Error::invalid(
+                        slide.slide_atom_record.offset,
+                        format!("SlideAtom.notesIdRef {notes_id} does not resolve"),
+                    )),
+                    PptLiveNotesLink::Ambiguous { notes_id } => Err(Error::invalid(
+                        slide.slide_atom_record.offset,
+                        format!("SlideAtom.notesIdRef {notes_id} is ambiguous"),
+                    )),
+                    PptLiveNotesLink::SlideMismatch {
+                        expected_slide_id,
+                        actual_slide_id,
+                        ..
+                    } => Err(Error::invalid(
+                        slide.slide_atom_record.offset,
+                        format!(
+                            "NotesAtom.slideIdRef {actual_slide_id} does not match SlidePersistAtom.slideId {expected_slide_id}"
+                        ),
+                    )),
+                },
+                PptLiveMasterLink::NotSpecified => Err(Error::invalid(
+                    slide.slide_atom_record.offset,
+                    "presentation SlideAtom.masterIdRef is null",
+                )),
+                PptLiveMasterLink::Missing { master_id } => Err(Error::invalid(
+                    slide.slide_atom_record.offset,
+                    format!("SlideAtom.masterIdRef {master_id} does not resolve"),
+                )),
+                PptLiveMasterLink::Ambiguous { master_id } => Err(Error::invalid(
+                    slide.slide_atom_record.offset,
+                    format!("SlideAtom.masterIdRef {master_id} is ambiguous"),
+                )),
+            })
+            .collect()
+    }
+
+    /// Builds all unambiguous slide links and retains exact named unresolved
+    /// relationships for producer-compatible inspection.
+    pub fn slides_compatible(&self) -> Result<Vec<PptLiveSlideRef<'_, 'a>>> {
+        let mut slides = Vec::with_capacity(self.presentation_slides.len());
+        for object in &self.presentation_slides {
+            let persist = object.slide_persist().ok_or_else(|| {
+                Error::invalid(
+                    object.source_record.offset,
+                    "presentation slide source is not a SlidePersistAtom",
+                )
+            })?;
+            let children = ppt_container_children(object.record, "SlideContainer")?;
+            let slide_atom_record =
+                required_direct_record(children, SLIDE_ATOM, Some(0), "SlideContainer.slideAtom")?;
+            let PptRecordData::Slide(slide_atom) = &slide_atom_record.data else {
+                return Err(Error::invalid(
+                    slide_atom_record.offset,
+                    "SlideContainer.slideAtom is not a conforming SlideAtom",
+                ));
+            };
+
+            let master = resolve_live_master_link(&self.master_slides, slide_atom.master_id_ref);
+            let notes = resolve_live_notes_link(
+                &self.notes_slides,
+                slide_atom.notes_id_ref,
+                persist.slide_id,
+            )?;
+            slides.push(PptLiveSlideRef {
+                object,
+                persist,
+                slide_atom_record,
+                slide_atom,
+                master,
+                notes,
+            });
+        }
+        Ok(slides)
+    }
+}
+
+fn resolve_live_master_link<'view, 'a>(
+    masters: &'view [PptLivePersistObject<'a>],
+    master_id: u32,
+) -> PptLiveMasterLink<'view, 'a> {
+    if master_id == 0 {
+        return PptLiveMasterLink::NotSpecified;
+    }
+    let mut candidates = masters.iter().filter(|object| {
+        object
+            .slide_persist()
+            .is_some_and(|value| value.slide_id == master_id)
+    });
+    let first = candidates.next();
+    match (first, candidates.next()) {
+        (Some(value), None) => PptLiveMasterLink::Resolved(value),
+        (None, _) => PptLiveMasterLink::Missing { master_id },
+        (Some(_), Some(_)) => PptLiveMasterLink::Ambiguous { master_id },
+    }
+}
+
+fn resolve_live_notes_link<'view, 'a>(
+    notes: &'view [PptLivePersistObject<'a>],
+    notes_id: u32,
+    slide_id: u32,
+) -> Result<PptLiveNotesLink<'view, 'a>> {
+    if notes_id == 0 {
+        return Ok(PptLiveNotesLink::NotSpecified);
+    }
+    let mut candidates = notes.iter().filter(|object| {
+        object
+            .slide_persist()
+            .is_some_and(|value| value.slide_id == notes_id)
+    });
+    let Some(object) = candidates.next() else {
+        return Ok(PptLiveNotesLink::Missing { notes_id });
+    };
+    if candidates.next().is_some() {
+        return Ok(PptLiveNotesLink::Ambiguous { notes_id });
+    }
+    let children = ppt_container_children(object.record, "NotesContainer")?;
+    let notes_atom_record =
+        required_direct_record(children, NOTES_ATOM, Some(0), "NotesContainer.notesAtom")?;
+    let PptRecordData::Notes(notes_atom) = &notes_atom_record.data else {
+        return Err(Error::invalid(
+            notes_atom_record.offset,
+            "NotesContainer.notesAtom is not a conforming NotesAtom",
+        ));
+    };
+    if notes_atom.slide_id_ref != slide_id {
+        return Ok(PptLiveNotesLink::SlideMismatch {
+            object,
+            notes_atom_record,
+            notes_atom,
+            notes_id,
+            expected_slide_id: slide_id,
+            actual_slide_id: notes_atom.slide_id_ref,
+        });
+    }
+    Ok(PptLiveNotesLink::Resolved {
+        object,
+        notes_atom_record,
+        notes_atom,
+    })
+}
+
+fn collect_live_outline_text_links<'a>(
+    record: &'a PptRecord,
+    containing_shape: Option<&'a PptRecord>,
+    text_bodies: &[PptLiveTextBodyRef<'a>],
+    output: &mut Vec<PptLiveOutlineTextLink<'a>>,
+) {
+    const OFFICE_ART_SP_CONTAINER: u16 = 0xf004;
+
+    let containing_shape = (record.header.record_type == OFFICE_ART_SP_CONTAINER)
+        .then_some(record)
+        .or(containing_shape);
+    if let PptRecordData::OutlineTextRef(value) = &record.data {
+        let text_body = usize::try_from(value.index)
+            .ok()
+            .and_then(|index| text_bodies.get(index))
+            .copied();
+        output.push(match text_body {
+            Some(text_body) => PptLiveOutlineTextLink::Resolved(PptLiveOutlineTextRef {
+                shape_record: containing_shape,
+                source_record: record,
+                value,
+                text_body,
+            }),
+            None => PptLiveOutlineTextLink::Unresolved {
+                shape_record: containing_shape,
+                source_record: record,
+                value,
+                text_body_count: text_bodies.len(),
+            },
+        });
+    }
+    let children = match &record.data {
+        PptRecordData::Container(children)
+        | PptRecordData::ProgTags(children)
+        | PptRecordData::BinaryTagData(BinaryTagData::Records(children)) => Some(children),
+        _ => None,
+    };
+    if let Some(children) = children {
+        for child in &children.records {
+            collect_live_outline_text_links(child, containing_shape, text_bodies, output);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2113,6 +2505,55 @@ impl PptTopLevelLayout {
 }
 
 impl PowerPointDocument {
+    pub(crate) fn edit_list_text_body<T>(
+        &mut self,
+        slide_persist_offset: u64,
+        text_body_index: usize,
+        edit: impl FnOnce(PptLiveTextBodyMut<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let mut path = Vec::new();
+        if !find_ppt_record_path(
+            &self.records,
+            slide_persist_offset,
+            SLIDE_PERSIST_ATOM,
+            &mut path,
+        ) {
+            return Err(Error::invalid(
+                slide_persist_offset,
+                "live SlidePersistAtom is no longer present in the document tree",
+            ));
+        }
+        let (source_index, parent_path) = path
+            .split_last()
+            .expect("record path always contains its source index");
+        let sequence = ppt_sequence_at_path_mut(&mut self.records, parent_path)?;
+        let group_end = sequence.records[*source_index + 1..]
+            .iter()
+            .position(|record| record.header.record_type == SLIDE_PERSIST_ATOM)
+            .map_or(sequence.records.len(), |relative| {
+                *source_index + 1 + relative
+            });
+        let start = sequence.records[*source_index + 1..group_end]
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| matches!(record.data, PptRecordData::TextHeader(_)))
+            .map(|(relative, _)| *source_index + 1 + relative)
+            .nth(text_body_index)
+            .ok_or_else(|| {
+                Error::invalid(
+                    slide_persist_offset,
+                    format!("SlidePersistAtom has no text body {text_body_index}"),
+                )
+            })?;
+        let end = sequence.records[start + 1..group_end]
+            .iter()
+            .position(|record| matches!(record.data, PptRecordData::TextHeader(_)))
+            .map_or(group_end, |relative| start + 1 + relative);
+        edit(PptLiveTextBodyMut {
+            records: &mut sequence.records[start..end],
+        })
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         Self::from_bytes_with_limits(bytes, Limits::default())
     }
@@ -2347,7 +2788,13 @@ impl PowerPointDocument {
             .incremental_save_chain
             .edits
             .first()
-            .ok_or_else(|| Error::invalid(0, "PPT incremental-save chain is empty"))?;
+            .ok_or_else(|| Error::invalid(0, "PPT incremental-save chain is empty"))?
+            .clone();
+        let current_references = presentation
+            .persist_object_directory
+            .current_references
+            .clone();
+        drop(presentation);
         if current_edit
             .user_edit
             .encrypt_session_persist_id_ref
@@ -2360,7 +2807,7 @@ impl PowerPointDocument {
         }
 
         let mut current_ids_by_record = BTreeMap::<usize, Vec<u32>>::new();
-        for (&persist_id, reference) in &presentation.persist_object_directory.current_references {
+        for (&persist_id, reference) in &current_references {
             current_ids_by_record
                 .entry(reference.record_index)
                 .or_default()
@@ -2498,9 +2945,7 @@ impl PowerPointDocument {
         let user_edit_offset = persist_directory_offset
             .checked_add(1)
             .ok_or_else(|| Error::Limit("PPT synthetic user-edit offset overflow".into()))?;
-        let max_persist_id = *presentation
-            .persist_object_directory
-            .current_references
+        let max_persist_id = *current_references
             .last_key_value()
             .ok_or_else(|| Error::invalid(0, "PPT persist object directory is empty"))?
             .0;
@@ -2858,7 +3303,10 @@ impl PowerPointDocument {
 
     /// Resolves the live top-level records by executing MS-PPT 2.1.2 Parts 1
     /// through 11 against the current `DocumentContainer`.
-    pub fn live_presentation(&self, current_user: &CurrentUserAtom) -> Result<PptLivePresentation> {
+    pub fn live_presentation(
+        &self,
+        current_user: &CurrentUserAtom,
+    ) -> Result<PptLivePresentation<'_>> {
         let mut diagnostics = Vec::new();
         self.live_presentation_with_policy(current_user, true, &mut diagnostics)
     }
@@ -2868,7 +3316,7 @@ impl PowerPointDocument {
     pub fn live_presentation_compatible(
         &self,
         current_user: &CurrentUserAtom,
-    ) -> Result<ParseOutcome<PptLivePresentation>> {
+    ) -> Result<ParseOutcome<PptLivePresentation<'_>>> {
         let mut diagnostics = Vec::new();
         let value = self.live_presentation_with_policy(current_user, false, &mut diagnostics)?;
         Ok(ParseOutcome::new(value, diagnostics))
@@ -2879,7 +3327,7 @@ impl PowerPointDocument {
         current_user: &CurrentUserAtom,
         strict: bool,
         diagnostics: &mut Vec<ParseDiagnostic>,
-    ) -> Result<PptLivePresentation> {
+    ) -> Result<PptLivePresentation<'_>> {
         let persist_object_directory = self.persist_object_directory(current_user)?;
         let current_edit = persist_object_directory
             .incremental_save_chain
@@ -2894,10 +3342,20 @@ impl PowerPointDocument {
             &[DOCUMENT_CONTAINER],
             "docPersistIdRef does not resolve to DocumentContainer",
         )?;
+        let current_edit_record = self
+            .top_level_record(current_edit.user_edit_offset)
+            .ok_or_else(|| {
+                Error::invalid(
+                    u64::from(current_edit.user_edit_offset),
+                    "current UserEditAtom offset is not a top-level record",
+                )
+            })?;
         let document = PptLivePersistObject {
             reference: document_reference,
             role: PptLivePersistObjectRole::Document,
-            source_record_offset: u64::from(current_edit.user_edit_offset),
+            source_record: current_edit_record,
+            record: document_record,
+            list_records: &[],
         };
         let document_children = ppt_container_children(document_record, "DocumentContainer")?;
         let document_atom_record = required_direct_record(
@@ -2918,7 +3376,7 @@ impl PowerPointDocument {
             self,
             &persist_object_directory,
             document_atom.notes_master_persist_id_ref,
-            document_atom_record.offset,
+            document_atom_record,
             &[NOTES_CONTAINER],
             PptLivePersistObjectRole::NotesMasterSlide,
             "notesMasterPersistIdRef does not resolve to NotesContainer",
@@ -2927,7 +3385,7 @@ impl PowerPointDocument {
             self,
             &persist_object_directory,
             document_atom.handout_master_persist_id_ref,
-            document_atom_record.offset,
+            document_atom_record,
             &[HANDOUT_CONTAINER],
             PptLivePersistObjectRole::HandoutMasterSlide,
             "handoutMasterPersistIdRef does not resolve to HandoutContainer",
@@ -2974,7 +3432,9 @@ impl PowerPointDocument {
                 master_slides.push(PptLivePersistObject {
                     reference,
                     role,
-                    source_record_offset: source.0.offset,
+                    source_record: source.0,
+                    record: target,
+                    list_records: source.2,
                 });
             }
         } else if strict {
@@ -3132,7 +3592,7 @@ impl PowerPointDocument {
                     }
                     None
                 } else {
-                    let (reference, _) = self.resolve_live_persist_object(
+                    let (reference, record) = self.resolve_live_persist_object(
                         &persist_object_directory,
                         vba_info_atom.persist_id_ref,
                         vba_info_atom_record.offset,
@@ -3142,7 +3602,9 @@ impl PowerPointDocument {
                     Some(PptLivePersistObject {
                         reference,
                         role: PptLivePersistObjectRole::VbaProject,
-                        source_record_offset: vba_info_atom_record.offset,
+                        source_record: vba_info_atom_record,
+                        record,
+                        list_records: &[],
                     })
                 }
             } else {
@@ -3154,7 +3616,7 @@ impl PowerPointDocument {
 
         let mut live_persist_ids = vec![BTreeSet::new(); self.records.records.len()];
         let mut live_roles = vec![BTreeSet::new(); self.records.records.len()];
-        let mut add_live_object = |object: PptLivePersistObject| {
+        let mut add_live_object = |object: PptLivePersistObject<'_>| {
             live_persist_ids[object.reference.record_index].insert(object.reference.persist_id);
             live_roles[object.reference.record_index].insert(object.role);
         };
@@ -3271,6 +3733,57 @@ impl PowerPointDocument {
             .iter()
             .find(|record| record.offset == u64::from(offset))
     }
+}
+
+fn find_ppt_record_path(
+    sequence: &PptRecordSequence,
+    offset: u64,
+    record_type: u16,
+    path: &mut Vec<usize>,
+) -> bool {
+    for (index, record) in sequence.records.iter().enumerate() {
+        path.push(index);
+        if record.offset == offset && record.header.record_type == record_type {
+            return true;
+        }
+        let children = match &record.data {
+            PptRecordData::Container(children)
+            | PptRecordData::ProgTags(children)
+            | PptRecordData::BinaryTagData(BinaryTagData::Records(children)) => Some(children),
+            _ => None,
+        };
+        if children
+            .is_some_and(|children| find_ppt_record_path(children, offset, record_type, path))
+        {
+            return true;
+        }
+        path.pop();
+    }
+    false
+}
+
+fn ppt_sequence_at_path_mut<'a>(
+    mut sequence: &'a mut PptRecordSequence,
+    path: &[usize],
+) -> Result<&'a mut PptRecordSequence> {
+    for &index in path {
+        let record = sequence
+            .records
+            .get_mut(index)
+            .ok_or_else(|| Error::invalid(0, "PPT record path is out of bounds"))?;
+        sequence = match &mut record.data {
+            PptRecordData::Container(children)
+            | PptRecordData::ProgTags(children)
+            | PptRecordData::BinaryTagData(BinaryTagData::Records(children)) => children,
+            _ => {
+                return Err(Error::invalid(
+                    record.offset,
+                    "PPT record path crosses a non-container record",
+                ));
+            }
+        };
+    }
+    Ok(sequence)
 }
 
 fn relocate_ppt_record_picture_references(
@@ -3577,9 +4090,9 @@ fn required_direct_record<'a>(
 fn direct_slide_persist_atoms<'a>(
     sequence: &'a PptRecordSequence,
     structure: &str,
-) -> Result<Vec<(&'a PptRecord, &'a SlidePersistAtom)>> {
+) -> Result<Vec<(&'a PptRecord, &'a SlidePersistAtom, &'a [PptRecord])>> {
     let mut values = Vec::new();
-    for record in &sequence.records {
+    for (index, record) in sequence.records.iter().enumerate() {
         if record.header.record_type != SLIDE_PERSIST_ATOM {
             continue;
         }
@@ -3596,42 +4109,48 @@ fn direct_slide_persist_atoms<'a>(
                 "SlidePersistAtom.rh.recInstance must be 0",
             ));
         }
-        values.push((record, value));
+        let end = sequence.records[index + 1..]
+            .iter()
+            .position(|candidate| candidate.header.record_type == SLIDE_PERSIST_ATOM)
+            .map_or(sequence.records.len(), |relative| index + 1 + relative);
+        values.push((record, value, &sequence.records[index + 1..end]));
     }
     Ok(values)
 }
 
-fn optional_live_object(
-    document: &PowerPointDocument,
+fn optional_live_object<'a>(
+    document: &'a PowerPointDocument,
     directory: &PersistObjectDirectory,
     persist_id: u32,
-    source_record_offset: u64,
+    source_record: &'a PptRecord,
     expected_record_types: &[u16],
     role: PptLivePersistObjectRole,
     message: &'static str,
-) -> Result<Option<PptLivePersistObject>> {
+) -> Result<Option<PptLivePersistObject<'a>>> {
     if persist_id == 0 {
         return Ok(None);
     }
-    let (reference, _) = document.resolve_live_persist_object(
+    let (reference, record) = document.resolve_live_persist_object(
         directory,
         persist_id,
-        source_record_offset,
+        source_record.offset,
         expected_record_types,
         message,
     )?;
     Ok(Some(PptLivePersistObject {
         reference,
         role,
-        source_record_offset,
+        source_record,
+        record,
+        list_records: &[],
     }))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resolve_list_persist_objects(
-    document: &PowerPointDocument,
+fn resolve_list_persist_objects<'a>(
+    document: &'a PowerPointDocument,
     directory: &PersistObjectDirectory,
-    document_children: &PptRecordSequence,
+    document_children: &'a PptRecordSequence,
     list_instance: u16,
     target_record_type: u16,
     role: PptLivePersistObjectRole,
@@ -3641,7 +4160,7 @@ fn resolve_list_persist_objects(
     error_message: &'static str,
     strict: bool,
     diagnostics: &mut Vec<ParseDiagnostic>,
-) -> Result<Vec<PptLivePersistObject>> {
+) -> Result<Vec<PptLivePersistObject<'a>>> {
     let Some(list_record) = optional_direct_record(
         document_children,
         SLIDE_LIST_WITH_TEXT_CONTAINER,
@@ -3653,7 +4172,7 @@ fn resolve_list_persist_objects(
     };
     let list = ppt_container_children(list_record, list_name)?;
     let mut objects = Vec::new();
-    for (source_record, source) in direct_slide_persist_atoms(list, list_name)? {
+    for (source_record, source, list_records) in direct_slide_persist_atoms(list, list_name)? {
         let resolved = document.resolve_live_persist_object(
             directory,
             source.persist_id_ref,
@@ -3661,7 +4180,7 @@ fn resolve_list_persist_objects(
             &[target_record_type],
             error_message,
         );
-        let (reference, _) = match resolved {
+        let (reference, record) = match resolved {
             Ok(value) => value,
             Err(error) if !strict => {
                 push_live_presentation_diagnostic(
@@ -3679,20 +4198,22 @@ fn resolve_list_persist_objects(
         objects.push(PptLivePersistObject {
             reference,
             role,
-            source_record_offset: source_record.offset,
+            source_record,
+            record,
+            list_records,
         });
     }
     Ok(objects)
 }
 
-fn resolve_external_persist_objects(
-    document: &PowerPointDocument,
+fn resolve_external_persist_objects<'a>(
+    document: &'a PowerPointDocument,
     directory: &PersistObjectDirectory,
-    external_object_list: &PptRecordSequence,
+    external_object_list: &'a PptRecordSequence,
     container_record_type: u16,
     role: PptLivePersistObjectRole,
     container_name: &str,
-    output: &mut Vec<PptLivePersistObject>,
+    output: &mut Vec<PptLivePersistObject<'a>>,
 ) -> Result<()> {
     for container_record in external_object_list
         .records
@@ -3713,7 +4234,7 @@ fn resolve_external_persist_objects(
             ));
         };
         require_record_version(source_record, 1, "ExOleObjAtom")?;
-        let (reference, _) = document.resolve_live_persist_object(
+        let (reference, record) = document.resolve_live_persist_object(
             directory,
             source.persist_id_ref,
             source_record.offset,
@@ -3723,7 +4244,9 @@ fn resolve_external_persist_objects(
         output.push(PptLivePersistObject {
             reference,
             role,
-            source_record_offset: source_record.offset,
+            source_record,
+            record,
+            list_records: &[],
         });
     }
     Ok(())

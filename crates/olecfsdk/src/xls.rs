@@ -5,8 +5,22 @@ pub mod formula;
 mod file;
 
 pub use file::{
-    BiffSubstreamKind, BiffSubstreamNode, BiffWorkbookTree, XlsFile, XlsRevisionLog, XlsStreamName,
-    XlsWorkbookStream,
+    BiffSubstreamKind, BiffSubstreamNode, BiffWorkbookTree, XlsCellFormatRef, XlsCellMut,
+    XlsCellRef, XlsCellValueRef, XlsCells, XlsCustomSheetViewBeginRef, XlsCustomSheetViewRef,
+    XlsCustomViewActiveSheetLink, XlsCustomViewDefinedNameKind, XlsCustomViewDefinedNameRef,
+    XlsCustomViewLink, XlsCustomViewRef, XlsDrawingGroupRef, XlsDrawingRef,
+    XlsExternalCellCacheRef, XlsExternalNameRef, XlsExternalSheetRef, XlsFile, XlsFileEntryIssue,
+    XlsFileEntryRef, XlsFileEntryRole, XlsFormulaDefinitionRef, XlsFormulaRef, XlsNumberFormatRef,
+    XlsObjectId, XlsObjectPersistenceRef, XlsObjectRef, XlsObjects, XlsPivotCache,
+    XlsPivotCacheDefinitionId, XlsPivotCacheDefinitionRef, XlsPivotTableCacheLink,
+    XlsPivotTableCacheLinkError, XlsPivotTableLink, XlsPivotTableLinkError, XlsPivotTableRef,
+    XlsPivotTableViewRef, XlsRevisionCellOrFormatRef, XlsRevisionChangeCellRef, XlsRevisionGraph,
+    XlsRevisionGraphLog, XlsRevisionInsertDeleteRef, XlsRevisionLog, XlsRevisionLogRef,
+    XlsRevisionMoveRef, XlsRevisionNode, XlsRevisionRecordRef, XlsRevisionRecordsView,
+    XlsRevisionSheetLink, XlsRevisionStreamView, XlsSheetId, XlsSheetLinkError, XlsSheetRef,
+    XlsSparseCellIndex, XlsSparseRowRef, XlsStoragesAndStreams, XlsStreamName, XlsSupportingLinkId,
+    XlsSupportingLinkRef, XlsUnresolvedSheetRef, XlsUserInfoRef, XlsUserLogView, XlsUserNames,
+    XlsUserRevisionLogLink, XlsWorkbookStream, XlsWorkbookView,
 };
 
 pub use formula::{
@@ -26,10 +40,47 @@ use crate::{
     cfb::CompoundFile,
     io::{Reader, SdkEnumValue, SdkRead, SdkSize, SdkWrite, Writer},
     limits::Limits,
-    office_art::{OfficeArtPartialStream, OfficeArtRecordHeader, OfficeArtStream},
+    office_art::{
+        OfficeArtClientMarker, OfficeArtPartialStream, OfficeArtRecord, OfficeArtRecordData,
+        OfficeArtRecordHeader, OfficeArtStream,
+    },
 };
 
 pub const MAX_BIFF_RECORD_DATA: usize = 8224;
+
+fn preserved_or_canonical_continue_lengths(
+    preserved: &[u16],
+    logical_len: usize,
+) -> Result<Vec<u16>> {
+    let preserved_len = preserved.iter().try_fold(0usize, |total, length| {
+        total
+            .checked_add(usize::from(*length))
+            .ok_or_else(|| Error::Limit("BIFF physical layout length overflow".into()))
+    })?;
+    if !preserved.is_empty()
+        && preserved_len == logical_len
+        && preserved
+            .iter()
+            .all(|length| usize::from(*length) <= MAX_BIFF_RECORD_DATA)
+    {
+        return Ok(preserved.to_vec());
+    }
+
+    if logical_len == 0 {
+        return Ok(vec![0]);
+    }
+    let mut remaining = logical_len;
+    let mut lengths = Vec::with_capacity(logical_len.div_ceil(MAX_BIFF_RECORD_DATA));
+    while remaining != 0 {
+        let length = remaining.min(MAX_BIFF_RECORD_DATA);
+        lengths.push(
+            u16::try_from(length)
+                .map_err(|_| Error::Limit("BIFF physical segment exceeds u16".into()))?,
+        );
+        remaining -= length;
+    }
+    Ok(lengths)
+}
 
 const BOF: u16 = 0x0809;
 const EOF: u16 = 0x000a;
@@ -93,7 +144,7 @@ const FORMULA4: u16 = 0x0406;
 const QSI: u16 = 0x01ad;
 const PARAM_QRY: u16 = 0x00dc;
 const SX_SELECT: u16 = 0x00f7;
-const CRN_COUNT: u16 = 0x0059;
+const XCT: u16 = 0x0059;
 const CRN: u16 = 0x005a;
 const FILE_SHARING: u16 = 0x005b;
 const WRITE_ACCESS: u16 = 0x005c;
@@ -369,7 +420,22 @@ pub struct RevisionLogStream {
     pub trailing_padding: Vec<u8>,
 }
 
+/// The standalone `User Names` stream of a shared BIFF8 workbook.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserNamesStream {
+    pub records: Vec<BiffRecord>,
+    pub trailing_padding: Vec<u8>,
+}
+
+/// One BIFF8 stream inside the MS-XLS `_SX_DB_CUR` Pivot Cache Storage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PivotCacheStream {
+    pub records: Vec<BiffRecord>,
+    pub trailing_padding: Vec<u8>,
+}
+
 pub const REVISION_LOG_STREAM_PATH: &str = "/Revision Log";
+pub const USER_NAMES_STREAM_PATH: &str = "/User Names";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BiffRecord {
@@ -486,6 +552,9 @@ pub enum BiffRecordData {
     RrdConflict(RrdConflictRecord),
     RrdInfo(RrdInfoRecord),
     RrdUserView(RrdUserViewRecord),
+    /// `Note` in the standalone Revision Stream. Worksheet drawing notes are
+    /// owned by `MsoDrawingHostData` after OfficeArt aggregation instead.
+    Note(NoteRecord),
     SxView(SxViewRecord),
     CodePage {
         code_page: u16,
@@ -551,6 +620,7 @@ pub enum BiffRecordData {
     CodeName(CodeNameRecord),
     Array(ArrayRecord),
     UserSViewBegin(UserSViewBeginRecord),
+    UserSViewBeginChart(UserSViewBeginChartRecord),
     UserSViewEnd(UserSViewEndRecord),
     UserBView(UserBViewRecord),
     SheetExt(SheetExtRecord),
@@ -700,7 +770,7 @@ pub enum BiffRecordData {
     },
     Format(FormatRecord),
     Style(StyleRecord),
-    CrnCount(CrnCountRecord),
+    Xct(XctRecord),
     DefaultRowHeight(DefaultRowHeightRecord),
     WriteAccess(WriteAccessRecord),
     Window2(Window2Record),
@@ -887,8 +957,27 @@ pub enum ExternNameBody {
         values: Vec<BiffConstant>,
         trailing: Vec<u8>,
     },
+    OleDdeLink(ExternOleDdeLink),
     /// Context-selected AddinUdf/OLE compatibility body retained inside a typed envelope.
     Compatibility(Vec<u8>),
+}
+
+/// MS-XLS ExternOleDdeLink. A nonzero storage id identifies `LNK########`;
+/// zero denotes a DDE data item without a Link Storage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternOleDdeLink {
+    pub storage_id: u32,
+    pub declared_link_name_character_count: u8,
+    pub link_name: BiffUnicodeString,
+    pub cached_values: Option<ExternOleDdeCachedValues>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternOleDdeCachedValues {
+    pub last_column: u8,
+    pub last_row: u16,
+    pub values: Vec<BiffConstant>,
+    pub trailing: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2693,7 +2782,7 @@ impl SxDbRecord {
             &self.last_refresh_user,
             self.declared_last_refresh_user_count,
         ) {
-            (None, 0xffff) => Ok(()),
+            (None, 0xffff | 0) => Ok(()),
             (None, _) => Err(Error::invalid(
                 0,
                 "SXDB absent refresh user requires cchWho 0xFFFF",
@@ -2704,8 +2793,15 @@ impl SxDbRecord {
             {
                 Ok(())
             }
+            (Some(value), 0) if value.character_count() == 0 && value.trailing_byte.is_none() => {
+                Ok(())
+            }
             (Some(_), _) => Err(Error::invalid(0, "SXDB refresh user does not match cchWho")),
         }
+    }
+
+    pub const fn has_zero_length_refresh_user_compatibility(&self) -> bool {
+        self.declared_last_refresh_user_count == 0
     }
 }
 
@@ -2722,6 +2818,8 @@ impl SdkRead for SxDbRecord {
         let declared_last_refresh_user_count = reader.read_u16()?;
         let last_refresh_user = match declared_last_refresh_user_count {
             0xffff => None,
+            0 if reader.remaining()? == 0 => None,
+            0 => Some(BiffUnicodeString::read(reader, 0)?),
             count @ 1..=255 => Some(BiffUnicodeString::read(reader, usize::from(count))?),
             _ => {
                 return Err(Error::invalid(
@@ -4472,8 +4570,28 @@ pub enum UsrChkVersion {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct UsrChkRecord {
-    pub version: UsrChkVersion,
+    /// MS-XLS specifies the BIFF identifiers 0x0200 through 0x0600. Some
+    /// LibreOffice-produced streams use the major number 2 through 6; retain
+    /// that wire value so compatible parsing remains typed.
+    pub version: u16,
     pub reserved: u16,
+}
+
+impl UsrChkRecord {
+    pub const fn biff_version(self) -> Option<UsrChkVersion> {
+        match self.version {
+            0x0200 => Some(UsrChkVersion::Biff2),
+            0x0300 => Some(UsrChkVersion::Biff3),
+            0x0400 => Some(UsrChkVersion::Biff4),
+            0x0500 => Some(UsrChkVersion::Biff5),
+            0x0600 => Some(UsrChkVersion::Biff8),
+            _ => None,
+        }
+    }
+
+    pub const fn has_major_only_compatibility(self) -> bool {
+        matches!(self.version, 2..=6)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
@@ -4794,6 +4912,10 @@ pub struct RrdChgCellSegmentLayout {
 pub struct CellParsedFormula {
     pub declared_token_size: u16,
     pub formula: FormulaTokenStream,
+    /// Producer bytes left after the token-declared `RgbExtra` structures.
+    /// Strict validation requires this to be empty; compatible parsing keeps
+    /// it so the surrounding revision record remains typed and lossless.
+    pub compatibility_extra_tail: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5305,6 +5427,103 @@ pub struct UserSViewBeginRecord {
     pub split_y_bits: u64,
     pub right_pane_column: u16,
     pub bottom_pane_row: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkEnum)]
+#[sdk(repr = "u8")]
+pub enum UserSViewChartVisibility {
+    Visible = 0,
+    Hidden = 1,
+    VeryHidden = 2,
+}
+
+/// Chart-sheet form of record 0x01AA. MS-XLS gives this form a distinct
+/// 68-byte layout; it must not be interpreted as the 64-byte worksheet form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UserSViewBeginChartRecord {
+    pub guid: [u8; 16],
+    pub sheet_id: u32,
+    pub zoom_scale: u32,
+    pub reserved1: u32,
+    pub unused1: u32,
+    pub visibility: UserSViewChartVisibility,
+    pub zoom_to_fit: bool,
+    pub unused2: u64,
+    pub unused3: u64,
+    pub unused4: u64,
+    pub unused5: u16,
+    pub unused6: u16,
+}
+
+impl UserSViewBeginChartRecord {
+    fn validate(self, position: u64) -> Result<()> {
+        if !(10..=400).contains(&self.zoom_scale) || self.reserved1 != 0 {
+            return Err(Error::invalid(
+                position,
+                "UserSViewBegin_Chart zoom or reserved field is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SdkRead for UserSViewBeginChartRecord {
+    fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        const ALLOWED_FLAGS: u32 = 0x40c0_0000;
+        let position = reader.position()?;
+        let guid = reader.read_array()?;
+        let sheet_id = reader.read_u32()?;
+        let zoom_scale = reader.read_u32()?;
+        let reserved1 = reader.read_u32()?;
+        let unused1 = reader.read_u32()?;
+        let flags = reader.read_u32()?;
+        if flags & !ALLOWED_FLAGS != 0 {
+            return Err(Error::invalid(
+                position + 32,
+                "UserSViewBegin_Chart reserved flag bits are nonzero",
+            ));
+        }
+        let visibility =
+            UserSViewChartVisibility::from_raw(((flags >> 22) & 3) as u8).ok_or_else(|| {
+                Error::invalid(
+                    position + 32,
+                    "UserSViewBegin_Chart hidden state is invalid",
+                )
+            })?;
+        let value = Self {
+            guid,
+            sheet_id,
+            zoom_scale,
+            reserved1,
+            unused1,
+            visibility,
+            zoom_to_fit: flags & (1 << 30) != 0,
+            unused2: reader.read_u64()?,
+            unused3: reader.read_u64()?,
+            unused4: reader.read_u64()?,
+            unused5: reader.read_u16()?,
+            unused6: reader.read_u16()?,
+        };
+        value.validate(position)?;
+        Ok(value)
+    }
+}
+
+impl SdkWrite for UserSViewBeginChartRecord {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.validate(writer.position()?)?;
+        writer.write_all(&self.guid)?;
+        writer.write_u32(self.sheet_id)?;
+        writer.write_u32(self.zoom_scale)?;
+        writer.write_u32(self.reserved1)?;
+        writer.write_u32(self.unused1)?;
+        writer.write_u32(((self.visibility as u32) << 22) | (u32::from(self.zoom_to_fit) << 30))?;
+        writer.write_u64(self.unused2)?;
+        writer.write_u64(self.unused3)?;
+        writer.write_u64(self.unused4)?;
+        writer.write_u16(self.unused5)?;
+        writer.write_u16(self.unused6)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
@@ -8501,10 +8720,22 @@ pub struct StyleRecord {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
-pub struct CrnCountRecord {
+pub struct XctRecord {
     /// Exact signed/flagged count word used by historical producers.
     pub count_word: u16,
     pub sheet_table_index: u16,
+}
+
+impl XctRecord {
+    /// Absolute `ccrn`: the number of CRN records immediately following XCT.
+    pub const fn crn_count(&self) -> u16 {
+        (self.count_word as i16).unsigned_abs()
+    }
+
+    /// A negative `ccrn` means the most recent SupBook link is not valid.
+    pub const fn supporting_link_is_valid(&self) -> bool {
+        (self.count_word as i16) >= 0
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
@@ -9015,7 +9246,9 @@ impl SdkRead for ExternNameRecord {
         let bytes = reader.read_vec(body_length)?;
         let body = if bytes.is_empty() {
             ExternNameBody::Empty
-        } else if flags.intersects(ExternNameFlags::DDE_NO_OPERATION | ExternNameFlags::OLE_LINK) {
+        } else if flags.contains(ExternNameFlags::OLE_LINK) {
+            Self::parse_ole_dde_link(&bytes).unwrap_or(ExternNameBody::Compatibility(bytes))
+        } else if flags.contains(ExternNameFlags::DDE_NO_OPERATION) {
             ExternNameBody::Compatibility(bytes)
         } else if flags.contains(ExternNameFlags::WANT_ADVISE) {
             Self::parse_cached_link_values(&bytes).unwrap_or(ExternNameBody::Compatibility(bytes))
@@ -9034,6 +9267,75 @@ impl SdkRead for ExternNameRecord {
 }
 
 impl ExternNameRecord {
+    fn parse_ole_dde_link(bytes: &[u8]) -> Result<ExternNameBody> {
+        let mut cursor = 0usize;
+        let storage_id = take_u32(
+            bytes,
+            &mut cursor,
+            "ExternOleDdeLink storage id is truncated",
+        )?;
+        let declared_link_name_character_count = take_u8(
+            bytes,
+            &mut cursor,
+            "ExternOleDdeLink link-name length is truncated",
+        )?;
+        let flags = take_u8(
+            bytes,
+            &mut cursor,
+            "ExternOleDdeLink link-name flags are truncated",
+        )?;
+        let character_count = usize::from(declared_link_name_character_count);
+        let characters = if flags & 1 == 0 {
+            XlStringCharacters::Compressed(
+                take_bytes(
+                    bytes,
+                    &mut cursor,
+                    character_count,
+                    "ExternOleDdeLink compressed link name is truncated",
+                )?
+                .to_vec(),
+            )
+        } else {
+            let byte_count = character_count
+                .checked_mul(2)
+                .ok_or_else(|| Error::Limit("ExternOleDdeLink name length overflow".into()))?;
+            let encoded = take_bytes(
+                bytes,
+                &mut cursor,
+                byte_count,
+                "ExternOleDdeLink Unicode link name is truncated",
+            )?;
+            XlStringCharacters::Unicode(
+                encoded
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect(),
+            )
+        };
+        let link_name = BiffUnicodeString {
+            flags,
+            characters,
+            trailing_byte: None,
+        };
+        let cached_values = if cursor == bytes.len() {
+            None
+        } else {
+            let (last_column, last_row, values, trailing) = Self::parse_moper(&bytes[cursor..])?;
+            Some(ExternOleDdeCachedValues {
+                last_column,
+                last_row,
+                values,
+                trailing,
+            })
+        };
+        Ok(ExternNameBody::OleDdeLink(ExternOleDdeLink {
+            storage_id,
+            declared_link_name_character_count,
+            link_name,
+            cached_values,
+        }))
+    }
+
     fn parse_formula_body(bytes: &[u8]) -> Result<ExternNameBody> {
         if bytes.len() < 2 {
             return Err(Error::invalid(0, "ExternName formula body is truncated"));
@@ -9060,6 +9362,16 @@ impl ExternNameRecord {
     }
 
     fn parse_cached_link_values(bytes: &[u8]) -> Result<ExternNameBody> {
+        let (last_column, last_row, values, trailing) = Self::parse_moper(bytes)?;
+        Ok(ExternNameBody::CachedLinkValues {
+            last_column,
+            last_row,
+            values,
+            trailing,
+        })
+    }
+
+    fn parse_moper(bytes: &[u8]) -> Result<(u8, u16, Vec<BiffConstant>, Vec<u8>)> {
         if bytes.len() < 3 {
             return Err(Error::invalid(0, "ExternName MOper is truncated"));
         }
@@ -9078,12 +9390,7 @@ impl ExternNameRecord {
         for _ in 0..count {
             values.push(BiffConstant::read(bytes, &mut cursor)?);
         }
-        Ok(ExternNameBody::CachedLinkValues {
-            last_column,
-            last_row,
-            values,
-            trailing: bytes[cursor..].to_vec(),
-        })
+        Ok((last_column, last_row, values, bytes[cursor..].to_vec()))
     }
 }
 
@@ -9218,6 +9525,37 @@ impl SdkWrite for ExternNameRecord {
                 }
                 writer.write_all(&bytes)?;
                 writer.write_all(trailing)?;
+            }
+            ExternNameBody::OleDdeLink(value) => {
+                if value.link_name.character_count()
+                    != usize::from(value.declared_link_name_character_count)
+                {
+                    return Err(Error::invalid(
+                        0,
+                        "ExternOleDdeLink link-name length mismatch",
+                    ));
+                }
+                writer.write_u32(value.storage_id)?;
+                writer.write_u8(value.declared_link_name_character_count)?;
+                value.link_name.write(writer)?;
+                if let Some(cached) = &value.cached_values {
+                    let expected = (usize::from(cached.last_column) + 1)
+                        .checked_mul(usize::from(cached.last_row) + 1)
+                        .ok_or_else(|| {
+                            Error::Limit("ExternName MOper value count overflow".into())
+                        })?;
+                    if cached.values.len() != expected {
+                        return Err(Error::invalid(0, "ExternName MOper value count mismatch"));
+                    }
+                    writer.write_u8(cached.last_column)?;
+                    writer.write_u16(cached.last_row)?;
+                    let mut bytes = Vec::new();
+                    for item in &cached.values {
+                        item.write(&mut bytes)?;
+                    }
+                    writer.write_all(&bytes)?;
+                    writer.write_all(&cached.trailing)?;
+                }
             }
             ExternNameBody::Compatibility(bytes) => writer.write_all(bytes)?,
         }
@@ -15429,8 +15767,61 @@ impl SdkWrite for XlUnicodeRichExtendedString {
     }
 }
 
+impl XlUnicodeRichExtendedString {
+    fn normalize_for_write(&mut self) -> Result<()> {
+        let character_count = self
+            .character_chunks
+            .iter()
+            .try_fold(0usize, |total, chunk| {
+                let count = match (&chunk.characters, chunk.flags) {
+                    (XlStringCharacters::Compressed(values), 0) => values.len(),
+                    (XlStringCharacters::Unicode(values), 1) => values.len(),
+                    _ => {
+                        return Err(Error::invalid(
+                            0,
+                            "revision string chunk encoding is invalid",
+                        ));
+                    }
+                };
+                total
+                    .checked_add(count)
+                    .ok_or_else(|| Error::Limit("revision string length overflow".into()))
+            })?;
+        self.declared_character_count = u16::try_from(character_count)
+            .map_err(|_| Error::Limit("revision string exceeds u16 characters".into()))?;
+        if let Some(first) = self.character_chunks.first() {
+            self.flags.set(SstStringFlags::HIGH_BYTE, first.flags == 1);
+        }
+        let rich = !self.format_runs.is_empty();
+        self.flags.set(SstStringFlags::RICH_TEXT, rich);
+        self.declared_format_run_count = rich
+            .then(|| {
+                u16::try_from(self.format_runs.len())
+                    .map_err(|_| Error::Limit("revision format-run count exceeds u16".into()))
+            })
+            .transpose()?;
+        let extended = self.extension.is_some();
+        self.flags.set(SstStringFlags::EXTENDED, extended);
+        self.declared_extension_length = self
+            .extension
+            .as_ref()
+            .map(|value| {
+                u32::try_from(value.to_bytes()?.len())
+                    .map_err(|_| Error::Limit("revision ExtRst exceeds u32".into()))
+            })
+            .transpose()?;
+        self.validate(0)
+    }
+}
+
 impl CellParsedFormula {
-    fn validate(&self, position: u64) -> Result<()> {
+    fn normalize_for_write(&mut self) -> Result<()> {
+        self.declared_token_size = u16::try_from(self.formula.to_bytes()?.len())
+            .map_err(|_| Error::Limit("CellParsedFormula token stream exceeds u16".into()))?;
+        self.validate_wire(0)
+    }
+
+    fn validate_wire(&self, position: u64) -> Result<()> {
         let bytes = self.formula.to_bytes()?;
         if self.declared_token_size == 0
             || usize::from(self.declared_token_size) != bytes.len()
@@ -15450,8 +15841,19 @@ impl CellParsedFormula {
         Ok(())
     }
 
+    pub fn validate(&self, position: u64) -> Result<()> {
+        self.validate_wire(position)?;
+        if !self.compatibility_extra_tail.is_empty() {
+            return Err(Error::invalid(
+                position,
+                "CellParsedFormula has bytes beyond its RgbExtra structures",
+            ));
+        }
+        Ok(())
+    }
+
     fn encoded_size(&self, position: u64) -> Result<u32> {
-        self.validate(position)?;
+        self.validate_wire(position)?;
         let size = 2usize
             .checked_add(usize::from(self.declared_token_size))
             .and_then(|value| {
@@ -15460,6 +15862,7 @@ impl CellParsedFormula {
                     .ok()
                     .and_then(|extra| value.checked_add(extra.len()))
             })
+            .and_then(|value| value.checked_add(self.compatibility_extra_tail.len()))
             .ok_or_else(|| Error::Limit("CellParsedFormula size overflow".into()))?;
         u32::try_from(size).map_err(|_| Error::Limit("CellParsedFormula size exceeds u32".into()))
     }
@@ -15475,18 +15878,13 @@ impl CellParsedFormula {
             FormulaTokenStream::from_bytes(&child.read_vec(usize::from(declared_token_size))?)?;
         let remaining = usize::try_from(child.remaining()?)
             .map_err(|_| Error::Limit("CellParsedFormula RgbExtra exceeds usize".into()))?;
-        let tail = formula.parse_extra_data(&child.read_vec(remaining)?)?;
-        if !tail.is_empty() {
-            return Err(Error::invalid(
-                position,
-                "CellParsedFormula has trailing bytes",
-            ));
-        }
+        let compatibility_extra_tail = formula.parse_extra_data(&child.read_vec(remaining)?)?;
         let value = Self {
             declared_token_size,
             formula,
+            compatibility_extra_tail,
         };
-        value.validate(position)?;
+        value.validate_wire(position)?;
         Ok(value)
     }
 }
@@ -15500,15 +15898,30 @@ impl SdkRead for CellParsedFormula {
 
 impl SdkWrite for CellParsedFormula {
     fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-        self.validate(writer.position()?)?;
+        self.validate_wire(writer.position()?)?;
         writer.write_u16(self.declared_token_size)?;
         writer.write_all(&self.formula.to_bytes()?)?;
         writer.write_all(&self.formula.extra_data_to_bytes()?)?;
+        writer.write_all(&self.compatibility_extra_tail)?;
         Ok(())
     }
 }
 
 impl RrdCellValue {
+    fn normalize_for_write(&mut self) -> Result<()> {
+        match self {
+            Self::String(value) => value.normalize_for_write(),
+            Self::Formula(value) => value.normalize_for_write(),
+            _ => Ok(()),
+        }
+    }
+
+    fn to_bytes(&self) -> Result<Vec<u8>> {
+        let mut writer = Writer::new(Vec::new());
+        self.write(&mut writer)?;
+        Ok(writer.into_inner())
+    }
+
     fn kind(&self) -> u16 {
         match self {
             Self::Blank => 0,
@@ -16616,7 +17029,7 @@ fn validate_rrd_conflict(value: &RrdConflictRecord, position: u64) -> Result<()>
 }
 
 impl RrdInfoRecord {
-    fn validate(self, position: u64) -> Result<()> {
+    pub fn validate(self, position: u64) -> Result<()> {
         let shared = self.sharing_flags.contains(RrdInfoSharingFlags::SHARED);
         let tracked = self
             .sharing_flags
@@ -16651,8 +17064,7 @@ impl RrdInfoRecord {
 
 impl SdkRead for RrdInfoRecord {
     fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
-        let position = reader.position()?;
-        let value = Self {
+        Ok(Self {
             biff_version: reader.read_u16()?,
             reserved1: reader.read_u16()?,
             sharing_flags: RrdInfoSharingFlags::from_bits_retain(reader.read_u16()?),
@@ -16662,15 +17074,12 @@ impl SdkRead for RrdInfoRecord {
             version: reader.read_u32()?,
             history_flags: RrdInfoHistoryFlags::from_bits_retain(reader.read_u16()?),
             revision_history_days: reader.read_u16()?,
-        };
-        value.validate(position)?;
-        Ok(value)
+        })
     }
 }
 
 impl SdkWrite for RrdInfoRecord {
     fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-        self.validate(writer.position()?)?;
         writer.write_u16(self.biff_version)?;
         writer.write_u16(self.reserved1)?;
         writer.write_u16(self.sharing_flags.bits())?;
@@ -18043,6 +18452,60 @@ impl BigNameRecord {
     }
 
     fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
+        let mut normalized = self.clone();
+        normalized.normalize_for_write()?;
+        normalized.encode_normalized_physical()
+    }
+
+    fn normalize_for_write(&mut self) -> Result<()> {
+        self.declared_name_byte_count = u8::try_from(self.name.len())
+            .map_err(|_| Error::Limit("BigName name exceeds u8 bytes".into()))?;
+        self.declared_data_byte_count = i32::try_from(self.data.len())
+            .map_err(|_| Error::Limit("BigName data exceeds i32 bytes".into()))?;
+        let prefix_size = 7usize
+            .checked_add(self.name.len())
+            .ok_or_else(|| Error::Limit("BigName prefix size overflow".into()))?;
+        let first_capacity = MAX_BIFF_RECORD_DATA
+            .checked_sub(prefix_size)
+            .ok_or_else(|| {
+                Error::invalid(0, "BigName fixed prefix and name exceed one BIFF record")
+            })?;
+        let layout_len = self
+            .physical_segments
+            .iter()
+            .try_fold(0usize, |total, segment| {
+                total
+                    .checked_add(usize::from(segment.data_byte_count))
+                    .ok_or_else(|| Error::Limit("BigName physical layout overflow".into()))
+            })?;
+        let layout_valid = !self.physical_segments.is_empty()
+            && layout_len == self.data.len()
+            && usize::from(self.physical_segments[0].data_byte_count) <= first_capacity
+            && self
+                .physical_segments
+                .iter()
+                .skip(1)
+                .all(|segment| usize::from(segment.data_byte_count) <= MAX_BIFF_RECORD_DATA);
+        if !layout_valid {
+            let first = self.data.len().min(first_capacity);
+            self.physical_segments = vec![BigNameSegmentLayout {
+                data_byte_count: u16::try_from(first)
+                    .map_err(|_| Error::Limit("BigName base segment exceeds u16".into()))?,
+            }];
+            let mut remaining = self.data.len() - first;
+            while remaining != 0 {
+                let count = remaining.min(MAX_BIFF_RECORD_DATA);
+                self.physical_segments.push(BigNameSegmentLayout {
+                    data_byte_count: u16::try_from(count)
+                        .map_err(|_| Error::Limit("ContinueBigName segment exceeds u16".into()))?,
+                });
+                remaining -= count;
+            }
+        }
+        self.validate_complete(0)
+    }
+
+    fn encode_normalized_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
         self.validate_complete(0)?;
         let mut offset = 0usize;
         let mut encoded = Vec::with_capacity(self.physical_segments.len());
@@ -18634,6 +19097,67 @@ fn encode_frt_continued_payload(
     Ok(encoded)
 }
 
+fn frt_continued_layout_is_valid(
+    logical_len: usize,
+    layouts: Option<&[FrtContinuedSegmentLayout]>,
+) -> bool {
+    let Some(layouts) = layouts else {
+        return logical_len <= MAX_BIFF_RECORD_DATA;
+    };
+    if layouts.is_empty() {
+        return false;
+    }
+    let mut total = 0usize;
+    for (index, layout) in layouts.iter().enumerate() {
+        let count = usize::from(layout.logical_byte_count);
+        let header_valid = if index == 0 {
+            layout.continuation_header.is_none() && count <= MAX_BIFF_RECORD_DATA
+        } else {
+            layout
+                .continuation_header
+                .is_some_and(|header| header.record_type == CONTINUE_FRT)
+                && count < 8221
+        };
+        let Some(next_total) = total.checked_add(count) else {
+            return false;
+        };
+        if !header_valid {
+            return false;
+        }
+        total = next_total;
+    }
+    total == logical_len
+}
+
+fn canonical_frt_continued_layout(
+    logical_len: usize,
+) -> Result<Option<Vec<FrtContinuedSegmentLayout>>> {
+    if logical_len <= MAX_BIFF_RECORD_DATA {
+        return Ok(None);
+    }
+    let mut remaining = logical_len;
+    let first = remaining.min(MAX_BIFF_RECORD_DATA);
+    remaining -= first;
+    let mut layouts = vec![FrtContinuedSegmentLayout {
+        logical_byte_count: u16::try_from(first)
+            .map_err(|_| Error::Limit("FRT first segment exceeds u16".into()))?,
+        continuation_header: None,
+    }];
+    while remaining != 0 {
+        let count = remaining.min(8220);
+        layouts.push(FrtContinuedSegmentLayout {
+            logical_byte_count: u16::try_from(count)
+                .map_err(|_| Error::Limit("ContinueFrt segment exceeds u16".into()))?,
+            continuation_header: Some(FrtHeaderOld {
+                record_type: CONTINUE_FRT,
+                flags: FrtFlags::empty(),
+            }),
+        });
+        remaining -= count;
+    }
+    Ok(Some(layouts))
+}
+
 impl HiddenMemberSet {
     fn read<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
         let declared_member_count = reader.read_u32()?;
@@ -18680,12 +19204,40 @@ impl SxThRecord {
     }
 
     fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
+        let mut normalized = self.clone();
+        normalized.normalize_for_write()?;
         encode_frt_continued_payload(
             SX_TH,
-            encode_sdk(self)?,
-            self.physical_segments.as_deref(),
+            encode_sdk(&normalized)?,
+            normalized.physical_segments.as_deref(),
             "SXTH",
         )
+    }
+
+    fn normalize_for_write(&mut self) -> Result<()> {
+        self.declared_associated_field_count = u32::try_from(self.associated_fields.len())
+            .map_err(|_| Error::Limit("SXTH associated-field count exceeds u32".into()))?;
+        if self.associated_fields.is_empty() && !self.hidden_member_sets.is_empty() {
+            return Err(Error::invalid(
+                0,
+                "SXTH hidden-member sets require associated fields",
+            ));
+        }
+        self.declared_hidden_member_set_count = if self.associated_fields.is_empty() {
+            0
+        } else {
+            u32::try_from(self.hidden_member_sets.len())
+                .map_err(|_| Error::Limit("SXTH hidden-member-set count exceeds u32".into()))?
+        };
+        for set in &mut self.hidden_member_sets {
+            set.declared_member_count = u32::try_from(set.member_names.len())
+                .map_err(|_| Error::Limit("SXTH hidden-member count exceeds u32".into()))?;
+        }
+        let logical = encode_sdk(self)?;
+        if !frt_continued_layout_is_valid(logical.len(), self.physical_segments.as_deref()) {
+            self.physical_segments = canonical_frt_continued_layout(logical.len())?;
+        }
+        Ok(())
     }
 
     fn validate(&self, position: u64) -> Result<()> {
@@ -18877,12 +19429,24 @@ impl SxvdTExRecord {
     }
 
     fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
+        let mut normalized = self.clone();
+        normalized.normalize_for_write()?;
         encode_frt_continued_payload(
             SXVD_TEX,
-            encode_sdk(self)?,
-            self.physical_segments.as_deref(),
+            encode_sdk(&normalized)?,
+            normalized.physical_segments.as_deref(),
             "SXVDTEx",
         )
+    }
+
+    fn normalize_for_write(&mut self) -> Result<()> {
+        self.declared_item_count = i32::try_from(self.item_flags.len())
+            .map_err(|_| Error::Limit("SXVDTEx item count exceeds i32".into()))?;
+        let logical = encode_sdk(self)?;
+        if !frt_continued_layout_is_valid(logical.len(), self.physical_segments.as_deref()) {
+            self.physical_segments = canonical_frt_continued_layout(logical.len())?;
+        }
+        Ok(())
     }
 
     fn validate(&self, position: u64) -> Result<()> {
@@ -21179,17 +21743,11 @@ impl NameRecord {
 
     fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
         let logical = self.logical_bytes()?;
-        let declared_len = self
-            .physical_segment_lengths
-            .iter()
-            .map(|length| usize::from(*length))
-            .sum::<usize>();
-        if self.physical_segment_lengths.is_empty() || declared_len != logical.len() {
-            return Err(Error::invalid(0, "Name physical layout mismatch"));
-        }
+        let segment_lengths =
+            preserved_or_canonical_continue_lengths(&self.physical_segment_lengths, logical.len())?;
         let mut offset = 0usize;
-        let mut records = Vec::with_capacity(self.physical_segment_lengths.len());
-        for (index, length) in self.physical_segment_lengths.iter().enumerate() {
+        let mut records = Vec::with_capacity(segment_lengths.len());
+        for (index, length) in segment_lengths.iter().enumerate() {
             let end = offset + usize::from(*length);
             records.push(EncodedBiffRecord {
                 record_type: if index == 0 { NAME } else { CONTINUE },
@@ -21291,17 +21849,11 @@ impl PlsRecord {
 
     fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
         let logical = self.logical_bytes()?;
-        let declared_len = self
-            .physical_segment_lengths
-            .iter()
-            .map(|length| usize::from(*length))
-            .sum::<usize>();
-        if self.physical_segment_lengths.is_empty() || declared_len != logical.len() {
-            return Err(Error::invalid(0, "Pls physical layout mismatch"));
-        }
+        let segment_lengths =
+            preserved_or_canonical_continue_lengths(&self.physical_segment_lengths, logical.len())?;
         let mut offset = 0usize;
-        let mut records = Vec::with_capacity(self.physical_segment_lengths.len());
-        for (index, length) in self.physical_segment_lengths.iter().enumerate() {
+        let mut records = Vec::with_capacity(segment_lengths.len());
+        for (index, length) in segment_lengths.iter().enumerate() {
             let end = offset + usize::from(*length);
             records.push(EncodedBiffRecord {
                 record_type: if index == 0 { PLS } else { CONTINUE },
@@ -21415,19 +21967,10 @@ impl BkHimRecord {
 
     fn encode_physical(&self, first_record_type: u16) -> Result<Vec<EncodedBiffRecord>> {
         let logical = self.logical_bytes()?;
-        let physical_size =
-            self.physical_segment_lengths
-                .iter()
-                .try_fold(0usize, |total, length| {
-                    total
-                        .checked_add(usize::from(*length))
-                        .ok_or_else(|| Error::Limit("BkHim physical layout size overflow".into()))
-                })?;
-        if self.physical_segment_lengths.is_empty() || physical_size != logical.len() {
-            return Err(Error::invalid(0, "BkHim physical layout mismatch"));
-        }
+        let segment_lengths =
+            preserved_or_canonical_continue_lengths(&self.physical_segment_lengths, logical.len())?;
         let mut offset = 0usize;
-        self.physical_segment_lengths
+        segment_lengths
             .iter()
             .enumerate()
             .map(|(index, length)| {
@@ -22414,6 +22957,92 @@ impl SdkWrite for ParamQryRecord {
     }
 }
 
+fn collect_office_art_client_markers(
+    records: &[OfficeArtRecord],
+    start: usize,
+    markers: &mut Vec<(OfficeArtClientMarker, usize)>,
+) -> Result<usize> {
+    let mut offset = start;
+    for record in records {
+        let payload_start = offset
+            .checked_add(8)
+            .ok_or_else(|| Error::Limit("OfficeArt record offset overflow".into()))?;
+        let end = payload_start
+            .checked_add(
+                usize::try_from(record.header.declared_length)
+                    .map_err(|_| Error::Limit("OfficeArt record length exceeds usize".into()))?,
+            )
+            .ok_or_else(|| Error::Limit("OfficeArt record end overflow".into()))?;
+        match &record.data {
+            OfficeArtRecordData::Container(children)
+            | OfficeArtRecordData::CompatibilityContainer(children)
+                if collect_office_art_client_markers(children, payload_start, markers)? != end =>
+            {
+                return Err(Error::invalid(
+                    offset as u64,
+                    "OfficeArt container length disagrees with its children",
+                ));
+            }
+            OfficeArtRecordData::Container(_) | OfficeArtRecordData::CompatibilityContainer(_) => {}
+            OfficeArtRecordData::ClientMarker(marker) => markers.push((*marker, end)),
+            _ => {}
+        }
+        offset = end;
+    }
+    Ok(offset)
+}
+
+fn append_canonical_drawing_region(
+    encoded: &mut Vec<EncodedBiffRecord>,
+    bytes: &[u8],
+    first_record_type: u16,
+) {
+    if bytes.is_empty() {
+        encoded.push(EncodedBiffRecord {
+            record_type: first_record_type,
+            payload: Vec::new(),
+        });
+        return;
+    }
+    for (index, chunk) in bytes.chunks(MAX_BIFF_RECORD_DATA).enumerate() {
+        encoded.push(EncodedBiffRecord {
+            record_type: if index == 0 {
+                first_record_type
+            } else {
+                CONTINUE
+            },
+            payload: chunk.to_vec(),
+        });
+    }
+}
+
+impl MsoDrawingHostData {
+    fn client_marker(&self) -> Option<OfficeArtClientMarker> {
+        match self {
+            Self::Obj(_) | Self::ObjCompatibility { .. } => Some(OfficeArtClientMarker::Data),
+            Self::Txo(_) => Some(OfficeArtClientMarker::Textbox),
+            Self::Note(_) => None,
+            Self::Raw { record_type, .. } => match *record_type {
+                OBJ | OBJ_DC5D_COMPATIBILITY => Some(OfficeArtClientMarker::Data),
+                TXO => Some(OfficeArtClientMarker::Textbox),
+                NOTE => None,
+                _ => None,
+            },
+        }
+    }
+
+    fn is_note(&self) -> bool {
+        matches!(
+            self,
+            Self::Note(_)
+                | Self::Raw {
+                    record_type: NOTE,
+                    ..
+                }
+        )
+    }
+}
+
 impl MsoDrawingRecord {
     fn from_segments(segments: &[(u16, &[u8])], limits: Limits) -> Result<Self> {
         let total_len =
@@ -22495,21 +23124,118 @@ impl MsoDrawingRecord {
             .iter()
             .map(|segment| usize::from(segment.payload_length))
             .sum::<usize>();
-        if self.physical_segments.is_empty()
-            || !(self.physical_segments[0].record_type == expected_record_type
+        let valid_first_record = self.physical_segments.first().is_some_and(|segment| {
+            segment.record_type == expected_record_type
                 || (expected_record_type == MSO_DRAWING
-                    && self.physical_segments[0].record_type == MSO_DRAWING_AC_COMPATIBILITY))
-            || declared_len != logical.len()
-        {
-            return Err(Error::invalid(0, "MsoDrawing physical layout mismatch"));
-        }
-        let mut offset = 0usize;
+                    && segment.record_type == MSO_DRAWING_AC_COMPATIBILITY)
+        });
+        let valid_preserved_layout = valid_first_record
+            && declared_len == logical.len()
+            && self
+                .physical_segments
+                .iter()
+                .all(|segment| usize::from(segment.payload_length) <= MAX_BIFF_RECORD_DATA)
+            && self
+                .host_records
+                .windows(2)
+                .all(|hosts| hosts[0].after_segment <= hosts[1].after_segment)
+            && self.host_records.iter().all(|host| {
+                host.after_segment != 0 && host.after_segment <= self.physical_segments.len()
+            });
         if expected_record_type == MSO_DRAWING_GROUP && !self.host_records.is_empty() {
             return Err(Error::invalid(
                 0,
                 "MsoDrawingGroup cannot contain BIFF host records",
             ));
         }
+
+        if !valid_preserved_layout {
+            let first_record_type = self
+                .physical_segments
+                .first()
+                .filter(|segment| {
+                    segment.record_type == expected_record_type
+                        || (expected_record_type == MSO_DRAWING
+                            && segment.record_type == MSO_DRAWING_AC_COMPATIBILITY)
+                })
+                .map_or(expected_record_type, |segment| segment.record_type);
+            if expected_record_type == MSO_DRAWING_GROUP || self.host_records.is_empty() {
+                let mut records = Vec::new();
+                append_canonical_drawing_region(&mut records, &logical, first_record_type);
+                return Ok(records);
+            }
+            let MsoDrawingData::Complete(stream) = &self.data else {
+                return Err(Error::invalid(
+                    0,
+                    "partial MsoDrawing cannot rebuild stale host-record boundaries",
+                ));
+            };
+            let mut markers = Vec::new();
+            if collect_office_art_client_markers(&stream.records, 0, &mut markers)? != logical.len()
+            {
+                return Err(Error::invalid(
+                    0,
+                    "OfficeArt marker layout does not cover MsoDrawing bytes",
+                ));
+            }
+            let anchored_hosts = self
+                .host_records
+                .iter()
+                .filter_map(|host| host.data.client_marker().map(|marker| (host, marker)))
+                .collect::<Vec<_>>();
+            if markers.len() != anchored_hosts.len()
+                || markers
+                    .iter()
+                    .zip(&anchored_hosts)
+                    .any(|((marker, _), (_, host_marker))| marker != host_marker)
+                || self
+                    .host_records
+                    .iter()
+                    .skip_while(|host| host.data.client_marker().is_some())
+                    .any(|host| !host.data.is_note())
+            {
+                return Err(Error::invalid(
+                    0,
+                    "MsoDrawing client markers do not match BIFF host records",
+                ));
+            }
+
+            let mut records = Vec::new();
+            let mut start = 0usize;
+            for (index, ((_, end), (host, _))) in markers.iter().zip(&anchored_hosts).enumerate() {
+                if *end <= start || *end > logical.len() {
+                    return Err(Error::invalid(0, "MsoDrawing marker offsets are invalid"));
+                }
+                append_canonical_drawing_region(
+                    &mut records,
+                    &logical[start..*end],
+                    if index == 0 {
+                        first_record_type
+                    } else {
+                        MSO_DRAWING
+                    },
+                );
+                records.extend(host.data.encode_physical()?);
+                start = *end;
+            }
+            if start < logical.len() {
+                append_canonical_drawing_region(
+                    &mut records,
+                    &logical[start..],
+                    if markers.is_empty() {
+                        first_record_type
+                    } else {
+                        MSO_DRAWING
+                    },
+                );
+            }
+            for host in self.host_records.iter().skip(anchored_hosts.len()) {
+                records.extend(host.data.encode_physical()?);
+            }
+            return Ok(records);
+        }
+
+        let mut offset = 0usize;
         let mut records =
             Vec::with_capacity(self.physical_segments.len() + self.host_records.len());
         let mut host_index = 0usize;
@@ -23435,6 +24161,49 @@ impl RrdChgCellRecord {
     }
 
     fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
+        let mut normalized = self.clone();
+        normalized.normalize_for_write()?;
+        normalized.encode_current_physical()
+    }
+
+    fn normalize_for_write(&mut self) -> Result<()> {
+        self.old_value.normalize_for_write()?;
+        self.new_value.normalize_for_write()?;
+        self.declared_old_value_size = self.old_value.declared_old_size(0)?;
+        if self.encode_current_physical().is_err() {
+            let (records, layouts) = self.canonical_encoding()?;
+            self.physical_segments = (records.len() > 1).then_some(layouts);
+            self.encode_current_physical()?;
+        }
+        Ok(())
+    }
+
+    fn canonical_encoding(&self) -> Result<(Vec<EncodedBiffRecord>, Vec<RrdChgCellSegmentLayout>)> {
+        let logical = encode_sdk(self)?;
+        let old_value = self.old_value.to_bytes()?;
+        let new_value = self.new_value.to_bytes()?;
+        let prefix_len = logical
+            .len()
+            .checked_sub(old_value.len())
+            .and_then(|value| value.checked_sub(new_value.len()))
+            .ok_or_else(|| Error::invalid(0, "RRDChgCell values exceed logical record"))?;
+        let mut writer = CanonicalSstWriter::new();
+        writer.write_bytes(&logical[..prefix_len]);
+        writer.write_rrd_value(&self.old_value)?;
+        writer.write_rrd_value(&self.new_value)?;
+        let (mut records, layouts) = writer.finish()?;
+        records[0].record_type = RRD_CHG_CELL;
+        let layouts = layouts
+            .into_iter()
+            .map(|layout| RrdChgCellSegmentLayout {
+                logical_byte_count: layout.logical_byte_count,
+                continuation_encoding: layout.continuation_encoding,
+            })
+            .collect();
+        Ok((records, layouts))
+    }
+
+    fn encode_current_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
         let logical = encode_sdk(self)?;
         let Some(layouts) = &self.physical_segments else {
             if logical.len() > MAX_BIFF_RECORD_DATA {
@@ -23511,7 +24280,236 @@ impl RrdChgCellRecord {
     }
 }
 
+struct CanonicalSstEncoding {
+    records: Vec<EncodedBiffRecord>,
+    string_locations: Vec<(usize, u16)>,
+    layouts: Vec<SstSegmentLayout>,
+}
+
+struct CanonicalSstWriter {
+    payloads: Vec<Vec<u8>>,
+    continuation_encodings: Vec<Option<u8>>,
+}
+
+impl CanonicalSstWriter {
+    fn new() -> Self {
+        Self {
+            payloads: vec![Vec::new()],
+            continuation_encodings: vec![None],
+        }
+    }
+
+    fn remaining(&self) -> usize {
+        MAX_BIFF_RECORD_DATA - self.payloads.last().expect("SST has a first payload").len()
+    }
+
+    fn start_plain_continue(&mut self) {
+        self.payloads.push(Vec::new());
+        self.continuation_encodings.push(None);
+    }
+
+    fn start_character_continue(&mut self, encoding: u8) -> Result<()> {
+        if encoding > 1 {
+            return Err(Error::invalid(0, "SST character encoding is invalid"));
+        }
+        self.payloads.push(vec![encoding]);
+        self.continuation_encodings.push(Some(encoding));
+        Ok(())
+    }
+
+    fn ensure_contiguous(&mut self, byte_count: usize) -> Result<()> {
+        if byte_count > MAX_BIFF_RECORD_DATA {
+            return Err(Error::Limit(
+                "contiguous SST value exceeds one BIFF record".into(),
+            ));
+        }
+        if self.remaining() < byte_count {
+            self.start_plain_continue();
+        }
+        Ok(())
+    }
+
+    fn write_contiguous(&mut self, bytes: &[u8]) -> Result<()> {
+        self.ensure_contiguous(bytes.len())?;
+        self.payloads
+            .last_mut()
+            .expect("SST has a current payload")
+            .extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn write_u16(&mut self, value: u16) -> Result<()> {
+        self.write_contiguous(&value.to_le_bytes())
+    }
+
+    fn write_bytes(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            if self.remaining() == 0 {
+                self.start_plain_continue();
+            }
+            let count = bytes.len().min(self.remaining());
+            self.payloads
+                .last_mut()
+                .expect("SST has a current payload")
+                .extend_from_slice(&bytes[..count]);
+            bytes = &bytes[count..];
+        }
+    }
+
+    fn write_character_chunk(&mut self, chunk: &SstCharacterChunk) -> Result<()> {
+        let (encoding, mut offset, character_count) = match &chunk.characters {
+            XlStringCharacters::Compressed(characters) if chunk.flags == 0 => {
+                (0u8, 0usize, characters.len())
+            }
+            XlStringCharacters::Unicode(characters) if chunk.flags == 1 => {
+                (1u8, 0usize, characters.len())
+            }
+            XlStringCharacters::Compressed(_) | XlStringCharacters::Unicode(_) => {
+                return Err(Error::invalid(
+                    0,
+                    "SST chunk flags disagree with characters",
+                ));
+            }
+        };
+        while offset < character_count {
+            let width = usize::from(encoding) + 1;
+            let writable = (self.remaining() / width).min(character_count - offset);
+            if writable == 0 {
+                self.start_character_continue(encoding)?;
+                continue;
+            }
+            let payload = self.payloads.last_mut().expect("SST has a current payload");
+            match &chunk.characters {
+                XlStringCharacters::Compressed(characters) => {
+                    payload.extend_from_slice(&characters[offset..offset + writable]);
+                }
+                XlStringCharacters::Unicode(characters) => {
+                    for character in &characters[offset..offset + writable] {
+                        payload.extend_from_slice(&character.to_le_bytes());
+                    }
+                }
+            }
+            offset += writable;
+            if offset < character_count {
+                self.start_character_continue(encoding)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_rich_extended_string(&mut self, value: &XlUnicodeRichExtendedString) -> Result<()> {
+        let mut header = Vec::with_capacity(9);
+        header.extend_from_slice(&value.declared_character_count.to_le_bytes());
+        header.push(value.flags.bits());
+        if let Some(count) = value.declared_format_run_count {
+            header.extend_from_slice(&count.to_le_bytes());
+        }
+        if let Some(length) = value.declared_extension_length {
+            header.extend_from_slice(&length.to_le_bytes());
+        }
+        let first_character_width = if value.declared_character_count == 0 {
+            0
+        } else {
+            value
+                .character_chunks
+                .first()
+                .map(|chunk| usize::from(chunk.flags) + 1)
+                .ok_or_else(|| Error::invalid(0, "revision string has no character chunks"))?
+        };
+        self.ensure_contiguous(header.len() + first_character_width)?;
+        self.write_contiguous(&header)?;
+        for (index, chunk) in value.character_chunks.iter().enumerate() {
+            if index != 0 {
+                self.start_character_continue(chunk.flags)?;
+            }
+            self.write_character_chunk(chunk)?;
+        }
+        for run in &value.format_runs {
+            self.write_u16(run.character_index)?;
+            self.write_u16(run.font_index)?;
+        }
+        self.write_bytes(&value.extension_bytes()?);
+        Ok(())
+    }
+
+    fn write_rrd_value(&mut self, value: &RrdCellValue) -> Result<()> {
+        match value {
+            RrdCellValue::String(value) => self.write_rich_extended_string(value),
+            _ => {
+                self.write_bytes(&value.to_bytes()?);
+                Ok(())
+            }
+        }
+    }
+
+    fn position(&self) -> Result<(usize, u16)> {
+        let segment_index = self.payloads.len() - 1;
+        let payload_offset = u16::try_from(
+            self.payloads
+                .last()
+                .expect("SST has a current payload")
+                .len(),
+        )
+        .map_err(|_| Error::Limit("SST payload offset exceeds u16".into()))?;
+        Ok((segment_index, payload_offset))
+    }
+
+    fn finish(self) -> Result<(Vec<EncodedBiffRecord>, Vec<SstSegmentLayout>)> {
+        let mut records = Vec::with_capacity(self.payloads.len());
+        let mut layouts = Vec::with_capacity(self.payloads.len());
+        for (index, (payload, continuation_encoding)) in self
+            .payloads
+            .into_iter()
+            .zip(self.continuation_encodings)
+            .enumerate()
+        {
+            let logical_byte_count = payload
+                .len()
+                .checked_sub(usize::from(continuation_encoding.is_some()))
+                .ok_or_else(|| Error::invalid(0, "SST continuation encoding is missing"))?;
+            layouts.push(SstSegmentLayout {
+                logical_byte_count: u16::try_from(logical_byte_count)
+                    .map_err(|_| Error::Limit("SST logical segment exceeds u16".into()))?,
+                continuation_encoding,
+            });
+            records.push(EncodedBiffRecord {
+                record_type: if index == 0 { SST } else { CONTINUE },
+                payload,
+            });
+        }
+        Ok((records, layouts))
+    }
+}
+
 impl SstRecord {
+    fn preserves_physical_layout(&self) -> bool {
+        let Ok(logical) = self.logical_bytes() else {
+            return false;
+        };
+        if self.physical_segments.is_empty() {
+            return false;
+        }
+        let mut logical_len = 0usize;
+        for (index, layout) in self.physical_segments.iter().enumerate() {
+            if (index == 0 && layout.continuation_encoding.is_some())
+                || layout
+                    .continuation_encoding
+                    .is_some_and(|encoding| encoding > 1)
+                || usize::from(layout.logical_byte_count)
+                    + usize::from(layout.continuation_encoding.is_some())
+                    > MAX_BIFF_RECORD_DATA
+            {
+                return false;
+            }
+            let Some(next_len) = logical_len.checked_add(usize::from(layout.logical_byte_count))
+            else {
+                return false;
+            };
+            logical_len = next_len;
+        }
+        logical_len == logical.len()
+    }
+
     fn from_sequence(first: &[u8], continues: &[&[u8]], limits: Limits) -> Result<Self> {
         let mut segments = Vec::with_capacity(continues.len() + 1);
         segments.push(first);
@@ -23552,6 +24550,109 @@ impl SstRecord {
             trailing,
             physical_segments,
         })
+    }
+
+    fn canonical_encoding(&self) -> Result<CanonicalSstEncoding> {
+        if !matches!(self.completion, SstCompletion::Complete) {
+            return Err(Error::invalid(
+                0,
+                "truncated SST cannot be canonically resegmented",
+            ));
+        }
+        let unique_string_count = u32::try_from(self.strings.len())
+            .map_err(|_| Error::Limit("SST unique string count exceeds u32".into()))?;
+        let mut writer = CanonicalSstWriter::new();
+        writer.write_contiguous(&self.total_string_count.to_le_bytes())?;
+        writer.write_contiguous(&unique_string_count.to_le_bytes())?;
+        let mut string_locations = Vec::with_capacity(self.strings.len());
+
+        for string in &self.strings {
+            let (character_count, flags, format_run_count, extension_bytes) =
+                string.canonical_fields()?;
+            let mut header = Vec::with_capacity(9);
+            header.extend_from_slice(&character_count.to_le_bytes());
+            header.push(flags.bits());
+            if let Some(count) = format_run_count {
+                header.extend_from_slice(&count.to_le_bytes());
+            }
+            if flags.contains(SstStringFlags::EXTENDED) {
+                header.extend_from_slice(
+                    &u32::try_from(extension_bytes.len())
+                        .map_err(|_| Error::Limit("SST extension exceeds u32".into()))?
+                        .to_le_bytes(),
+                );
+            }
+            let first_character_width = if character_count == 0 {
+                0
+            } else {
+                string
+                    .character_chunks
+                    .first()
+                    .map(|chunk| usize::from(chunk.flags) + 1)
+                    .ok_or_else(|| Error::invalid(0, "SST string has no character chunks"))?
+            };
+            writer.ensure_contiguous(header.len() + first_character_width)?;
+            string_locations.push(writer.position()?);
+            writer.write_contiguous(&header)?;
+            for (index, chunk) in string.character_chunks.iter().enumerate() {
+                if index != 0 {
+                    writer.start_character_continue(chunk.flags)?;
+                }
+                writer.write_character_chunk(chunk)?;
+            }
+            for run in &string.format_runs {
+                writer.write_u16(run.character_index)?;
+                writer.write_u16(run.font_index)?;
+            }
+            writer.write_bytes(&extension_bytes);
+        }
+        writer.write_bytes(&self.trailing);
+        let (records, layouts) = writer.finish()?;
+        Ok(CanonicalSstEncoding {
+            records,
+            string_locations,
+            layouts,
+        })
+    }
+
+    fn normalize_for_write(
+        &mut self,
+        total_string_count: Option<u32>,
+    ) -> Result<CanonicalSstEncoding> {
+        if let Some(total_string_count) = total_string_count {
+            self.total_string_count = total_string_count;
+        }
+        self.unique_string_count = u32::try_from(self.strings.len())
+            .map_err(|_| Error::Limit("SST unique string count exceeds u32".into()))?;
+        for string in &mut self.strings {
+            let (character_count, flags, format_run_count, extension_bytes) =
+                string.canonical_fields()?;
+            string.declared_character_count = character_count;
+            string.flags = flags;
+            string.declared_format_run_count = format_run_count;
+            string.declared_extension_length = flags
+                .contains(SstStringFlags::EXTENDED)
+                .then(|| {
+                    u32::try_from(extension_bytes.len())
+                        .map_err(|_| Error::Limit("SST extension exceeds u32".into()))
+                })
+                .transpose()?;
+        }
+        let encoded = self.canonical_encoding()?;
+        self.physical_segments = encoded.layouts.clone();
+        let continues = encoded.records[1..]
+            .iter()
+            .map(|record| record.payload.as_slice())
+            .collect::<Vec<_>>();
+        let reparsed =
+            Self::from_sequence(&encoded.records[0].payload, &continues, Limits::default())?;
+        if reparsed.logical_bytes()? != self.logical_bytes()? {
+            return Err(Error::invalid(
+                0,
+                "canonical SST encoding does not reproduce the typed string table",
+            ));
+        }
+        Ok(encoded)
     }
 
     fn logical_bytes(&self) -> Result<Vec<u8>> {
@@ -23642,21 +24743,10 @@ impl SstRecord {
     }
 
     fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
-        let logical = self.logical_bytes()?;
-        let declared_logical_len =
-            self.physical_segments
-                .iter()
-                .try_fold(0usize, |total, layout| {
-                    total
-                        .checked_add(usize::from(layout.logical_byte_count))
-                        .ok_or_else(|| Error::Limit("SST physical layout length overflow".into()))
-                })?;
-        if declared_logical_len != logical.len() || self.physical_segments.is_empty() {
-            return Err(Error::invalid(
-                0,
-                "SST physical layout does not match logical bytes",
-            ));
+        if !self.preserves_physical_layout() {
+            return self.canonical_encoding().map(|encoded| encoded.records);
         }
+        let logical = self.logical_bytes()?;
         let mut offset = 0usize;
         let mut encoded = Vec::with_capacity(self.physical_segments.len());
         for (index, layout) in self.physical_segments.iter().enumerate() {
@@ -23685,6 +24775,60 @@ impl SstRecord {
             offset = end;
         }
         Ok(encoded)
+    }
+}
+
+impl SstString {
+    fn canonical_fields(&self) -> Result<(u16, SstStringFlags, Option<u16>, Vec<u8>)> {
+        let character_count = self
+            .character_chunks
+            .iter()
+            .try_fold(0usize, |total, chunk| {
+                let count = match (&chunk.characters, chunk.flags) {
+                    (XlStringCharacters::Compressed(values), 0) => values.len(),
+                    (XlStringCharacters::Unicode(values), 1) => values.len(),
+                    _ => {
+                        return Err(Error::invalid(
+                            0,
+                            "SST character chunk flags disagree with characters",
+                        ));
+                    }
+                };
+                total
+                    .checked_add(count)
+                    .ok_or_else(|| Error::Limit("SST character count overflow".into()))
+            })?;
+        let character_count = u16::try_from(character_count)
+            .map_err(|_| Error::Limit("SST string exceeds u16 characters".into()))?;
+        if character_count != 0
+            && self
+                .character_chunks
+                .iter()
+                .any(|chunk| match &chunk.characters {
+                    XlStringCharacters::Compressed(values) => values.is_empty(),
+                    XlStringCharacters::Unicode(values) => values.is_empty(),
+                })
+        {
+            return Err(Error::invalid(0, "SST contains an empty character chunk"));
+        }
+
+        let mut flags = self.flags;
+        if let Some(first) = self.character_chunks.first() {
+            flags.set(SstStringFlags::HIGH_BYTE, first.flags == 1);
+        }
+        let has_format_runs = !self.format_runs.is_empty();
+        flags.set(SstStringFlags::RICH_TEXT, has_format_runs);
+        let format_run_count = has_format_runs
+            .then(|| {
+                u16::try_from(self.format_runs.len())
+                    .map_err(|_| Error::Limit("SST format-run count exceeds u16".into()))
+            })
+            .transpose()?;
+
+        let extension_bytes = self.extension.to_bytes()?;
+        let has_extension = !matches!(self.extension, SstExtensionData::None);
+        flags.set(SstStringFlags::EXTENDED, has_extension);
+        Ok((character_count, flags, format_run_count, extension_bytes))
     }
 }
 
@@ -24199,20 +25343,179 @@ impl BiffStream {
     /// reference leaves the original tree unchanged.
     pub fn relayout(&mut self) -> Result<()> {
         let mut rebuilt = self.clone();
-        rebuilt.relayout_in_place()?;
+        rebuilt.relayout_in_place(false)?;
         *self = rebuilt;
         Ok(())
     }
 
-    fn relayout_in_place(&mut self) -> Result<()> {
+    /// Recomputes known references while retaining pre-existing invalid
+    /// reference fields when their target cannot be identified.
+    pub fn relayout_preserving_compatibility(&mut self) -> Result<()> {
+        let mut rebuilt = self.clone();
+        rebuilt.relayout_in_place(true)?;
+        *self = rebuilt;
+        Ok(())
+    }
+
+    fn relayout_in_place(&mut self, preserve_invalid_references: bool) -> Result<()> {
+        for record in &mut self.records {
+            match &mut record.data {
+                BiffRecordData::MsoDrawingGroup(value) | BiffRecordData::MsoDrawing(value) => {
+                    if let MsoDrawingData::Complete(stream) = &mut value.data
+                        && stream.to_bytes().is_err()
+                    {
+                        stream.relayout()?;
+                    }
+                }
+                BiffRecordData::SxTh(value) => value.normalize_for_write()?,
+                BiffRecordData::SxvdTEx(value) => value.normalize_for_write()?,
+                BiffRecordData::BigName(value) => value.normalize_for_write()?,
+                BiffRecordData::RrdChgCell(value) => value.normalize_for_write()?,
+                _ => {}
+            }
+        }
+
+        let sst_requiring_canonical_layout = self
+            .records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| match &record.data {
+                BiffRecordData::Sst(value) if !value.preserves_physical_layout() => Some(index),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if sst_requiring_canonical_layout.len() > 1 {
+            return Err(Error::invalid(
+                0,
+                "multiple edited SST records cannot share one ExtSST index",
+            ));
+        }
+        let canonical_sst = if let Some(&sst_index) = sst_requiring_canonical_layout.first() {
+            let label_sst_count = self
+                .records
+                .iter()
+                .filter(|record| matches!(record.data, BiffRecordData::LabelSst(_)))
+                .count();
+            let ext_sst_indices = self
+                .records
+                .iter()
+                .enumerate()
+                .filter_map(|(index, record)| {
+                    matches!(record.data, BiffRecordData::ExtSst(_)).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            if ext_sst_indices.len() > 1 {
+                return Err(Error::invalid(
+                    0,
+                    "multiple ExtSST records cannot index one edited SST",
+                ));
+            }
+            let ext_sst_index = ext_sst_indices.first().copied();
+            let (unique_count_changed, unique_count) = match &self.records[sst_index].data {
+                BiffRecordData::Sst(value) => (
+                    usize::try_from(value.unique_string_count).ok() != Some(value.strings.len()),
+                    value.strings.len(),
+                ),
+                _ => unreachable!("SST index was selected from the typed record"),
+            };
+            let total_string_count = unique_count_changed
+                .then(|| {
+                    u32::try_from(label_sst_count.max(unique_count))
+                        .map_err(|_| Error::Limit("SST total string count exceeds u32".into()))
+                })
+                .transpose()?;
+            let encoded = match &mut self.records[sst_index].data {
+                BiffRecordData::Sst(value) => value.normalize_for_write(total_string_count)?,
+                _ => unreachable!("SST index was selected from the typed record"),
+            };
+
+            if let Some(ext_sst_index) = ext_sst_index {
+                let strings_per_bucket_u32 = (u32::try_from(unique_count)
+                    .map_err(|_| Error::Limit("SST unique string count exceeds u32".into()))?
+                    / 128
+                    + 1)
+                .max(8);
+                let strings_per_bucket = u16::try_from(strings_per_bucket_u32)
+                    .map_err(|_| Error::Limit("ExtSST strings-per-bucket exceeds u16".into()))?;
+                let bucket_count = unique_count.div_ceil(usize::from(strings_per_bucket));
+                let BiffRecordData::ExtSst(value) = &mut self.records[ext_sst_index].data else {
+                    unreachable!("ExtSST index was selected from the typed record");
+                };
+                value.strings_per_bucket = strings_per_bucket;
+                value.buckets = vec![
+                    IsstInf {
+                        stream_offset: 0,
+                        record_offset: 0,
+                        reserved: 0,
+                    };
+                    bucket_count
+                ];
+            }
+            Some((sst_index, ext_sst_index, encoded))
+        } else {
+            None
+        };
+
         let layout = BiffStreamLayout::new(&self.records)?;
+        if let Some((sst_index, Some(ext_sst_index), encoded)) = &canonical_sst {
+            let mut physical_record_offsets = Vec::with_capacity(encoded.records.len());
+            let mut relative_offset = 0u32;
+            for record in &encoded.records {
+                physical_record_offsets.push(relative_offset);
+                relative_offset = relative_offset
+                    .checked_add(
+                        u32::try_from(record.payload.len())
+                            .map_err(|_| Error::Limit("SST segment size exceeds u32".into()))?
+                            .checked_add(4)
+                            .ok_or_else(|| Error::Limit("SST segment size overflow".into()))?,
+                    )
+                    .ok_or_else(|| Error::Limit("SST physical layout size overflow".into()))?;
+            }
+            let sst_stream_offset = layout.entries[*sst_index].new_offset;
+            let BiffRecordData::ExtSst(value) = &mut self.records[*ext_sst_index].data else {
+                unreachable!("ExtSST index was selected from the typed record");
+            };
+            for (bucket_index, bucket) in value.buckets.iter_mut().enumerate() {
+                let string_index = bucket_index
+                    .checked_mul(usize::from(value.strings_per_bucket))
+                    .ok_or_else(|| Error::Limit("ExtSST string index overflow".into()))?;
+                let &(segment_index, payload_offset) =
+                    encoded
+                        .string_locations
+                        .get(string_index)
+                        .ok_or_else(|| Error::invalid(0, "ExtSST bucket exceeds SST strings"))?;
+                let record_offset = payload_offset
+                    .checked_add(4)
+                    .ok_or_else(|| Error::Limit("ExtSST record offset overflow".into()))?;
+                let physical_header = sst_stream_offset
+                    .checked_add(*physical_record_offsets.get(segment_index).ok_or_else(|| {
+                        Error::invalid(0, "ExtSST string references a missing SST segment")
+                    })?)
+                    .ok_or_else(|| Error::Limit("ExtSST stream offset overflow".into()))?;
+                bucket.stream_offset = physical_header
+                    .checked_add(u32::from(record_offset))
+                    .ok_or_else(|| Error::Limit("ExtSST stream offset overflow".into()))?;
+                bucket.record_offset = record_offset;
+                bucket.reserved = 0;
+            }
+        }
         if !layout.positions_changed() {
             return Ok(());
         }
 
         for (index, record) in self.records.iter_mut().enumerate() {
             let old_record_offset = layout.entries[index].old_offset;
-            match &mut record.data {
+            let original_data = preserve_invalid_references
+                .then(|| match &record.data {
+                    BiffRecordData::BoundSheet8(_)
+                    | BiffRecordData::BoundSheet8Compatibility { .. }
+                    | BiffRecordData::Index(_)
+                    | BiffRecordData::ExtSst(_)
+                    | BiffRecordData::DbCell(_) => Some(record.data.clone()),
+                    _ => None,
+                })
+                .flatten();
+            let relocation = (|| match &mut record.data {
                 BiffRecordData::BoundSheet8(value)
                 | BiffRecordData::BoundSheet8Compatibility { value, .. } => {
                     value.sheet_bof_offset = layout.relocate_record(
@@ -24220,6 +25523,7 @@ impl BiffStream {
                         BiffLayoutRecordKind::Bof,
                         "BoundSheet8.lbPlyPos does not reference a BOF record",
                     )?;
+                    Ok(())
                 }
                 BiffRecordData::Index(value) => {
                     value.def_col_width_offset = layout.relocate_record(
@@ -24234,8 +25538,16 @@ impl BiffStream {
                             "Index.rgibRw does not reference a BIFF record",
                         )?;
                     }
+                    Ok(())
                 }
                 BiffRecordData::ExtSst(value) => {
+                    if canonical_sst
+                        .as_ref()
+                        .and_then(|(_, ext_sst_index, _)| *ext_sst_index)
+                        == Some(index)
+                    {
+                        return Ok(());
+                    }
                     for bucket in &mut value.buckets {
                         let old_header = bucket
                             .stream_offset
@@ -24254,11 +25566,19 @@ impl BiffStream {
                             .checked_add(u32::from(bucket.record_offset))
                             .ok_or_else(|| Error::Limit("ExtSST bucket offset overflow".into()))?;
                     }
+                    Ok(())
                 }
-                BiffRecordData::DbCell(value) => {
-                    value.relayout(old_record_offset, &layout)?;
+                BiffRecordData::DbCell(value) => value.relayout(old_record_offset, &layout),
+                _ => Ok(()),
+            })();
+            if let Err(error) = relocation {
+                if preserve_invalid_references && matches!(error, Error::InvalidData { .. }) {
+                    if let Some(original_data) = original_data {
+                        record.data = original_data;
+                    }
+                } else {
+                    return Err(error);
                 }
-                _ => {}
             }
             record.offset = layout.entries[index].new_offset;
         }
@@ -24267,7 +25587,13 @@ impl BiffStream {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut stream = self.clone();
-        stream.relayout_in_place()?;
+        stream.relayout_in_place(false)?;
+        stream.to_bytes_with_current_layout()
+    }
+
+    pub fn to_bytes_preserving_compatibility(&self) -> Result<Vec<u8>> {
+        let mut stream = self.clone();
+        stream.relayout_in_place(true)?;
         stream.to_bytes_with_current_layout()
     }
 
@@ -24425,11 +25751,48 @@ impl RevisionLogStream {
     }
 
     pub fn from_bytes_with_limits(bytes: &[u8], limits: Limits) -> Result<Self> {
-        let stream = BiffStream::from_bytes_with_mode(bytes, limits, Some(true))?;
+        let stream = Self::from_bytes_compatible_with_limits(bytes, limits)?;
+        stream.validate()?;
+        Ok(stream)
+    }
+
+    pub fn from_bytes_compatible_with_limits(bytes: &[u8], limits: Limits) -> Result<Self> {
+        let mut stream = BiffStream::from_bytes_with_mode(bytes, limits, Some(true))?;
+        for record in &mut stream.records {
+            let note = match &record.data {
+                BiffRecordData::Unknown {
+                    record_type: NOTE,
+                    payload,
+                } => Some(NoteRecord::from_bytes(payload, limits)?),
+                _ => None,
+            };
+            if let Some(note) = note {
+                record.data = BiffRecordData::Note(note);
+            }
+        }
         Ok(Self {
             records: stream.records,
             trailing_padding: stream.trailing_padding,
         })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        for record in &self.records {
+            match &record.data {
+                BiffRecordData::RrdInfo(value) => {
+                    value.validate(u64::from(record.offset))?;
+                }
+                BiffRecordData::RrdChgCell(value) => {
+                    for cell_value in [&value.old_value, &value.new_value] {
+                        if let RrdCellValue::Formula(formula) = cell_value {
+                            formula.validate(u64::from(record.offset))?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     pub fn open(compound_file: &CompoundFile) -> Result<Option<Self>> {
@@ -24440,6 +25803,7 @@ impl RevisionLogStream {
     }
 
     pub fn save(&self, compound_file: &mut CompoundFile) -> Result<()> {
+        self.validate()?;
         let bytes = self.to_bytes()?;
         compound_file.replace_stream(REVISION_LOG_STREAM_PATH, bytes)?;
         Ok(())
@@ -24462,6 +25826,207 @@ impl RevisionLogStream {
             trailing_padding: self.trailing_padding.clone(),
         }
         .to_bytes()
+    }
+}
+
+impl UserNamesStream {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Self::from_bytes_with_limits(bytes, Limits::default())
+    }
+
+    pub fn from_bytes_with_limits(bytes: &[u8], limits: Limits) -> Result<Self> {
+        let stream = Self::from_bytes_compatible_with_limits(bytes, limits)?;
+        stream.validate()?;
+        Ok(stream)
+    }
+
+    /// Parses every BIFF record while deferring cross-record conformance to
+    /// [`Self::validate`]. This keeps producer deviations navigable in the
+    /// compatible file root instead of collapsing a structurally readable
+    /// stream to opaque bytes.
+    pub fn from_bytes_compatible_with_limits(bytes: &[u8], limits: Limits) -> Result<Self> {
+        let stream = BiffStream::from_bytes_with_mode(bytes, limits, Some(true))?;
+        Ok(Self {
+            records: stream.records,
+            trailing_padding: stream.trailing_padding,
+        })
+    }
+
+    pub fn open(compound_file: &CompoundFile) -> Result<Option<Self>> {
+        compound_file
+            .stream(USER_NAMES_STREAM_PATH)
+            .map(Self::from_bytes)
+            .transpose()
+    }
+
+    pub fn save(&self, compound_file: &mut CompoundFile) -> Result<()> {
+        self.validate()?;
+        compound_file.replace_stream(USER_NAMES_STREAM_PATH, self.to_bytes()?)?;
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let [cusr, usr_chk, cb_usr, bc_usrs, users @ ..] = self.records.as_slice() else {
+            return Err(Error::invalid(
+                self.records
+                    .last()
+                    .map_or(0, |record| u64::from(record.offset)),
+                "User Names stream does not match CUsr UsrChk CbUsr BCUsrs UsrInfo*",
+            ));
+        };
+        let BiffRecordData::CUsr(cusr_value) = &cusr.data else {
+            return Err(Error::invalid(
+                u64::from(cusr.offset),
+                "User Names stream does not begin with CUsr",
+            ));
+        };
+        let BiffRecordData::UsrChk(usr_chk_value) = &usr_chk.data else {
+            return Err(Error::invalid(
+                u64::from(usr_chk.offset),
+                "CUsr is not followed by UsrChk",
+            ));
+        };
+        if usr_chk_value.biff_version().is_none() || usr_chk_value.reserved != 0 {
+            return Err(Error::invalid(
+                u64::from(usr_chk.offset),
+                "UsrChk version/reserved fields violate MS-XLS 2.4.338",
+            ));
+        }
+        let BiffRecordData::CbUsr(cb_usr_value) = &cb_usr.data else {
+            return Err(Error::invalid(
+                u64::from(cb_usr.offset),
+                "UsrChk is not followed by CbUsr",
+            ));
+        };
+        if !matches!(bc_usrs.data, BiffRecordData::BCUsrs(_)) {
+            return Err(Error::invalid(
+                u64::from(bc_usrs.offset),
+                "CbUsr is not followed by BCUsrs",
+            ));
+        }
+        if users
+            .iter()
+            .any(|record| !matches!(record.data, BiffRecordData::UsrInfo(_)))
+        {
+            let record = users
+                .iter()
+                .find(|record| !matches!(record.data, BiffRecordData::UsrInfo(_)))
+                .expect("non-UsrInfo record was observed");
+            return Err(Error::invalid(
+                u64::from(record.offset),
+                "User Names stream contains a non-UsrInfo record after BCUsrs",
+            ));
+        }
+        if usize::from(cusr_value.user_count) != users.len() {
+            return Err(Error::invalid(
+                u64::from(cusr.offset),
+                format!(
+                    "CUsr declares {} users but the stream contains {} UsrInfo records",
+                    cusr_value.user_count,
+                    users.len()
+                ),
+            ));
+        }
+        for (index, record) in users.iter().enumerate() {
+            let encoded_size =
+                record
+                    .data
+                    .encode_physical()?
+                    .into_iter()
+                    .try_fold(0usize, |size, encoded| {
+                        size.checked_add(encoded.payload.len())
+                            .and_then(|size| size.checked_add(4))
+                            .ok_or_else(|| Error::Limit("UsrInfo physical size overflow".into()))
+                    })?;
+            if usize::from(cb_usr_value.user_record_sizes[index]) != encoded_size {
+                return Err(Error::invalid(
+                    u64::from(cb_usr.offset),
+                    format!(
+                        "CbUsr[{index}] is {} but UsrInfo occupies {encoded_size} bytes",
+                        cb_usr_value.user_record_sizes[index]
+                    ),
+                ));
+            }
+        }
+        if cb_usr_value.user_record_sizes[users.len()..]
+            .iter()
+            .any(|size| *size != 0)
+        {
+            return Err(Error::invalid(
+                u64::from(cb_usr.offset),
+                "CbUsr entries beyond CUsr.iCount are not zero",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn relayout(&mut self) -> Result<()> {
+        let mut stream = BiffStream {
+            records: self.records.clone(),
+            trailing_padding: self.trailing_padding.clone(),
+        };
+        stream.relayout()?;
+        self.records = stream.records;
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        BiffStream {
+            records: self.records.clone(),
+            trailing_padding: self.trailing_padding.clone(),
+        }
+        .to_bytes()
+    }
+}
+
+impl PivotCacheStream {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Self::from_bytes_with_limits(bytes, Limits::default())
+    }
+
+    pub fn from_bytes_with_limits(bytes: &[u8], limits: Limits) -> Result<Self> {
+        let stream = BiffStream::from_bytes_with_mode(bytes, limits, Some(true))?;
+        if !matches!(
+            stream.records.first().map(|record| &record.data),
+            Some(BiffRecordData::SxDb(_))
+        ) {
+            return Err(Error::invalid(
+                0,
+                format!(
+                    "PivotCache stream does not begin with SXDB: {:?}",
+                    stream.records.first().map(|record| &record.data)
+                ),
+            ));
+        }
+        Ok(Self {
+            records: stream.records,
+            trailing_padding: stream.trailing_padding,
+        })
+    }
+
+    pub fn relayout(&mut self) -> Result<()> {
+        let mut stream = BiffStream {
+            records: self.records.clone(),
+            trailing_padding: self.trailing_padding.clone(),
+        };
+        stream.relayout()?;
+        self.records = stream.records;
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        BiffStream {
+            records: self.records.clone(),
+            trailing_padding: self.trailing_padding.clone(),
+        }
+        .to_bytes()
+    }
+
+    pub fn properties(&self) -> Option<&SxDbRecord> {
+        self.records.first().and_then(|record| match &record.data {
+            BiffRecordData::SxDb(value) => Some(value),
+            _ => None,
+        })
     }
 }
 
@@ -24770,6 +26335,7 @@ impl BiffRecordData {
             Self::RrdConflict(value) => (RRD_CONFLICT, encode_sdk(value)?),
             Self::RrdInfo(value) => (RRD_INFO, encode_sdk(value)?),
             Self::RrdUserView(value) => (RRD_USER_VIEW, encode_sdk(value)?),
+            Self::Note(value) => (NOTE, value.to_bytes()?),
             Self::SxView(value) => (SX_VIEW, encode_sdk(value)?),
             Self::SxViewEx(value) => (SX_VIEW_EX, encode_sdk(value)?),
             Self::SxTh(value) => (SX_TH, encode_sdk(value)?),
@@ -24835,6 +26401,7 @@ impl BiffRecordData {
             Self::CodeName(value) => (CODE_NAME, encode_sdk(value)?),
             Self::Array(value) => (ARRAY, encode_sdk(value)?),
             Self::UserSViewBegin(value) => (USER_SVIEW_BEGIN, encode_sdk(value)?),
+            Self::UserSViewBeginChart(value) => (USER_SVIEW_BEGIN, encode_sdk(value)?),
             Self::UserSViewEnd(value) => (USER_SVIEW_END, encode_sdk(value)?),
             Self::UserBView(value) => (USER_BVIEW, encode_sdk(value)?),
             Self::SheetExt(value) => (SHEET_EXT, encode_sdk(value)?),
@@ -24995,7 +26562,7 @@ impl BiffRecordData {
             Self::FontCompatibility { record_type, value } => (*record_type, encode_sdk(value)?),
             Self::Format(value) => (FORMAT, encode_sdk(value)?),
             Self::Style(value) => (STYLE, encode_sdk(value)?),
-            Self::CrnCount(value) => (CRN_COUNT, encode_sdk(value)?),
+            Self::Xct(value) => (XCT, encode_sdk(value)?),
             Self::DefaultRowHeight(value) => (DEFAULT_ROW_HEIGHT, encode_sdk(value)?),
             Self::WriteAccess(value) => (WRITE_ACCESS, encode_sdk(value)?),
             Self::Window2(value) => (WINDOW2, encode_sdk(value)?),
@@ -25210,25 +26777,44 @@ impl TxoRecord {
 
     fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
         let formula_data = self.formula.to_bytes()?;
-        if usize::from(self.formula.declared_length) != formula_data.len() {
-            return Err(Error::invalid(0, "TxO ObjFmla length mismatch"));
-        }
         let text_count = self
             .text_chunks
             .iter()
             .map(BiffUnicodeString::character_count)
             .sum::<usize>();
-        if text_count != usize::from(self.declared_text_length) {
-            return Err(Error::invalid(0, "TxO cchText mismatch"));
+        let text_count = u16::try_from(text_count)
+            .map_err(|_| Error::Limit("TxO text exceeds u16 characters".into()))?;
+        let formula_length = u16::try_from(formula_data.len())
+            .map_err(|_| Error::Limit("TxO ObjFmla exceeds u16 bytes".into()))?;
+
+        let mut run_bytes = Vec::new();
+        for run in &self.runs {
+            run.write(&mut run_bytes);
         }
+        if let Some(last_run) = self.last_run {
+            let mut last_run = last_run;
+            if text_count != self.declared_text_length {
+                last_run.format.character_index = text_count;
+            }
+            last_run.write(&mut run_bytes);
+        }
+        if !run_bytes.len().is_multiple_of(8) {
+            return Err(Error::invalid(
+                0,
+                "TxO formatting runs are not 8-byte aligned",
+            ));
+        }
+        let run_data_length = u16::try_from(run_bytes.len())
+            .map_err(|_| Error::Limit("TxO formatting runs exceed u16 bytes".into()))?;
+
         let mut payload = Vec::new();
         payload.extend_from_slice(&self.options.bits().to_le_bytes());
         payload.extend_from_slice(&self.rotation.0.to_le_bytes());
         payload.extend_from_slice(&self.context.to_bytes());
-        payload.extend_from_slice(&self.declared_text_length.to_le_bytes());
-        payload.extend_from_slice(&self.declared_run_data_length.to_le_bytes());
+        payload.extend_from_slice(&text_count.to_le_bytes());
+        payload.extend_from_slice(&run_data_length.to_le_bytes());
         payload.extend_from_slice(&self.empty_font_index.to_le_bytes());
-        payload.extend_from_slice(&self.formula.declared_length.to_le_bytes());
+        payload.extend_from_slice(&formula_length.to_le_bytes());
         payload.extend_from_slice(&formula_data);
         payload.extend_from_slice(&self.trailing);
         let mut records = vec![EncodedBiffRecord {
@@ -25236,27 +26822,18 @@ impl TxoRecord {
             payload,
         }];
         for chunk in &self.text_chunks {
-            records.push(EncodedBiffRecord {
-                record_type: CONTINUE,
-                payload: chunk.to_bytes()?,
-            });
+            records.extend(chunk.encode_txo_continues()?);
         }
-        let mut run_bytes = Vec::new();
-        for run in self.runs.iter().chain(self.last_run.iter()) {
-            run.write(&mut run_bytes);
-        }
-        if run_bytes.len() != usize::from(self.declared_run_data_length)
-            || self
-                .formatting_segment_lengths
-                .iter()
-                .map(|length| usize::from(*length))
-                .sum::<usize>()
-                != run_bytes.len()
-        {
-            return Err(Error::invalid(0, "TxO cbRuns or physical layout mismatch"));
-        }
+        let segment_lengths = if run_bytes.is_empty() {
+            Vec::new()
+        } else {
+            preserved_or_canonical_continue_lengths(
+                &self.formatting_segment_lengths,
+                run_bytes.len(),
+            )?
+        };
         let mut offset = 0usize;
-        for length in &self.formatting_segment_lengths {
+        for length in &segment_lengths {
             let end = offset + usize::from(*length);
             records.push(EncodedBiffRecord {
                 record_type: CONTINUE,
@@ -25273,6 +26850,67 @@ impl BiffUnicodeString {
         let mut writer = Writer::new(Cursor::new(Vec::new()));
         self.write(&mut writer)?;
         Ok(writer.into_inner().into_inner())
+    }
+
+    fn encode_txo_continues(&self) -> Result<Vec<EncodedBiffRecord>> {
+        let preserved = self.to_bytes()?;
+        if preserved.len() <= MAX_BIFF_RECORD_DATA {
+            return Ok(vec![EncodedBiffRecord {
+                record_type: CONTINUE,
+                payload: preserved,
+            }]);
+        }
+
+        let mut records = Vec::new();
+        match &self.characters {
+            XlStringCharacters::Compressed(characters) => {
+                if self.flags & 1 != 0 {
+                    return Err(Error::invalid(0, "compressed TxO text has UTF-16 flag"));
+                }
+                for (index, chunk) in characters.chunks(MAX_BIFF_RECORD_DATA - 1).enumerate() {
+                    let is_last = (index + 1) * (MAX_BIFF_RECORD_DATA - 1) >= characters.len();
+                    let mut payload = Vec::with_capacity(
+                        1 + chunk.len() + usize::from(is_last && self.trailing_byte.is_some()),
+                    );
+                    payload.push(self.flags);
+                    payload.extend_from_slice(chunk);
+                    if is_last && let Some(trailing) = self.trailing_byte {
+                        payload.push(trailing);
+                    }
+                    if payload.len() > MAX_BIFF_RECORD_DATA {
+                        return Err(Error::invalid(0, "TxO text Continue exceeds 8224 bytes"));
+                    }
+                    records.push(EncodedBiffRecord {
+                        record_type: CONTINUE,
+                        payload,
+                    });
+                }
+            }
+            XlStringCharacters::Unicode(characters) => {
+                if self.flags & 1 == 0 {
+                    return Err(Error::invalid(0, "Unicode TxO text lacks UTF-16 flag"));
+                }
+                let max_characters = (MAX_BIFF_RECORD_DATA - 1) / 2;
+                for (index, chunk) in characters.chunks(max_characters).enumerate() {
+                    let is_last = (index + 1) * max_characters >= characters.len();
+                    let mut payload = Vec::with_capacity(
+                        1 + chunk.len() * 2 + usize::from(is_last && self.trailing_byte.is_some()),
+                    );
+                    payload.push(self.flags);
+                    for character in chunk {
+                        payload.extend_from_slice(&character.to_le_bytes());
+                    }
+                    if is_last && let Some(trailing) = self.trailing_byte {
+                        payload.push(trailing);
+                    }
+                    records.push(EncodedBiffRecord {
+                        record_type: CONTINUE,
+                        payload,
+                    });
+                }
+            }
+        }
+        Ok(records)
     }
 }
 
@@ -25600,14 +27238,38 @@ impl NoteRecord {
 }
 
 impl ObjRecord {
-    fn object_type(&self) -> Option<u16> {
+    pub fn common(&self) -> Option<&ObjCommonData> {
         self.subrecords.iter().find_map(|subrecord| {
             if let ObjSubrecordData::Common(common) = &subrecord.data {
-                Some(common.object_type)
+                Some(common)
             } else {
                 None
             }
         })
+    }
+
+    pub fn picture_flags(&self) -> Option<ObjPictureFlags> {
+        self.subrecords.iter().find_map(|subrecord| {
+            if let ObjSubrecordData::PictureFlags(flags) = &subrecord.data {
+                Some(*flags)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn picture_formula(&self) -> Option<&ObjPictureFormula> {
+        self.subrecords.iter().find_map(|subrecord| {
+            if let ObjSubrecordData::PictureFormula(formula) = &subrecord.data {
+                Some(formula)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn object_type(&self) -> Option<u16> {
+        self.common().map(|common| common.object_type)
     }
 
     fn from_bytes(bytes: &[u8], limits: Limits) -> Result<Self> {
@@ -28273,6 +29935,9 @@ fn decode_record(
                     offset,
                     record_type,
                 )?)),
+                USER_SVIEW_BEGIN if payload.len() == 68 => Some(
+                    BiffRecordData::UserSViewBeginChart(parse_sdk(payload, offset, record_type)?),
+                ),
                 USER_SVIEW_BEGIN => Some(BiffRecordData::UserSViewBegin(parse_sdk(
                     payload,
                     offset,
@@ -28966,7 +30631,7 @@ fn decode_record(
                     offset,
                     record_type,
                 )?)),
-                CRN_COUNT => Some(BiffRecordData::CrnCount(parse_sdk(
+                XCT => Some(BiffRecordData::Xct(parse_sdk(
                     payload,
                     offset,
                     record_type,
@@ -30085,7 +31750,12 @@ mod tests {
         }
         assert!(bad_formula.encode().is_ok());
 
-        assert!(decode_record(SX_DB, &[0; 20], false, true, 0).is_err());
+        let zero_user = decode_record(SX_DB, &[0; 20], false, true, 0).unwrap();
+        assert!(matches!(
+            zero_user,
+            BiffRecordData::SxDb(value)
+                if value.has_zero_length_refresh_user_compatibility()
+        ));
         assert!(
             BiffRecordData::SxFdb(SxFdbRecord {
                 flags: SxFdbFlags::empty(),
@@ -30374,7 +32044,7 @@ mod tests {
             }),
             BiffRecordData::BCUsrs(BCUsrsRecord { user_count: 2 }),
             BiffRecordData::UsrChk(UsrChkRecord {
-                version: UsrChkVersion::Biff8,
+                version: UsrChkVersion::Biff8 as u16,
                 reserved: 0,
             }),
         ];
@@ -30630,7 +32300,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            BiffRecordData::RrdInfo(RrdInfoRecord {
+            RrdInfoRecord {
                 biff_version: 8,
                 reserved1: 0,
                 sharing_flags: RrdInfoSharingFlags::TRACK_REVISIONS,
@@ -30640,8 +32310,8 @@ mod tests {
                 version: 0,
                 history_flags: RrdInfoHistoryFlags::empty(),
                 revision_history_days: 1,
-            })
-            .encode()
+            }
+            .validate(0)
             .is_err()
         );
     }
@@ -30847,6 +32517,7 @@ mod tests {
         let formula = |bytes: &[u8]| CellParsedFormula {
             declared_token_size: u16::try_from(bytes.len()).unwrap(),
             formula: FormulaTokenStream::from_bytes(bytes).unwrap(),
+            compatibility_extra_tail: Vec::new(),
         };
         let compressed_string = XlUnicodeRichExtendedString {
             declared_character_count: 3,
