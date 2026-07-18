@@ -17,6 +17,7 @@ use crate::{
     Error, Result,
     cfb::{CompoundFile, Entry, EntryKind},
     common::Guid,
+    forms::ParentControlStorageModel,
     io::BinaryFormat,
     limits::Limits,
     office_art::{OfficeArtDrawingGraph, OfficeArtStream},
@@ -25,6 +26,9 @@ use crate::{
         compound_from_bytes, compound_from_path, compound_outcome,
     },
     save::SaveOptions,
+    shared_content::{
+        OfficeFormsMutation, OfficeHostKind, OfficeSharedContent, OfficeVbaModuleMutation,
+    },
 };
 
 use super::{
@@ -101,6 +105,7 @@ pub struct BiffWorkbookTree {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct XlsFile {
     compound_file: CompoundFile,
+    pub shared: OfficeSharedContent,
     /// Every root BIFF workbook stream. Some compatibility files contain both
     /// the modern `Workbook` name and the legacy `Book` name.
     pub workbooks: Vec<XlsWorkbookStream>,
@@ -6273,9 +6278,16 @@ impl XlsFile {
                 users.resolve_revision_log(*user, &revisions)?;
             }
         }
+        let shared = OfficeSharedContent::from_compound_file_with_host(
+            &compound_file,
+            options,
+            Some(OfficeHostKind::Xls),
+        )?;
+        diagnostics.extend(shared.diagnostics);
         Ok(ParseOutcome::new(
             Self {
                 compound_file,
+                shared: shared.value,
                 workbooks,
                 pivot_caches,
                 revision_log,
@@ -6283,6 +6295,33 @@ impl XlsFile {
             },
             diagnostics,
         ))
+    }
+
+    /// Transactionally replaces one host VBA module source. VBA caches, SRP
+    /// streams and the OLEPS VBA signature are invalidated by the shared tree.
+    pub fn replace_vba_module_source(
+        &mut self,
+        stream_name: &str,
+        source: &[u8],
+    ) -> Result<OfficeVbaModuleMutation> {
+        let mut candidate = self.clone();
+        let report = candidate
+            .shared
+            .replace_vba_module_source(stream_name, source)?;
+        *self = candidate;
+        Ok(report)
+    }
+
+    /// Transactionally edits one VBA Designer storage through the shared Office tree.
+    pub fn edit_vba_designer_storage(
+        &mut self,
+        index: usize,
+        edit: impl FnOnce(&mut ParentControlStorageModel) -> Result<()>,
+    ) -> Result<OfficeFormsMutation> {
+        let mut candidate = self.clone();
+        let report = candidate.shared.edit_vba_designer_storage(index, edit)?;
+        *self = candidate;
+        Ok(report)
     }
 
     /// Rebuilds every managed BIFF stream and returns a strict CFB.
@@ -6414,6 +6453,7 @@ impl XlsFile {
             }
             None => {}
         }
+        self.shared.write_to_compound_file(&mut compound, options)?;
         Ok(compound)
     }
 

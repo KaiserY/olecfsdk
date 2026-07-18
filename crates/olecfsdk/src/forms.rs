@@ -1953,6 +1953,207 @@ pub struct EmbeddedParentControl {
     pub storage: Box<ParentControlStorage>,
 }
 
+/// Storage-neutral recursive MS-OFORMS parent-control model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParentControlStorageModel {
+    pub class_id: Guid,
+    pub form: FormControl,
+    pub object_stream: FormObjectStream,
+    pub multi_page_x: Option<MultiPageXStream>,
+    pub children: Vec<EmbeddedParentControlModel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbeddedParentControlModel {
+    pub site_index: usize,
+    pub storage_name: String,
+    pub storage: Box<ParentControlStorageModel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParentControlStorageCfbIdentity {
+    pub path: PathBuf,
+    pub class_id: Guid,
+    pub children: Vec<ParentControlStorageCfbIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocatedParentControlStorage {
+    identity: ParentControlStorageCfbIdentity,
+    model: ParentControlStorageModel,
+    source_model: ParentControlStorageModel,
+}
+
+impl LocatedParentControlStorage {
+    pub fn from_compound(compound: &CompoundFile, path: impl AsRef<Path>) -> Result<Self> {
+        Ok(ParentControlStorage::from_compound(compound, path)?.into())
+    }
+
+    pub const fn model(&self) -> &ParentControlStorageModel {
+        &self.model
+    }
+
+    pub const fn identity(&self) -> &ParentControlStorageCfbIdentity {
+        &self.identity
+    }
+
+    pub fn is_modified(&self) -> bool {
+        self.model != self.source_model
+    }
+
+    pub fn edit<T>(
+        &mut self,
+        edit: impl FnOnce(&mut ParentControlStorageModel) -> Result<T>,
+    ) -> Result<T> {
+        let mut candidate = self.model.clone();
+        let result = edit(&mut candidate)?;
+        let legacy = parent_storage_from_model(&self.identity, &candidate)?;
+        legacy.validate_tree(0)?;
+        self.model = candidate;
+        Ok(result)
+    }
+
+    pub(crate) fn write_if_modified(&self, compound: &mut CompoundFile) -> Result<()> {
+        if !self.is_modified() {
+            return Ok(());
+        }
+        let legacy = parent_storage_from_model(&self.identity, &self.model)?;
+        let mut candidate = compound.clone();
+        legacy.write_to_compound(&mut candidate)?;
+        *compound = candidate;
+        Ok(())
+    }
+
+    pub(crate) fn discover_below(
+        compound: &CompoundFile,
+        project_root: &Path,
+    ) -> Result<Vec<Self>> {
+        let mut candidates = compound
+            .entries()
+            .iter()
+            .filter(|entry| {
+                entry.is_storage()
+                    && entry.path != project_root
+                    && entry.path.starts_with(project_root)
+                    && compound.entries().iter().any(|child| {
+                        child.is_stream()
+                            && child.path.parent() == Some(entry.path.as_path())
+                            && child.name.eq_ignore_ascii_case("f")
+                    })
+                    && compound.entries().iter().any(|child| {
+                        child.is_stream()
+                            && child.path.parent() == Some(entry.path.as_path())
+                            && child.name.eq_ignore_ascii_case("o")
+                    })
+            })
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|path| path.components().count());
+
+        let mut roots = Vec::<PathBuf>::new();
+        for path in candidates {
+            if roots
+                .iter()
+                .any(|root| path != *root && path.starts_with(root))
+            {
+                continue;
+            }
+            roots.push(path);
+        }
+        roots.sort();
+        roots
+            .into_iter()
+            .map(|path| Self::from_compound(compound, path))
+            .collect()
+    }
+}
+
+impl From<ParentControlStorage> for LocatedParentControlStorage {
+    fn from(storage: ParentControlStorage) -> Self {
+        let (identity, model) = split_parent_storage(storage);
+        Self {
+            identity,
+            source_model: model.clone(),
+            model,
+        }
+    }
+}
+
+fn split_parent_storage(
+    storage: ParentControlStorage,
+) -> (ParentControlStorageCfbIdentity, ParentControlStorageModel) {
+    let mut child_identities = Vec::with_capacity(storage.children.len());
+    let mut child_models = Vec::with_capacity(storage.children.len());
+    for child in storage.children {
+        let (identity, model) = split_parent_storage(*child.storage);
+        child_identities.push(identity);
+        child_models.push(EmbeddedParentControlModel {
+            site_index: child.site_index,
+            storage_name: child.storage_name,
+            storage: Box::new(model),
+        });
+    }
+    (
+        ParentControlStorageCfbIdentity {
+            path: storage.path,
+            class_id: storage.class_id,
+            children: child_identities,
+        },
+        ParentControlStorageModel {
+            class_id: storage.class_id,
+            form: storage.form,
+            object_stream: storage.object_stream,
+            multi_page_x: storage.multi_page_x,
+            children: child_models,
+        },
+    )
+}
+
+fn parent_storage_from_model(
+    identity: &ParentControlStorageCfbIdentity,
+    model: &ParentControlStorageModel,
+) -> Result<ParentControlStorage> {
+    if identity.class_id != model.class_id {
+        return Err(Error::invalid(
+            0,
+            "Forms storage CLSID does not match its stable CFB identity",
+        ));
+    }
+    if identity.children.len() != model.children.len() {
+        return Err(Error::invalid(
+            0,
+            "Forms child model and CFB identity counts differ",
+        ));
+    }
+    let children = model
+        .children
+        .iter()
+        .zip(&identity.children)
+        .map(|(child, child_identity)| {
+            let expected_path = identity.path.join(&child.storage_name);
+            if child_identity.path != expected_path {
+                return Err(Error::invalid(
+                    0,
+                    "Forms child storage name does not match its stable CFB identity",
+                ));
+            }
+            Ok(EmbeddedParentControl {
+                site_index: child.site_index,
+                storage_name: child.storage_name.clone(),
+                storage: Box::new(parent_storage_from_model(child_identity, &child.storage)?),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ParentControlStorage {
+        path: identity.path.clone(),
+        class_id: model.class_id,
+        form: model.form.clone(),
+        object_stream: model.object_stream.clone(),
+        multi_page_x: model.multi_page_x.clone(),
+        children,
+    })
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MorphDataDataBlock {
     pub various_property_bits: Option<AlignedValue<VariousPropertiesBitfield>>,
@@ -3878,8 +4079,47 @@ impl ParentControlStorage {
 
     const MAX_PARENT_DEPTH: usize = 256;
 
+    pub fn is_parent_class_id(class_id: Guid) -> bool {
+        matches!(
+            class_id,
+            Self::MULTI_PAGE_CLASS_ID | Self::FRAME_CLASS_ID | Self::PAGE_CLASS_ID
+        )
+    }
+
     pub fn from_compound(compound: &CompoundFile, path: impl AsRef<Path>) -> Result<Self> {
         Self::from_compound_at_depth(compound, path.as_ref(), 0)
+    }
+
+    fn validate_tree(&self, depth: usize) -> Result<()> {
+        if depth > Self::MAX_PARENT_DEPTH {
+            return Err(Error::Limit(format!(
+                "MS-OFORMS parent storage nesting exceeds {}",
+                Self::MAX_PARENT_DEPTH
+            )));
+        }
+        validate_parent_children(&self.path, &self.form, &self.children)?;
+        match (
+            self.class_id == Self::MULTI_PAGE_CLASS_ID,
+            &self.multi_page_x,
+        ) {
+            (true, Some(value)) => validate_multi_page_children(&self.form, &self.children, value)?,
+            (false, None) => {}
+            _ => {
+                return Err(mask_field_mismatch(
+                    "ParentControlStorage",
+                    "MultiPage x stream",
+                ));
+            }
+        }
+        self.form.to_bytes()?;
+        self.object_stream.to_bytes(&self.form)?;
+        if let Some(value) = &self.multi_page_x {
+            value.to_bytes()?;
+        }
+        for child in &self.children {
+            child.storage.validate_tree(depth + 1)?;
+        }
+        Ok(())
     }
 
     fn from_compound_at_depth(compound: &CompoundFile, path: &Path, depth: usize) -> Result<Self> {
@@ -7143,6 +7383,7 @@ fn validate_control_various(
             common
                 | Bits::LOCKED
                 | Bits::COLUMN_HEADS
+                | Bits::INTEGRAL_HEIGHT
                 | Bits::MATCH_REQUIRED
                 | Bits::EDITABLE
                 | Bits::DRAG_BEHAVIOR
@@ -7192,7 +7433,11 @@ fn validate_control_various(
     if value.bits() & !allowed.bits() != 0 {
         return Err(Error::invalid(
             0,
-            format!("VariousPropertyBits contains fields that do not apply to {class:?}"),
+            format!(
+                "VariousPropertyBits 0x{:08x} contains fields 0x{:08x} that do not apply to {class:?}",
+                value.bits(),
+                value.bits() & !allowed.bits()
+            ),
         ));
     }
 
@@ -8717,6 +8962,32 @@ mod tests {
             parent_form.to_bytes().unwrap()
         );
         assert_eq!(compound.stream("/Form/i01/f").unwrap(), EMPTY_FORM);
+
+        let mut located = LocatedParentControlStorage::from_compound(&compound, "/Form").unwrap();
+        let identity = located.identity.clone();
+        let before_failed_edit = located.clone();
+        let failed: Result<()> = located.edit(|model| {
+            model.class_id = ParentControlStorage::FRAME_CLASS_ID;
+            Ok(())
+        });
+        assert!(failed.is_err());
+        assert_eq!(located, before_failed_edit);
+        located
+            .edit(|model| {
+                model.form.picture_tiling = true;
+                model
+                    .form
+                    .property_mask
+                    .insert(FormPropertyMask::PICTURE_TILING);
+                Ok(())
+            })
+            .unwrap();
+        located.write_if_modified(&mut compound).unwrap();
+        let reopened = LocatedParentControlStorage::from_compound(&compound, "/Form").unwrap();
+        assert_eq!(reopened.identity, identity);
+        assert!(reopened.model().form.picture_tiling);
+        assert!(!reopened.is_modified());
+        assert_eq!(compound.stream("/Form/custom").unwrap(), [9, 8, 7]);
 
         compound.remove_entry("/Form/i01/o").unwrap();
         assert!(ParentControlStorage::from_compound(&compound, "/Form").is_err());

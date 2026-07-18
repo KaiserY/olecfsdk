@@ -15,6 +15,7 @@ pub mod ppt;
 pub mod property_set;
 pub mod save;
 pub mod shared;
+pub mod shared_content;
 pub mod vba;
 pub mod xls;
 

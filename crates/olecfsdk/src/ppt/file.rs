@@ -13,6 +13,7 @@ use std::path::Path;
 use crate::{
     Error, Result,
     cfb::CompoundFile,
+    forms::ParentControlStorageModel,
     io::BinaryFormat,
     limits::Limits,
     office_art::{
@@ -23,6 +24,9 @@ use crate::{
         compound_from_bytes, compound_from_path, compound_outcome,
     },
     save::SaveOptions,
+    shared_content::{
+        OfficeFormsMutation, OfficeHostKind, OfficeSharedContent, OfficeVbaModuleMutation,
+    },
 };
 
 use super::{
@@ -47,6 +51,7 @@ const PICTURES_STREAM: &str = "/Pictures";
 #[derive(Clone, Debug, PartialEq)]
 pub struct PptFile {
     compound_file: CompoundFile,
+    pub shared: OfficeSharedContent,
     pub document: PowerPointDocument,
     pub current_user: CurrentUserStream,
     pub pictures: Option<PicturesStream>,
@@ -571,15 +576,108 @@ impl PptFile {
                 ));
             }
         }
+        let shared = OfficeSharedContent::from_compound_file_with_host(
+            &compound_file,
+            options,
+            Some(OfficeHostKind::Ppt),
+        )?;
+        diagnostics.extend(shared.diagnostics);
         Ok(ParseOutcome::new(
             Self {
                 compound_file,
+                shared: shared.value,
                 document,
                 current_user,
                 pictures,
             },
             diagnostics,
         ))
+    }
+
+    /// Transactionally edits the VBA project selected by the current PPT
+    /// persist directory, recompressing its external storage when necessary.
+    pub fn replace_vba_module_source(
+        &mut self,
+        stream_name: &str,
+        source: &[u8],
+    ) -> Result<OfficeVbaModuleMutation> {
+        let mut candidate = self.clone();
+        let CurrentUserData::Parsed(current_user) = &candidate.current_user.data else {
+            return Err(Error::invalid(
+                0,
+                "PPT VBA mutation requires a conforming CurrentUserAtom",
+            ));
+        };
+        let record_index = candidate
+            .document
+            .live_presentation(current_user)?
+            .vba_project
+            .ok_or_else(|| Error::invalid(0, "PPT live presentation has no VBA project"))?
+            .reference
+            .record_index;
+        let record = candidate
+            .document
+            .records
+            .records
+            .get_mut(record_index)
+            .ok_or_else(|| Error::invalid(0, "PPT VBA persist record index is out of bounds"))?;
+        let PptRecordData::ExternalStorage(storage) = &mut record.data else {
+            return Err(Error::invalid(
+                record.offset,
+                "PPT VBA persist object is not an ExternalStorage record",
+            ));
+        };
+        let vba = storage.replace_vba_module_source(stream_name, source)?;
+        let invalidated_oleps_signatures = candidate.shared.invalidate_oleps_vba_signatures()?;
+        candidate.relayout()?;
+        *self = candidate;
+        Ok(OfficeVbaModuleMutation {
+            vba,
+            invalidated_oleps_signatures,
+            invalidated_host_signatures: 0,
+        })
+    }
+
+    /// Transactionally edits a Designer storage in the live PPT VBA project.
+    pub fn edit_vba_designer_storage(
+        &mut self,
+        index: usize,
+        edit: impl FnOnce(&mut ParentControlStorageModel) -> Result<()>,
+    ) -> Result<OfficeFormsMutation> {
+        let mut candidate = self.clone();
+        let CurrentUserData::Parsed(current_user) = &candidate.current_user.data else {
+            return Err(Error::invalid(
+                0,
+                "PPT Forms mutation requires a conforming CurrentUserAtom",
+            ));
+        };
+        let record_index = candidate
+            .document
+            .live_presentation(current_user)?
+            .vba_project
+            .ok_or_else(|| Error::invalid(0, "PPT live presentation has no VBA project"))?
+            .reference
+            .record_index;
+        let record = candidate
+            .document
+            .records
+            .records
+            .get_mut(record_index)
+            .ok_or_else(|| Error::invalid(0, "PPT VBA persist record index is out of bounds"))?;
+        let PptRecordData::ExternalStorage(storage) = &mut record.data else {
+            return Err(Error::invalid(
+                record.offset,
+                "PPT VBA persist object is not an ExternalStorage record",
+            ));
+        };
+        storage.edit_vba_designer_storage(index, edit)?;
+        let invalidated_oleps_signatures = candidate.shared.invalidate_oleps_vba_signatures()?;
+        candidate.relayout()?;
+        *self = candidate;
+        Ok(OfficeFormsMutation {
+            invalidated_oleps_signatures,
+            invalidated_host_signatures: 0,
+        })
     }
 
     /// Rebuilds all managed streams from their typed trees and returns CFB.
@@ -651,6 +749,7 @@ impl PptFile {
             PICTURES_STREAM,
             self.pictures.as_ref().map(PicturesStream::to_bytes),
         )?;
+        self.shared.write_to_compound_file(&mut compound, options)?;
         Ok(compound)
     }
 

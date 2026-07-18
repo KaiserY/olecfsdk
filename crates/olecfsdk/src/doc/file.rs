@@ -18,6 +18,7 @@ use std::{
 use crate::{
     Error, Result,
     cfb::CompoundFile,
+    forms::ParentControlStorageModel,
     io::BinaryFormat,
     limits::Limits,
     office_art::{
@@ -30,6 +31,9 @@ use crate::{
     },
     save::SaveOptions,
     shared::MsoEnvelope,
+    shared_content::{
+        OfficeFormsMutation, OfficeHostKind, OfficeSharedContent, OfficeVbaModuleMutation,
+    },
 };
 
 use super::{
@@ -914,6 +918,7 @@ pub struct DocCompatibilityObjectStorage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DocFile {
     compound_file: CompoundFile,
+    pub shared: OfficeSharedContent,
     pub word_document: DocWordDocumentStream,
     pub table: DocTableStream,
     pub data: Option<DocDataStream>,
@@ -4844,9 +4849,16 @@ impl DocFile {
             &mut diagnostics,
         )?;
         let object_pool = parse_object_pool(&compound_file, options, &mut diagnostics)?;
+        let shared = OfficeSharedContent::from_compound_file_with_host(
+            &compound_file,
+            options,
+            Some(OfficeHostKind::Doc),
+        )?;
+        diagnostics.extend(shared.diagnostics);
         Ok(ParseOutcome::new(
             Self {
                 compound_file,
+                shared: shared.value,
                 word_document,
                 table,
                 data,
@@ -4854,6 +4866,43 @@ impl DocFile {
             },
             diagnostics,
         ))
+    }
+
+    /// Replaces one host VBA module source and removes every host signature
+    /// that the mutation invalidates. The complete DOC tree is transactional.
+    pub fn replace_vba_module_source(
+        &mut self,
+        stream_name: &str,
+        source: &[u8],
+    ) -> Result<OfficeVbaModuleMutation> {
+        let mut candidate = self.clone();
+        let mut report = candidate
+            .shared
+            .replace_vba_module_source(stream_name, source)?;
+        if let Some(user_variables) = &mut candidate.table.user_variables {
+            report.invalidated_host_signatures = user_variables.value.remove_vba_signatures();
+            UserVariables::from_bytes(&user_variables.value.to_bytes()?)?;
+        }
+        candidate.validate_links()?;
+        *self = candidate;
+        Ok(report)
+    }
+
+    /// Transactionally edits one VBA Designer storage and invalidates DOC VBA signatures.
+    pub fn edit_vba_designer_storage(
+        &mut self,
+        index: usize,
+        edit: impl FnOnce(&mut ParentControlStorageModel) -> Result<()>,
+    ) -> Result<OfficeFormsMutation> {
+        let mut candidate = self.clone();
+        let mut report = candidate.shared.edit_vba_designer_storage(index, edit)?;
+        if let Some(user_variables) = &mut candidate.table.user_variables {
+            report.invalidated_host_signatures = user_variables.value.remove_vba_signatures();
+            UserVariables::from_bytes(&user_variables.value.to_bytes()?)?;
+        }
+        candidate.validate_links()?;
+        *self = candidate;
+        Ok(report)
     }
 
     /// Rebuilds managed streams from the typed tree and returns a strict CFB.
@@ -4868,7 +4917,7 @@ impl DocFile {
 
     /// Rebuilds managed streams under the requested compatibility policy.
     pub fn to_compound_file_with_options(&self, options: SaveOptions) -> Result<CompoundFile> {
-        let compound = self.to_compound_file_with_current_layout()?;
+        let compound = self.to_compound_file_with_current_layout(options)?;
         if !options.preserves_compatibility() {
             // Validate the bytes the native CFB writer actually emits.  The
             // source tree may carry compatibility-only physical CFB state
@@ -4886,7 +4935,7 @@ impl DocFile {
         Ok(())
     }
 
-    fn to_compound_file_with_current_layout(&self) -> Result<CompoundFile> {
+    fn to_compound_file_with_current_layout(&self, options: SaveOptions) -> Result<CompoundFile> {
         self.validate_links()?;
         let mut word = self.word_document.physical_bytes.clone();
         let mut table = TableLayout::new(self.table.physical_bytes.clone());
@@ -5655,6 +5704,7 @@ impl DocFile {
                     .replace_stream(&object.descriptor_stream_path, object.descriptor.to_bytes())?;
             }
         }
+        self.shared.write_to_compound_file(&mut compound, options)?;
         Ok(compound)
     }
 
@@ -5667,7 +5717,9 @@ impl DocFile {
     }
 
     pub fn to_bytes_with_options(&self, options: SaveOptions) -> Result<Vec<u8>> {
-        let bytes = self.to_compound_file_with_current_layout()?.to_bytes()?;
+        let bytes = self
+            .to_compound_file_with_current_layout(options)?
+            .to_bytes()?;
         Self::validate_emitted_bytes(&bytes, options)?;
         Ok(bytes)
     }

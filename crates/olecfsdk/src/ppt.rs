@@ -14,6 +14,7 @@ use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use crate::{
     Error, Result, SdkBitfield, SdkObject,
     cfb::CompoundFile,
+    forms::ParentControlStorageModel,
     io::{BinaryFormat, Reader, SdkRead, SdkWrite, Writer},
     limits::Limits,
     office_art::{
@@ -24,7 +25,7 @@ use crate::{
         collect_office_art_record_blip_references,
     },
     parse::{ParseDiagnostic, ParseDiagnosticCode, ParseOutcome, SpecificationReference},
-    vba::VbaProject,
+    vba::{LocatedVbaProject, VbaModuleSourceMutation, VbaProject},
 };
 
 const HEADER_LEN: usize = 8;
@@ -1839,15 +1840,29 @@ pub enum ExternalStorageAtom {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParsedExternalStorage {
-    pub compound_file: CompoundFile,
-    pub encoding: ExternalStorageEncoding,
-    pub vba_project: ExternalStorageVba,
+    compound_file: CompoundFile,
+    encoding: ExternalStorageEncoding,
+    vba_project: ExternalStorageVba,
+}
+
+impl ParsedExternalStorage {
+    pub const fn compound_file(&self) -> &CompoundFile {
+        &self.compound_file
+    }
+
+    pub const fn vba_project(&self) -> &ExternalStorageVba {
+        &self.vba_project
+    }
+
+    pub const fn encoding(&self) -> &ExternalStorageEncoding {
+        &self.encoding
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExternalStorageVba {
     NotPresent,
-    Parsed(Box<VbaProject>),
+    Parsed(Box<LocatedVbaProject>),
     Invalid(String),
 }
 
@@ -7180,12 +7195,78 @@ impl ExternalStorageAtom {
             Limits::default(),
         ))))
     }
+
+    pub(crate) fn replace_vba_module_source(
+        &mut self,
+        stream_name: &str,
+        source: &[u8],
+    ) -> Result<VbaModuleSourceMutation> {
+        let Self::Parsed(storage) = self else {
+            return Err(Error::invalid(
+                0,
+                "PPT VBA project storage is not a parsed external storage",
+            ));
+        };
+        let ExternalStorageVba::Parsed(project) = &mut storage.vba_project else {
+            return Err(Error::invalid(
+                0,
+                "PPT external storage has no parsed VBA project",
+            ));
+        };
+        let report = project.replace_module_source(stream_name, source)?;
+        project.write_if_modified(&mut storage.compound_file)?;
+        if matches!(storage.encoding, ExternalStorageEncoding::Zlib { .. }) {
+            let storage_bytes = storage.compound_file.to_bytes()?;
+            let declared_decompressed_size = u32::try_from(storage_bytes.len())
+                .map_err(|_| Error::Limit("external storage exceeds u32".into()))?;
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&storage_bytes)?;
+            storage.encoding = ExternalStorageEncoding::Zlib {
+                declared_decompressed_size,
+                compressed_bytes: encoder.finish()?,
+            };
+        }
+        Ok(report)
+    }
+
+    pub(crate) fn edit_vba_designer_storage(
+        &mut self,
+        index: usize,
+        edit: impl FnOnce(&mut ParentControlStorageModel) -> Result<()>,
+    ) -> Result<()> {
+        let Self::Parsed(storage) = self else {
+            return Err(Error::invalid(
+                0,
+                "PPT VBA project storage is not a parsed external storage",
+            ));
+        };
+        let ExternalStorageVba::Parsed(project) = &mut storage.vba_project else {
+            return Err(Error::invalid(
+                0,
+                "PPT external storage has no parsed VBA project",
+            ));
+        };
+        project.edit_designer_storage(index, edit)?;
+        project.write_if_modified(&mut storage.compound_file)?;
+        if matches!(storage.encoding, ExternalStorageEncoding::Zlib { .. }) {
+            let storage_bytes = storage.compound_file.to_bytes()?;
+            let declared_decompressed_size = u32::try_from(storage_bytes.len())
+                .map_err(|_| Error::Limit("external storage exceeds u32".into()))?;
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&storage_bytes)?;
+            storage.encoding = ExternalStorageEncoding::Zlib {
+                declared_decompressed_size,
+                compressed_bytes: encoder.finish()?,
+            };
+        }
+        Ok(())
+    }
 }
 
 impl ParsedExternalStorage {
     fn new(compound_file: CompoundFile, encoding: ExternalStorageEncoding, limits: Limits) -> Self {
         let vba_project = if VbaProject::is_present(&compound_file) {
-            match VbaProject::from_compound_file_with_limits(&compound_file, limits) {
+            match LocatedVbaProject::from_compound_file_with_limits(&compound_file, limits) {
                 Ok(project) => ExternalStorageVba::Parsed(Box::new(project)),
                 Err(error) => ExternalStorageVba::Invalid(error.to_string()),
             }

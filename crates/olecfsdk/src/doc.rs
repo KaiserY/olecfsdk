@@ -7354,6 +7354,17 @@ impl UserVariable {
     }
 }
 
+impl UserVariables {
+    /// Removes every MS-DOC VBA signature variable while retaining ordinary
+    /// user variables and their order.
+    pub fn remove_vba_signatures(&mut self) -> usize {
+        let before = self.variables.len();
+        self.variables
+            .retain(|variable| variable.kind() == UserVariableKind::Ordinary);
+        before - self.variables.len()
+    }
+}
+
 fn utf16_equals_ascii(value: &[u16], expected: &[u8]) -> bool {
     value.len() == expected.len()
         && value
@@ -22321,6 +22332,13 @@ mod tests {
         assert_eq!(
             variables.variables[2].kind(),
             UserVariableKind::VbaSignatureV3
+        );
+        let mut unsigned = variables.clone();
+        assert_eq!(unsigned.remove_vba_signatures(), 2);
+        assert_eq!(unsigned.variables, variables.variables[..1]);
+        assert_eq!(
+            UserVariables::from_bytes(&unsigned.to_bytes().unwrap()).unwrap(),
+            unsigned
         );
 
         let duplicate = UserVariables {
