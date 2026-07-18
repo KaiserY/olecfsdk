@@ -18,7 +18,7 @@ use crate::{
     cfb::{CompoundFile, Entry, EntryKind},
     common::Guid,
     forms::ParentControlStorageModel,
-    io::BinaryFormat,
+    io::{BinaryFormat, SdkEnumValue},
     limits::Limits,
     office_art::{OfficeArtDrawingGraph, OfficeArtStream},
     parse::{
@@ -32,22 +32,24 @@ use crate::{
 };
 
 use super::{
-    ArrayRecord, BCUsrsRecord, BiffConstant, BiffRecord, BiffRecordData, BiffStream, BlankRecord,
-    BoolErrRecord, BoundSheet8Record, CUsrRecord, CbUsrRecord, CellHeader, CellRange,
-    ColInfoRecord, DevModeW, ExtSstRecord, ExternNameBody, ExternNameRecord, ExternSheetReference,
-    FeatureHeaderData, FileLockRecord, FontRecord, FormatRecord, FormulaRecord, FormulaTokenData,
-    FormulaTokens, HyperlinkObject, LabelRecord, LabelSstRecord, MergeCellsRecord, MsoDrawingData,
-    MsoDrawingHostData, MsoDrawingHostRecord, MsoDrawingRecord, MulBlankRecord, MulRkCell,
-    MulRkRecord, NameRecord, NameValue, NoteRecord, NumberRecord, ObjCommonData, ObjFormulaData,
-    ObjPictureFlags, ObjPictureFormula, ObjRecord, PivotCacheStream, PlsRecord, PrinterSettings,
-    RevisionLogStream, RkRecord, RowRecord, RrAutoFmtRecord, RrFormatRecord, RrInsertShRecord,
-    RrTabIdRecord, Rrd, RrdChgCellRecord, RrdConflictRecord, RrdDefNameRecord, RrdHeadRecord,
-    RrdInfoRecord, RrdInsDelRecord, RrdMoveRecord, RrdRenSheetRecord, RrdTqsifRecord,
-    RrdUserViewRecord, SharedFormulaRecord, ShortXlUnicodeString, SstCompletion, SstRecord,
-    SstString, StringValueRecord, SupBookLink, SupBookRecord, SupBookSheetName, SxStreamIdRecord,
-    SxViewRecord, SxVsRecord, TableRecord, UserBViewRecord, UserNamesStream,
-    UserSViewBeginChartRecord, UserSViewBeginRecord, UserSViewEndRecord, UsrChkRecord,
-    UsrExclRecord, UsrInfoRecord, XctRecord, XfRecord, XlStringCharacters,
+    ArrayRecord, BCUsrsRecord, BiffConstant, BiffRecord, BiffRecordData, BiffStream,
+    BiffUnicodeString, BlankRecord, BoolErrRecord, BoolErrValue, BoundSheet8Record, CUsrRecord,
+    CbUsrRecord, CellErrorCode, CellHeader, CellRange, ColInfoRecord, DevModeW, ExtSstRecord,
+    ExternNameBody, ExternNameRecord, ExternSheetReference, FeatureHeaderData, FileLockRecord,
+    FontRecord, FormatRecord, FormulaCachedResult, FormulaRecord, FormulaTokenData, FormulaTokens,
+    HyperlinkMoniker, HyperlinkObject, HyperlinkRecord, LabelRecord, LabelSstRecord,
+    MergeCellsRecord, MsoDrawingData, MsoDrawingHostData, MsoDrawingHostRecord, MsoDrawingRecord,
+    MulBlankRecord, MulRkCell, MulRkRecord, NameRecord, NameValue, NoteRecord, NumberRecord,
+    ObjCommonData, ObjFormulaData, ObjPictureFlags, ObjPictureFormula, ObjRecord, PivotCacheStream,
+    PlsRecord, PrinterSettings, RevisionLogStream, RkRecord, RowRecord, RrAutoFmtRecord,
+    RrFormatRecord, RrInsertShRecord, RrTabIdRecord, Rrd, RrdChgCellRecord, RrdConflictRecord,
+    RrdDefNameRecord, RrdHeadRecord, RrdInfoRecord, RrdInsDelRecord, RrdMoveRecord,
+    RrdRenSheetRecord, RrdTqsifRecord, RrdUserViewRecord, SharedFormulaRecord,
+    ShortXlUnicodeString, SstCompletion, SstRecord, SstString, StringValueRecord, SupBookLink,
+    SupBookRecord, SupBookSheetName, SxStreamIdRecord, SxViewRecord, SxVsRecord, TableRecord,
+    TxoRecord, UserBViewRecord, UserNamesStream, UserSViewBeginChartRecord, UserSViewBeginRecord,
+    UserSViewEndRecord, UsrChkRecord, UsrExclRecord, UsrInfoRecord, XctRecord, XfRecord,
+    XlStringCharacters,
 };
 
 const WORKBOOK_STREAM: &str = "/Workbook";
@@ -440,11 +442,14 @@ pub enum XlsNumberFormatRef<'a> {
     Compatibility(u16),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct XlsCellFormatRef<'a> {
     pub xf: &'a XfRecord,
     pub font: &'a FontRecord,
     pub number_format: XlsNumberFormatRef<'a>,
+    /// Native custom format code. Built-in formats have no file-owned string
+    /// and therefore leave this field as `None`.
+    pub custom_number_format_code: Option<String>,
 }
 
 /// One logical cell borrowing its exact source BIFF record. MULRK and
@@ -476,6 +481,77 @@ pub enum XlsCellValueRef<'a> {
         parent: &'a MulBlankRecord,
         index: usize,
     },
+}
+
+/// Native stored value of one logical BIFF cell. Formula tokens remain on
+/// [`XlsFormulaRef`]; this value is the exact cached scalar stored in the file.
+#[derive(Clone, Debug, PartialEq)]
+pub enum XlsCellValue {
+    Blank,
+    Number(f64),
+    Boolean(bool),
+    Error(CellErrorCode),
+    String(String),
+    Formula(XlsFormulaCachedValue),
+    /// Exact producer-compatible BoolErr representation that cannot be a
+    /// conforming BIFF8 Boolean or error scalar.
+    CompatibilityBoolErr {
+        value: u16,
+        is_error: u8,
+    },
+}
+
+/// Native cached result stored by a Formula record. String results borrow no
+/// second tree: they are decoded on demand from the adjacent String record.
+#[derive(Clone, Debug, PartialEq)]
+pub enum XlsFormulaCachedValue {
+    Number(f64),
+    String(String),
+    Boolean(bool),
+    Error(CellErrorCode),
+    Empty,
+}
+
+/// One NoteSh cell comment joined to its Obj and TxO owners inside the same
+/// MsoDrawing aggregate. String fields are native values; the physical BIFF
+/// nodes remain uniquely owned by the workbook tree.
+#[derive(Clone, Debug)]
+pub struct XlsCommentRef<'a> {
+    source_record: &'a BiffRecord,
+    note_host: &'a MsoDrawingHostRecord,
+    note: &'a NoteRecord,
+    object: XlsObjectRef<'a>,
+    text_host: &'a MsoDrawingHostRecord,
+    text_object: &'a TxoRecord,
+    pub author: String,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum XlsHyperlinkTarget<'a> {
+    String(String),
+    Url(String),
+    File {
+        short_name: &'a [u8],
+        long_path: Option<String>,
+    },
+    Standard {
+        class_id: [u8; 16],
+        options: u16,
+        data: &'a [u8],
+    },
+}
+
+/// One HLink record with its file-native strings decoded losslessly. A record
+/// can contain both a moniker target and a location fragment.
+#[derive(Clone, Debug)]
+pub struct XlsHyperlinkRef<'a> {
+    source_record: &'a BiffRecord,
+    value: &'a HyperlinkRecord,
+    pub display_name: Option<String>,
+    pub target_frame_name: Option<String>,
+    pub location: Option<String>,
+    pub target: Option<XlsHyperlinkTarget<'a>>,
 }
 
 /// Mutable view of one logical cell selected through the relationship tree.
@@ -2546,6 +2622,91 @@ impl<'a> XlsSheetRef<'a> {
         self.merge_records().flat_map(|record| record.ranges.iter())
     }
 
+    pub fn hyperlinks(self) -> Result<Vec<XlsHyperlinkRef<'a>>> {
+        self.direct_records()
+            .filter_map(|record| match &record.data {
+                BiffRecordData::Hyperlink(value) => Some((record, value)),
+                _ => None,
+            })
+            .map(|(record, value)| make_hyperlink_ref(record, value))
+            .collect()
+    }
+
+    pub fn comments(self) -> Result<Vec<XlsCommentRef<'a>>> {
+        let mut comments = Vec::new();
+        for source_record in self.direct_records() {
+            let BiffRecordData::MsoDrawing(drawing) = &source_record.data else {
+                continue;
+            };
+            for note_host in &drawing.host_records {
+                let MsoDrawingHostData::Note(note) = &note_host.data else {
+                    continue;
+                };
+                let mut objects =
+                    drawing
+                        .host_records
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(host_index, host)| {
+                            let value = match &host.data {
+                                MsoDrawingHostData::Obj(value)
+                                | MsoDrawingHostData::ObjCompatibility { value, .. } => value,
+                                _ => return None,
+                            };
+                            (value
+                                .common()
+                                .is_some_and(|common| common.object_id == note.object_id))
+                            .then_some((host_index, host, value))
+                        });
+                let Some((object_index, object_host, object_value)) = objects.next() else {
+                    return Err(Error::invalid(
+                        u64::from(source_record.offset),
+                        format!("NoteSh object ID {} has no Obj owner", note.object_id),
+                    ));
+                };
+                if objects.next().is_some() {
+                    return Err(Error::invalid(
+                        u64::from(source_record.offset),
+                        format!(
+                            "NoteSh object ID {} has multiple Obj owners",
+                            note.object_id
+                        ),
+                    ));
+                }
+                let text_host = drawing.host_records.get(object_index + 1).ok_or_else(|| {
+                    Error::invalid(
+                        u64::from(source_record.offset),
+                        format!("comment Obj {} has no following TxO", note.object_id),
+                    )
+                })?;
+                let MsoDrawingHostData::Txo(text_object) = &text_host.data else {
+                    return Err(Error::invalid(
+                        u64::from(source_record.offset),
+                        format!("comment Obj {} is not followed by TxO", note.object_id),
+                    ));
+                };
+                let author = decode_biff_unicode_string(&note.author)?;
+                let content = decode_xl_string_sequence(
+                    text_object
+                        .text_chunks
+                        .iter()
+                        .map(|chunk| &chunk.characters),
+                )?;
+                comments.push(XlsCommentRef {
+                    source_record,
+                    note_host,
+                    note,
+                    object: XlsObjectRef::new(source_record, Some(object_host), object_value),
+                    text_host,
+                    text_object,
+                    author,
+                    content,
+                });
+            }
+        }
+        Ok(comments)
+    }
+
     pub fn drawings(self) -> impl Iterator<Item = XlsDrawingRef<'a>> {
         self.direct_records()
             .filter_map(move |record| match &record.data {
@@ -2925,6 +3086,67 @@ impl<'a> XlsSparseCellIndex<'a> {
         self.cells.get(&(row, column)).map_or(&[], Vec::as_slice)
     }
 
+    fn ensure_cell(&self, cell: XlsCellRef<'a>) -> Result<()> {
+        if self
+            .cells_at(cell.cell.row, cell.cell.column)
+            .iter()
+            .any(|candidate| {
+                candidate.cell == cell.cell
+                    && std::ptr::eq(candidate.source_record, cell.source_record)
+            })
+        {
+            return Ok(());
+        }
+        Err(Error::invalid(
+            u64::from(cell.source_record.offset),
+            "cell does not belong to this sparse index",
+        ))
+    }
+
+    pub fn merged_ranges(&self, cell: XlsCellRef<'a>) -> Result<Vec<&'a CellRange>> {
+        self.ensure_cell(cell)?;
+        Ok(self
+            .sheet
+            .merged_cells()
+            .filter(|range| {
+                (range.first_row..=range.last_row).contains(&cell.cell.row)
+                    && (range.first_column..=range.last_column).contains(&cell.cell.column)
+            })
+            .collect())
+    }
+
+    pub fn hyperlinks(&self, cell: XlsCellRef<'a>) -> Result<Vec<XlsHyperlinkRef<'a>>> {
+        self.ensure_cell(cell)?;
+        Ok(self
+            .sheet
+            .hyperlinks()?
+            .into_iter()
+            .filter(|link| {
+                (link.value.first_row..=link.value.last_row).contains(&cell.cell.row)
+                    && (link.value.first_column..=link.value.last_column)
+                        .contains(&cell.cell.column)
+            })
+            .collect())
+    }
+
+    pub fn comment(&self, cell: XlsCellRef<'a>) -> Result<Option<XlsCommentRef<'a>>> {
+        self.ensure_cell(cell)?;
+        let mut comments = self.sheet.comments()?.into_iter().filter(|comment| {
+            comment.note.row == cell.cell.row && comment.note.column == cell.cell.column
+        });
+        let first = comments.next();
+        if comments.next().is_some() {
+            return Err(Error::invalid(
+                u64::from(cell.source_record.offset),
+                format!(
+                    "cell ({}, {}) has multiple NoteSh comments",
+                    cell.cell.row, cell.cell.column
+                ),
+            ));
+        }
+        Ok(first)
+    }
+
     pub fn duplicate_cells(&self) -> impl Iterator<Item = ((u16, u16), &[XlsCellRef<'a>])> + '_ {
         self.cells.iter().filter_map(|(&coordinate, cells)| {
             (cells.len() > 1).then_some((coordinate, cells.as_slice()))
@@ -3034,6 +3256,42 @@ impl<'a> XlsDrawingGroupRef<'a> {
             MsoDrawingData::Complete(value) => Some(value),
             MsoDrawingData::Partial(_) | MsoDrawingData::Incomplete { .. } => None,
         }
+    }
+}
+
+impl<'a> XlsCommentRef<'a> {
+    pub const fn source_record(&self) -> &'a BiffRecord {
+        self.source_record
+    }
+
+    pub const fn note_host(&self) -> &'a MsoDrawingHostRecord {
+        self.note_host
+    }
+
+    pub const fn note(&self) -> &'a NoteRecord {
+        self.note
+    }
+
+    pub const fn object(&self) -> XlsObjectRef<'a> {
+        self.object
+    }
+
+    pub const fn text_host(&self) -> &'a MsoDrawingHostRecord {
+        self.text_host
+    }
+
+    pub const fn text_object(&self) -> &'a TxoRecord {
+        self.text_object
+    }
+}
+
+impl<'a> XlsHyperlinkRef<'a> {
+    pub const fn source_record(&self) -> &'a BiffRecord {
+        self.source_record
+    }
+
+    pub const fn value(&self) -> &'a HyperlinkRecord {
+        self.value
     }
 }
 
@@ -3172,6 +3430,185 @@ impl<'a> XlsFormulaRef<'a> {
     pub const fn definition(self) -> XlsFormulaDefinitionRef<'a> {
         self.definition
     }
+
+    pub fn cached_value(self) -> Result<XlsFormulaCachedValue> {
+        let special = match self.formula.cached_result {
+            FormulaCachedResult::NumberBits(bits) => {
+                return Ok(XlsFormulaCachedValue::Number(f64::from_bits(bits)));
+            }
+            FormulaCachedResult::Special(special) => special,
+        };
+        match special.kind {
+            0 => self
+                .cached_string
+                .ok_or_else(|| {
+                    Error::invalid(
+                        u64::from(self.source_record.offset),
+                        "Formula string result has no following String record",
+                    )
+                })
+                .and_then(decode_formula_string)
+                .map(XlsFormulaCachedValue::String),
+            1 => Ok(XlsFormulaCachedValue::Boolean(special.value != 0)),
+            2 => CellErrorCode::from_raw(special.value)
+                .map(XlsFormulaCachedValue::Error)
+                .ok_or_else(|| {
+                    Error::invalid(
+                        u64::from(self.source_record.offset),
+                        format!(
+                            "Formula cached error code 0x{:02x} is invalid",
+                            special.value
+                        ),
+                    )
+                }),
+            3 => Ok(XlsFormulaCachedValue::Empty),
+            _ => unreachable!("FormulaCachedResult parsing validates special kinds"),
+        }
+    }
+}
+
+fn decode_formula_string(value: &StringValueRecord) -> Result<String> {
+    decode_xl_string_sequence(value.chunks.iter().map(|chunk| &chunk.characters))
+}
+
+fn decode_biff_unicode_string(value: &BiffUnicodeString) -> Result<String> {
+    decode_xl_string_sequence(std::iter::once(&value.characters))
+}
+
+fn decode_sst_string(value: &SstString) -> Result<String> {
+    decode_xl_string_sequence(value.character_chunks.iter().map(|chunk| &chunk.characters))
+}
+
+fn decode_xl_string_sequence<'a>(
+    values: impl IntoIterator<Item = &'a XlStringCharacters>,
+) -> Result<String> {
+    let mut code_units = Vec::new();
+    for value in values {
+        match value {
+            XlStringCharacters::Compressed(bytes) => {
+                code_units.extend(bytes.iter().copied().map(u16::from));
+            }
+            XlStringCharacters::Unicode(units) => code_units.extend_from_slice(units),
+        }
+    }
+    String::from_utf16(&code_units)
+        .map_err(|_| Error::invalid(0, "XLS string contains an unpaired UTF-16 surrogate"))
+}
+
+fn decode_hyperlink_utf16(code_units: &[u16]) -> Result<String> {
+    let value = code_units.strip_suffix(&[0]).unwrap_or(code_units);
+    String::from_utf16(value)
+        .map_err(|_| Error::invalid(0, "XLS hyperlink contains an unpaired UTF-16 surrogate"))
+}
+
+fn make_hyperlink_ref<'a>(
+    source_record: &'a BiffRecord,
+    value: &'a HyperlinkRecord,
+) -> Result<XlsHyperlinkRef<'a>> {
+    let HyperlinkObject::Parsed {
+        display_name,
+        target_frame_name,
+        moniker,
+        location,
+        ..
+    } = &value.object
+    else {
+        return Err(Error::invalid(
+            u64::from(source_record.offset),
+            "HLink object is not a conforming parsed hyperlink",
+        ));
+    };
+    let display_name = display_name
+        .as_ref()
+        .map(|value| decode_hyperlink_utf16(&value.characters))
+        .transpose()?;
+    let target_frame_name = target_frame_name
+        .as_ref()
+        .map(|value| decode_hyperlink_utf16(&value.characters))
+        .transpose()?;
+    let location = location
+        .as_ref()
+        .map(|value| decode_hyperlink_utf16(&value.characters))
+        .transpose()?;
+    let target = moniker
+        .as_deref()
+        .map(|moniker| match moniker {
+            HyperlinkMoniker::String(value) => {
+                decode_hyperlink_utf16(&value.characters).map(XlsHyperlinkTarget::String)
+            }
+            HyperlinkMoniker::Url { address, .. } => {
+                decode_hyperlink_utf16(address).map(XlsHyperlinkTarget::Url)
+            }
+            HyperlinkMoniker::File {
+                short_name,
+                long_path,
+                ..
+            } => Ok(XlsHyperlinkTarget::File {
+                short_name,
+                long_path: long_path
+                    .as_ref()
+                    .map(|value| decode_hyperlink_utf16(&value.characters))
+                    .transpose()?,
+            }),
+            HyperlinkMoniker::Standard {
+                class_id,
+                options,
+                data,
+                ..
+            } => Ok(XlsHyperlinkTarget::Standard {
+                class_id: *class_id,
+                options: *options,
+                data,
+            }),
+        })
+        .transpose()?;
+    Ok(XlsHyperlinkRef {
+        source_record,
+        value,
+        display_name,
+        target_frame_name,
+        location,
+        target,
+    })
+}
+
+fn decode_bool_err(record: &BoolErrRecord) -> XlsCellValue {
+    let raw = match record.value {
+        BoolErrValue::Byte(value) => u16::from(value),
+        BoolErrValue::Word(value) => {
+            return XlsCellValue::CompatibilityBoolErr {
+                value,
+                is_error: record.is_error,
+            };
+        }
+    };
+    match (record.is_error, raw) {
+        (0, 0) => XlsCellValue::Boolean(false),
+        (0, 1) => XlsCellValue::Boolean(true),
+        (1, raw) => CellErrorCode::from_raw(raw as u8).map_or(
+            XlsCellValue::CompatibilityBoolErr {
+                value: raw,
+                is_error: record.is_error,
+            },
+            XlsCellValue::Error,
+        ),
+        _ => XlsCellValue::CompatibilityBoolErr {
+            value: raw,
+            is_error: record.is_error,
+        },
+    }
+}
+
+fn decode_rk_number(bits: u32) -> f64 {
+    let mut value = if bits & 2 != 0 {
+        f64::from((bits as i32) >> 2)
+    } else {
+        f64::from_bits(u64::from(bits & !3) << 32)
+    };
+    if bits & 1 != 0 {
+        value /= 100.0;
+    }
+    value
 }
 
 impl<'a> Iterator for XlsCells<'a> {
@@ -4030,10 +4467,18 @@ impl<'a> XlsWorkbookView<'a> {
 
     pub fn resolve_cell_format(&self, cell: &CellHeader) -> Result<XlsCellFormatRef<'a>> {
         let xf = self.resolve_cell_xf(cell)?;
+        let number_format = self.resolve_number_format(xf.number_format_index)?;
+        let custom_number_format_code = match number_format {
+            XlsNumberFormatRef::Custom(value) => {
+                Some(decode_biff_unicode_string(&value.format_string)?)
+            }
+            XlsNumberFormatRef::BuiltIn(_) | XlsNumberFormatRef::Compatibility(_) => None,
+        };
         Ok(XlsCellFormatRef {
             xf,
             font: self.resolve_font(xf.font_index)?,
-            number_format: self.resolve_number_format(xf.number_format_index)?,
+            number_format,
+            custom_number_format_code,
         })
     }
 
@@ -4046,11 +4491,80 @@ impl<'a> XlsWorkbookView<'a> {
         cell: XlsCellRef<'a>,
     ) -> Result<XlsCellFormatRef<'a>> {
         let xf = self.resolve_cell_xf(&cell.cell())?;
+        let number_format = self.resolve_number_format_compatible(xf.number_format_index);
+        let custom_number_format_code = match number_format {
+            XlsNumberFormatRef::Custom(value) => {
+                Some(decode_biff_unicode_string(&value.format_string)?)
+            }
+            XlsNumberFormatRef::BuiltIn(_) | XlsNumberFormatRef::Compatibility(_) => None,
+        };
         Ok(XlsCellFormatRef {
             xf,
             font: self.resolve_font(xf.font_index)?,
-            number_format: self.resolve_number_format_compatible(xf.number_format_index),
+            number_format,
+            custom_number_format_code,
         })
+    }
+
+    /// Resolves the native stored scalar for one cell in a sparse index.
+    /// Formula cells return their file-owned cached result; this method never
+    /// calculates a formula or formats a number for display.
+    pub fn resolve_cell_value(
+        &self,
+        index: &XlsSparseCellIndex<'a>,
+        cell: XlsCellRef<'a>,
+    ) -> Result<XlsCellValue> {
+        self.resolve_cell_value_with_policy(index, cell, false)
+    }
+
+    pub fn resolve_cell_value_compatible(
+        &self,
+        index: &XlsSparseCellIndex<'a>,
+        cell: XlsCellRef<'a>,
+    ) -> Result<XlsCellValue> {
+        self.resolve_cell_value_with_policy(index, cell, true)
+    }
+
+    fn resolve_cell_value_with_policy(
+        &self,
+        index: &XlsSparseCellIndex<'a>,
+        cell: XlsCellRef<'a>,
+        preserve_compatibility: bool,
+    ) -> Result<XlsCellValue> {
+        index.ensure_cell(cell)?;
+        match cell.value {
+            XlsCellValueRef::Formula(_) | XlsCellValueRef::Formula4Compatibility(_) => {
+                (if preserve_compatibility {
+                    index.resolve_cell_formula_compatible(cell)
+                } else {
+                    index.resolve_cell_formula(cell)
+                })?
+                .ok_or_else(|| {
+                    Error::invalid(
+                        u64::from(cell.source_record.offset),
+                        "formula cell has no formula relationship",
+                    )
+                })?
+                .cached_value()
+                .map(XlsCellValue::Formula)
+            }
+            XlsCellValueRef::Blank(_) | XlsCellValueRef::MulBlank { .. } => Ok(XlsCellValue::Blank),
+            XlsCellValueRef::Number(value) => {
+                Ok(XlsCellValue::Number(f64::from_bits(value.value_bits)))
+            }
+            XlsCellValueRef::BoolErr(value) => Ok(decode_bool_err(value)),
+            XlsCellValueRef::Label(value) => {
+                decode_biff_unicode_string(&value.text).map(XlsCellValue::String)
+            }
+            XlsCellValueRef::LabelSst(value) => self
+                .resolve_label_sst(value)
+                .and_then(decode_sst_string)
+                .map(XlsCellValue::String),
+            XlsCellValueRef::Rk(value) => Ok(XlsCellValue::Number(decode_rk_number(value.value))),
+            XlsCellValueRef::MulRk { value, .. } => {
+                Ok(XlsCellValue::Number(decode_rk_number(value.value)))
+            }
+        }
     }
 
     pub fn resolve_cell_formula(
@@ -5407,7 +5921,7 @@ impl XlsFile {
                 .expect("sheet metadata record belongs to its Workbook stream")
         };
         let normalized_name = normalized_short_xl_string(&name);
-        let has_duplicate = rebuilt.workbooks[workbook_index]
+        let existing_names = rebuilt.workbooks[workbook_index]
             .tree
             .stream
             .records
@@ -5419,7 +5933,9 @@ impl XlsFile {
                 | BiffRecordData::BoundSheet8Compatibility { value, .. } => Some(&value.name),
                 _ => None,
             })
-            .any(|existing| normalized_short_xl_string(existing) == normalized_name);
+            .map(normalized_short_xl_string)
+            .collect::<Vec<_>>();
+        let has_duplicate = existing_names.contains(&normalized_name);
         if has_duplicate {
             return Err(Error::invalid(
                 0,
@@ -6483,22 +6999,11 @@ impl XlsFile {
 }
 
 fn short_xl_string_code_units(value: &ShortXlUnicodeString) -> Vec<u16> {
-    match &value.characters {
-        XlStringCharacters::Compressed(values) => {
-            values.iter().map(|value| u16::from(*value)).collect()
-        }
-        XlStringCharacters::Unicode(values) => values.clone(),
-    }
+    value.value.encode_utf16().collect()
 }
 
 fn normalized_short_xl_string(value: &ShortXlUnicodeString) -> String {
-    let text = match &value.characters {
-        XlStringCharacters::Compressed(values) => {
-            values.iter().map(|value| char::from(*value)).collect()
-        }
-        XlStringCharacters::Unicode(values) => String::from_utf16_lossy(values),
-    };
-    text.to_lowercase()
+    value.value.to_lowercase()
 }
 
 fn is_root_child(entry: &Entry) -> bool {
@@ -6718,9 +7223,11 @@ fn audit_workbook(
                     record,
                     strict,
                     diagnostics,
-                    ParseDiagnosticCode::NonconformingRecord,
-                    "EndObject",
-                    "2.4.101",
+                    xls_issue(
+                        ParseDiagnosticCode::NonconformingRecord,
+                        "EndObject",
+                        "2.4.101",
+                    ),
                     format!(
                         "iObjectKind is {:#06x}, outside the specified 0x0010..=0x0012 range",
                         value.object_kind
@@ -6752,9 +7259,11 @@ fn audit_workbook(
                         record,
                         strict,
                         diagnostics,
-                        ParseDiagnosticCode::NonconformingRecord,
-                        "ISSTInf",
-                        "2.5.167",
+                        xls_issue(
+                            ParseDiagnosticCode::NonconformingRecord,
+                            "ISSTInf",
+                            "2.5.167",
+                        ),
                         format!(
                             "ExtSST contains {invalid_buckets} nonconforming bucket(s): {nonzero_reserved} with a nonzero reserved field and {invalid_offsets} with cbOffset not less than ib"
                         ),
@@ -6768,9 +7277,7 @@ fn audit_workbook(
                     record,
                     strict,
                     diagnostics,
-                    ParseDiagnosticCode::TruncatedRecord,
-                    "HLink",
-                    "2.4.140",
+                    xls_issue(ParseDiagnosticCode::TruncatedRecord, "HLink", "2.4.140"),
                     format!(
                         "Hyperlink Object is truncated with {} retained bytes",
                         payload.len()
@@ -6785,9 +7292,7 @@ fn audit_workbook(
                     record,
                     strict,
                     diagnostics,
-                    ParseDiagnosticCode::TruncatedRecord,
-                    "HLink",
-                    "2.4.140",
+                    xls_issue(ParseDiagnosticCode::TruncatedRecord, "HLink", "2.4.140"),
                     format!(
                         "URL moniker declares {declared_byte_length} bytes but only {} UTF-16 units are available",
                         address.len()
@@ -6798,9 +7303,7 @@ fn audit_workbook(
                     record,
                     strict,
                     diagnostics,
-                    ParseDiagnosticCode::NonconformingRecord,
-                    "HLink",
-                    "2.4.140",
+                    xls_issue(ParseDiagnosticCode::NonconformingRecord, "HLink", "2.4.140"),
                     format!("Hyperlink Object has {} nonconforming bytes", bytes.len()),
                 )?,
             },
@@ -6812,9 +7315,11 @@ fn audit_workbook(
                     record,
                     strict,
                     diagnostics,
-                    ParseDiagnosticCode::NonconformingRecord,
-                    "FeatHdr",
-                    "2.4.112",
+                    xls_issue(
+                        ParseDiagnosticCode::NonconformingRecord,
+                        "FeatHdr",
+                        "2.4.112",
+                    ),
                     "FeatHdr contains a marker or payload outside its shared-feature schema".into(),
                 )?;
             }
@@ -6830,9 +7335,7 @@ fn audit_workbook(
                             record,
                             strict,
                             diagnostics,
-                            ParseDiagnosticCode::TruncatedRecord,
-                            "Pls",
-                            "2.4.199",
+                            xls_issue(ParseDiagnosticCode::TruncatedRecord, "Pls", "2.4.199"),
                             format!(
                                 "DEVMODEW declares {} driver-private bytes but only {} are available",
                                 devmode.declared_driver_extra_size,
@@ -6871,9 +7374,7 @@ fn audit_workbook(
                         record,
                         strict,
                         diagnostics,
-                        ParseDiagnosticCode::TruncatedRecord,
-                        "SST",
-                        "2.4.265",
+                        xls_issue(ParseDiagnosticCode::TruncatedRecord, "SST", "2.4.265"),
                         format!("SST stopped at string {first_unparsed_string}: {reason}"),
                     )?;
                 }
@@ -6938,9 +7439,7 @@ fn audit_bof(
         record,
         strict,
         diagnostics,
-        ParseDiagnosticCode::NonconformingRecord,
-        "BOF",
-        "2.4.21",
+        xls_issue(ParseDiagnosticCode::NonconformingRecord, "BOF", "2.4.21"),
         violations.join("; "),
     )
 }
@@ -6962,9 +7461,11 @@ fn audit_workbook_topology(
             first_offset,
             strict,
             diagnostics,
-            ParseDiagnosticCode::NonconformingRecord,
-            "Workbook Stream",
-            "2.1.7.20",
+            xls_issue(
+                ParseDiagnosticCode::NonconformingRecord,
+                "Workbook Stream",
+                "2.1.7.20",
+            ),
             "legacy stream name is Book; MS-XLS requires Workbook".into(),
         )?;
     }
@@ -6975,9 +7476,11 @@ fn audit_workbook_topology(
             first_offset,
             strict,
             diagnostics,
-            ParseDiagnosticCode::NonconformingRecord,
-            "Workbook Stream",
-            "2.1.7.20",
+            xls_issue(
+                ParseDiagnosticCode::NonconformingRecord,
+                "Workbook Stream",
+                "2.1.7.20",
+            ),
             "legacy BIFF stream is outside the current MS-XLS Workbook Stream grammar".into(),
         )?;
         return Ok(());
@@ -6989,9 +7492,11 @@ fn audit_workbook_topology(
             first_offset,
             strict,
             diagnostics,
-            ParseDiagnosticCode::NonconformingRecord,
-            "Workbook Stream",
-            "2.1.7.20",
+            xls_issue(
+                ParseDiagnosticCode::NonconformingRecord,
+                "Workbook Stream",
+                "2.1.7.20",
+            ),
             format!(
                 "records outside BOF/EOF substreams occur in ranges {:?}",
                 workbook.tree.outside_substream_ranges
@@ -7014,9 +7519,11 @@ fn audit_workbook_topology(
             first_offset,
             strict,
             diagnostics,
-            ParseDiagnosticCode::NonconformingRecord,
-            "Globals Substream",
-            "2.1.7.20.3",
+            xls_issue(
+                ParseDiagnosticCode::NonconformingRecord,
+                "Globals Substream",
+                "2.1.7.20.3",
+            ),
             format!(
                 "Workbook Stream has {globals_count} top-level Globals Substreams and the first substream kind is {:?}",
                 roots.first().map(|node| node.kind)
@@ -7044,9 +7551,11 @@ fn audit_workbook_topology(
             first_offset,
             strict,
             diagnostics,
-            ParseDiagnosticCode::NonconformingRecord,
-            "Workbook Stream",
-            "2.1.7.20",
+            xls_issue(
+                ParseDiagnosticCode::NonconformingRecord,
+                "Workbook Stream",
+                "2.1.7.20",
+            ),
             format!(
                 "Workbook Stream has {} following sheet substreams; invalid (index, kind) values are {invalid_following:?}",
                 following.len()
@@ -7073,9 +7582,7 @@ fn audit_missing_formula_extra(
         record,
         strict,
         diagnostics,
-        ParseDiagnosticCode::TruncatedRecord,
-        structure,
-        section,
+        xls_issue(ParseDiagnosticCode::TruncatedRecord, structure, section),
         format!(
             "formula is missing {missing_extra_count} required MS-XLS 2.5.198.103 RgbExtra structures"
         ),
@@ -7118,22 +7625,36 @@ fn audit_drawing(
         record,
         strict,
         diagnostics,
-        ParseDiagnosticCode::TruncatedRecord,
-        structure,
-        section,
+        xls_issue(ParseDiagnosticCode::TruncatedRecord, structure, section),
         message,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy)]
+struct XlsIssueSpec {
+    code: ParseDiagnosticCode,
+    structure: &'static str,
+    section: &'static str,
+}
+
+const fn xls_issue(
+    code: ParseDiagnosticCode,
+    structure: &'static str,
+    section: &'static str,
+) -> XlsIssueSpec {
+    XlsIssueSpec {
+        code,
+        structure,
+        section,
+    }
+}
+
 fn report_record_issue(
     workbook: &XlsWorkbookStream,
     record: &BiffRecord,
     strict: bool,
     diagnostics: &mut Vec<ParseDiagnostic>,
-    code: ParseDiagnosticCode,
-    structure: &'static str,
-    section: &'static str,
+    issue: XlsIssueSpec,
     message: String,
 ) -> Result<()> {
     report_workbook_issue(
@@ -7141,42 +7662,38 @@ fn report_record_issue(
         u64::from(record.offset),
         strict,
         diagnostics,
-        code,
-        structure,
-        section,
+        issue,
         message,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn report_workbook_issue(
     workbook: &XlsWorkbookStream,
     offset: u64,
     strict: bool,
     diagnostics: &mut Vec<ParseDiagnostic>,
-    code: ParseDiagnosticCode,
-    structure: &'static str,
-    section: &'static str,
+    issue: XlsIssueSpec,
     message: String,
 ) -> Result<()> {
     if strict {
         return Err(Error::invalid(
             offset,
             format!(
-                "{} violates MS-XLS {section}: {message}",
-                workbook.name.path()
+                "{} violates MS-XLS {}: {message}",
+                workbook.name.path(),
+                issue.section,
             ),
         ));
     }
     diagnostics.push(ParseDiagnostic::warning(
-        code,
+        issue.code,
         BinaryFormat::Xls,
         Some(workbook.name.path()),
         Some(offset),
-        structure,
+        issue.structure,
         SpecificationReference {
             document: "MS-XLS",
-            section,
+            section: issue.section,
         },
         message,
     ));
@@ -7288,7 +7805,7 @@ mod tests {
             sheet_type: 0,
             name: ShortXlUnicodeString {
                 flags: 0,
-                characters: XlStringCharacters::Compressed(b"Sheet1".to_vec()),
+                value: "Sheet1".to_owned(),
             },
         };
         let xf = XfRecord {
@@ -7410,6 +7927,7 @@ mod tests {
                 xf: &xf,
                 font: &font,
                 number_format: XlsNumberFormatRef::Custom(&format),
+                custom_number_format_code: Some("0.00".to_owned()),
             }
         );
     }
@@ -7422,7 +7940,7 @@ mod tests {
             sheet_type: 0,
             name: ShortXlUnicodeString {
                 flags: 0,
-                characters: XlStringCharacters::Compressed(b"Cells".to_vec()),
+                value: "Cells".to_owned(),
             },
         };
         let mul_rk = MulRkRecord {
@@ -7647,7 +8165,7 @@ mod tests {
             sheet_type: 0,
             name: ShortXlUnicodeString {
                 flags: 0,
-                characters: XlStringCharacters::Compressed(b"Formula".to_vec()),
+                value: "Formula".to_owned(),
             },
         };
         let workbook = XlsWorkbookStream::from_tree(
@@ -7700,7 +8218,7 @@ mod tests {
             sheet_type: 0,
             name: ShortXlUnicodeString {
                 flags: 0,
-                characters: XlStringCharacters::Compressed(b"Sheet".to_vec()),
+                value: "Sheet".to_owned(),
             },
         };
         let workbook = |second_offset| {

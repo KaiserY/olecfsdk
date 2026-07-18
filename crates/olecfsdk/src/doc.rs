@@ -7,23 +7,26 @@
 mod file;
 
 pub use file::{
-    DocAnnotationBookmarkRef, DocBookmarkRef, DocBookmarks, DocCharacterRunRef, DocChpxRun,
-    DocCommentRef, DocComments, DocCompatibilityObjectStorage, DocContentTree, DocCp, DocCpRange,
-    DocDataNode, DocDataNodeValue, DocDataStream, DocDirectCharacterFormatting,
-    DocDirectFormatting, DocDirectFormattingRef, DocDirectParagraphFormatting, DocDirectTableState,
-    DocDocumentPartRef, DocEmbeddedObjectStorage, DocFc, DocFcRange, DocFieldRef, DocFile,
-    DocFkpPage, DocLocated, DocLocatedBookmarks, DocNoteKind, DocNoteRef, DocNotes,
-    DocObjectPoolStorage, DocOfficeArtShapeRef, DocPapxRun, DocParagraphKind, DocParagraphRef,
-    DocRelationshipDiagnostic, DocSectionProperties, DocShapeAnchorRef, DocSpecialContentLink,
-    DocSpecialContentRef, DocStyleProperties, DocTableCellRef, DocTableCells, DocTableDiagnostic,
-    DocTableRef, DocTableRowRef, DocTableRows, DocTableStream, DocTableStreamName, DocTables,
-    DocTextPiece, DocTextPieceCharactersRef, DocTextPieceRef, DocTextRangeRef, DocTextboxBreakRef,
+    DocAnnotationBookmarkRef, DocBlockRef, DocBlocks, DocBookmarkRef, DocBookmarks,
+    DocCharacterRunRef, DocChpxRun, DocCommentRef, DocComments, DocCompatibilityObjectStorage,
+    DocContentTree, DocCp, DocCpRange, DocDataNode, DocDataNodeValue, DocDataStream,
+    DocDirectCharacterFormatting, DocDirectFormatting, DocDirectFormattingRef,
+    DocDirectParagraphFormatting, DocDirectTableState, DocDocumentPartRef,
+    DocEmbeddedObjectStorage, DocFc, DocFcRange, DocFieldRef, DocFile, DocFkpPage, DocLocated,
+    DocLocatedBookmarks, DocNoteKind, DocNoteRef, DocNotes, DocObjectPoolStorage,
+    DocOfficeArtShapeRef, DocOutlineLevel, DocPapxRun, DocParagraphKind, DocParagraphRef,
+    DocParagraphStyleRef, DocRelationshipDiagnostic, DocSectionProperties, DocSectionRef,
+    DocSections, DocShapeAnchorRef, DocSpecialContentLink, DocSpecialContentRef,
+    DocStyleProperties, DocTableCellRef, DocTableCells, DocTableDiagnostic, DocTableRef,
+    DocTableRowRef, DocTableRows, DocTableStream, DocTableStreamName, DocTables, DocTextPiece,
+    DocTextPieceRef, DocTextPieceValueRef, DocTextRangeRef, DocTextboxBreakRef,
     DocTextboxShapeLink, DocTextboxStoryRef, DocTextboxes, DocWordDocumentStream,
 };
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
+    ops::Range,
 };
 
 use bitflags::bitflags;
@@ -3764,7 +3767,6 @@ pub enum SprmKind {
 
 macro_rules! define_known_sprms {
     ($($variant:ident = $opcode:literal,)+) => {
-        #[allow(non_camel_case_types)]
         #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[repr(u16)]
         pub enum KnownSprm {
@@ -4709,17 +4711,241 @@ pub struct TextPiece {
     pub characters: TextPieceCharacters,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextPieceEncoding {
+    Compressed,
+    Utf16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextPieceString {
+    pub value: String,
+    pub encoding: TextPieceEncoding,
+    code_units: Vec<u16>,
+}
+
+/// One DOC text-piece value together with its physical encoding.
+///
+/// Conforming text is exposed as a standard Rust [`String`]. An unpaired
+/// surrogate cannot be represented by `String`, so compatible parsing keeps
+/// its original code units in the explicit compatibility variant instead of
+/// substituting U+FFFD.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TextPieceCharacters {
-    Compressed(Vec<u8>),
-    Utf16(Vec<u16>),
+    String(TextPieceString),
+    CompatibilityUtf16 { code_units: Vec<u16> },
 }
 
 impl TextPieceCharacters {
+    pub fn compressed(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if value
+            .chars()
+            .any(|character| u32::from(character) > u32::from(u8::MAX))
+        {
+            return Err(Error::invalid(
+                0,
+                "DOC compressed text contains a character above U+00FF",
+            ));
+        }
+        let code_units = value.encode_utf16().collect();
+        Ok(Self::String(TextPieceString {
+            value,
+            encoding: TextPieceEncoding::Compressed,
+            code_units,
+        }))
+    }
+
+    pub fn utf16(value: impl Into<String>) -> Self {
+        let value = value.into();
+        let code_units = value.encode_utf16().collect();
+        Self::String(TextPieceString {
+            value,
+            encoding: TextPieceEncoding::Utf16,
+            code_units,
+        })
+    }
+
+    fn from_compressed_bytes(bytes: &[u8]) -> Self {
+        Self::String(TextPieceString {
+            value: bytes.iter().copied().map(char::from).collect(),
+            encoding: TextPieceEncoding::Compressed,
+            code_units: bytes.iter().copied().map(u16::from).collect(),
+        })
+    }
+
+    fn from_utf16_units(code_units: Vec<u16>) -> Self {
+        match String::from_utf16(&code_units) {
+            Ok(value) => Self::String(TextPieceString {
+                value,
+                encoding: TextPieceEncoding::Utf16,
+                code_units,
+            }),
+            Err(_) => Self::CompatibilityUtf16 { code_units },
+        }
+    }
+
+    pub const fn encoding(&self) -> TextPieceEncoding {
+        match self {
+            Self::String(value) => value.encoding,
+            Self::CompatibilityUtf16 { .. } => TextPieceEncoding::Utf16,
+        }
+    }
+
+    pub const fn value(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value.value.as_str()),
+            Self::CompatibilityUtf16 { .. } => None,
+        }
+    }
+
+    pub const fn compatibility_code_units(&self) -> Option<&[u16]> {
+        match self {
+            Self::String(_) => None,
+            Self::CompatibilityUtf16 { code_units } => Some(code_units.as_slice()),
+        }
+    }
+
     pub fn character_count(&self) -> usize {
         match self {
-            Self::Compressed(value) => value.len(),
-            Self::Utf16(value) => value.len(),
+            Self::String(value) => value.code_units.len(),
+            Self::CompatibilityUtf16 { code_units } => code_units.len(),
+        }
+    }
+
+    pub(crate) fn code_units(&self) -> Vec<u16> {
+        match self {
+            Self::String(value) => value.code_units.clone(),
+            Self::CompatibilityUtf16 { code_units } => code_units.clone(),
+        }
+    }
+
+    pub(crate) fn code_units_iter(&self) -> Box<dyn Iterator<Item = u16> + '_> {
+        match self {
+            Self::String(value) => Box::new(value.code_units.iter().copied()),
+            Self::CompatibilityUtf16 { code_units } => Box::new(code_units.iter().copied()),
+        }
+    }
+
+    pub(crate) fn string_range(&self, range: Range<usize>) -> Result<Option<&str>> {
+        let Self::String(value) = self else {
+            return Ok(None);
+        };
+        let unit_to_byte = |target: usize| -> Result<usize> {
+            if target == 0 {
+                return Ok(0);
+            }
+            let mut units = 0usize;
+            for (byte, character) in value.value.char_indices() {
+                units = units
+                    .checked_add(match value.encoding {
+                        TextPieceEncoding::Compressed => 1,
+                        TextPieceEncoding::Utf16 => character.len_utf16(),
+                    })
+                    .ok_or_else(|| Error::Limit("DOC text unit count overflow".into()))?;
+                if units == target {
+                    return Ok(byte + character.len_utf8());
+                }
+                if units > target {
+                    return Err(Error::invalid(
+                        0,
+                        "DOC CP boundary splits a UTF-16 surrogate pair",
+                    ));
+                }
+            }
+            if units == target {
+                Ok(value.value.len())
+            } else {
+                Err(Error::invalid(0, "DOC text range exceeds its value"))
+            }
+        };
+        let start = unit_to_byte(range.start)?;
+        let end = unit_to_byte(range.end)?;
+        Ok(Some(&value.value[start..end]))
+    }
+
+    pub(crate) fn replace_code_unit_range(
+        &mut self,
+        range: Range<usize>,
+        replacement: &Self,
+    ) -> Result<()> {
+        if matches!(self, Self::CompatibilityUtf16 { .. })
+            || matches!(replacement, Self::CompatibilityUtf16 { .. })
+        {
+            return Err(Error::invalid(
+                0,
+                "DOC text mutation does not accept compatibility UTF-16",
+            ));
+        }
+        let destination_encoding = match (self.encoding(), replacement.encoding()) {
+            (TextPieceEncoding::Compressed, TextPieceEncoding::Compressed) => {
+                TextPieceEncoding::Compressed
+            }
+            _ => TextPieceEncoding::Utf16,
+        };
+        let mut code_units = self.code_units();
+        if range.end > code_units.len() {
+            return Err(Error::invalid(
+                0,
+                "DOC text replacement exceeds its text piece",
+            ));
+        }
+        code_units.splice(range, replacement.code_units());
+        *self = match destination_encoding {
+            TextPieceEncoding::Compressed => {
+                let value = code_units
+                    .into_iter()
+                    .map(|unit| {
+                        u8::try_from(unit).map(char::from).map_err(|_| {
+                            Error::invalid(
+                                0,
+                                "DOC compressed replacement contains a character above U+00FF",
+                            )
+                        })
+                    })
+                    .collect::<Result<String>>()?;
+                Self::compressed(value)?
+            }
+            TextPieceEncoding::Utf16 => {
+                Self::utf16(String::from_utf16(&code_units).map_err(|_| {
+                    Error::invalid(0, "DOC replacement creates an unpaired UTF-16 surrogate")
+                })?)
+            }
+        };
+        Ok(())
+    }
+
+    fn to_bytes(&self) -> Result<Vec<u8>> {
+        if let Self::String(value) = self
+            && !value
+                .value
+                .encode_utf16()
+                .eq(value.code_units.iter().copied())
+        {
+            return Err(Error::invalid(
+                0,
+                "DOC text String changed outside the transactional file-root API",
+            ));
+        }
+        match self {
+            Self::String(value) if value.encoding == TextPieceEncoding::Compressed => value
+                .value
+                .chars()
+                .map(|character| {
+                    u8::try_from(u32::from(character)).map_err(|_| {
+                        Error::invalid(0, "DOC compressed text contains a character above U+00FF")
+                    })
+                })
+                .collect(),
+            Self::String(value) => Ok(value
+                .value
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect()),
+            Self::CompatibilityUtf16 { code_units } => Ok(code_units
+                .iter()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect()),
         }
     }
 }
@@ -19977,9 +20203,9 @@ impl Pcd {
             Error::invalid(u64::from(file_offset), "Pcd text exceeds WordDocument")
         })?;
         let characters = if self.file_position.compressed {
-            TextPieceCharacters::Compressed(bytes.to_vec())
+            TextPieceCharacters::from_compressed_bytes(bytes)
         } else {
-            TextPieceCharacters::Utf16(
+            TextPieceCharacters::from_utf16_units(
                 bytes
                     .chunks_exact(2)
                     .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
@@ -20047,17 +20273,8 @@ impl Pcd {
 }
 
 impl TextPiece {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        match &self.characters {
-            TextPieceCharacters::Compressed(value) => value.clone(),
-            TextPieceCharacters::Utf16(value) => {
-                let mut bytes = Vec::with_capacity(value.len() * 2);
-                for unit in value {
-                    push_u16(&mut bytes, *unit);
-                }
-                bytes
-            }
-        }
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        self.characters.to_bytes()
     }
 
     pub fn character_count(&self) -> usize {

@@ -2024,10 +2024,14 @@ impl LocatedParentControlStorage {
         Ok(())
     }
 
-    pub(crate) fn discover_below(
-        compound: &CompoundFile,
-        project_root: &Path,
-    ) -> Result<Vec<Self>> {
+    /// Discovers the outermost MS-OFORMS parent-control storage roots below a
+    /// CFB storage.
+    ///
+    /// A root is identified by its directly owned `f` and `o` streams rather
+    /// than by its CFB CLSID: UserForm storages commonly use a zero CLSID.
+    /// Embedded Page, Frame, and MultiPage storages are owned recursively by
+    /// their outer root and therefore are not returned a second time.
+    pub fn discover_root_paths_below(compound: &CompoundFile, project_root: &Path) -> Vec<PathBuf> {
         let mut candidates = compound
             .entries()
             .iter()
@@ -2062,6 +2066,11 @@ impl LocatedParentControlStorage {
         }
         roots.sort();
         roots
+    }
+
+    /// Parses every root returned by [`Self::discover_root_paths_below`].
+    pub fn discover_below(compound: &CompoundFile, project_root: &Path) -> Result<Vec<Self>> {
+        Self::discover_root_paths_below(compound, project_root)
             .into_iter()
             .map(|path| Self::from_compound(compound, path))
             .collect()

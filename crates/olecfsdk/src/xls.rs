@@ -6,13 +6,14 @@ mod file;
 
 pub use file::{
     BiffSubstreamKind, BiffSubstreamNode, BiffWorkbookTree, XlsCellFormatRef, XlsCellMut,
-    XlsCellRef, XlsCellValueRef, XlsCells, XlsCustomSheetViewBeginRef, XlsCustomSheetViewRef,
-    XlsCustomViewActiveSheetLink, XlsCustomViewDefinedNameKind, XlsCustomViewDefinedNameRef,
-    XlsCustomViewLink, XlsCustomViewRef, XlsDrawingGroupRef, XlsDrawingRef,
-    XlsExternalCellCacheRef, XlsExternalNameRef, XlsExternalSheetRef, XlsFile, XlsFileEntryIssue,
-    XlsFileEntryRef, XlsFileEntryRole, XlsFormulaDefinitionRef, XlsFormulaRef, XlsNumberFormatRef,
-    XlsObjectId, XlsObjectPersistenceRef, XlsObjectRef, XlsObjects, XlsPivotCache,
-    XlsPivotCacheDefinitionId, XlsPivotCacheDefinitionRef, XlsPivotTableCacheLink,
+    XlsCellRef, XlsCellValue, XlsCellValueRef, XlsCells, XlsCommentRef, XlsCustomSheetViewBeginRef,
+    XlsCustomSheetViewRef, XlsCustomViewActiveSheetLink, XlsCustomViewDefinedNameKind,
+    XlsCustomViewDefinedNameRef, XlsCustomViewLink, XlsCustomViewRef, XlsDrawingGroupRef,
+    XlsDrawingRef, XlsExternalCellCacheRef, XlsExternalNameRef, XlsExternalSheetRef, XlsFile,
+    XlsFileEntryIssue, XlsFileEntryRef, XlsFileEntryRole, XlsFormulaCachedValue,
+    XlsFormulaDefinitionRef, XlsFormulaRef, XlsHyperlinkRef, XlsHyperlinkTarget,
+    XlsNumberFormatRef, XlsObjectId, XlsObjectPersistenceRef, XlsObjectRef, XlsObjects,
+    XlsPivotCache, XlsPivotCacheDefinitionId, XlsPivotCacheDefinitionRef, XlsPivotTableCacheLink,
     XlsPivotTableCacheLinkError, XlsPivotTableLink, XlsPivotTableLinkError, XlsPivotTableRef,
     XlsPivotTableViewRef, XlsRevisionCellOrFormatRef, XlsRevisionChangeCellRef, XlsRevisionGraph,
     XlsRevisionGraphLog, XlsRevisionInsertDeleteRef, XlsRevisionLog, XlsRevisionLogRef,
@@ -837,7 +838,9 @@ pub struct BoundSheet8Record {
 pub struct ShortXlUnicodeString {
     /// Exact option flags. Bit 0 selects UTF-16; other bits are retained.
     pub flags: u8,
-    pub characters: XlStringCharacters,
+    /// Decoded sheet-name value. The physical compressed/UTF-16 choice
+    /// remains in [`Self::flags`] and is honored when the record is written.
+    pub value: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28746,14 +28749,15 @@ fn validate_pivot_view_extensions(records: &[BiffRecord]) -> Result<()> {
     Ok(())
 }
 
-fn normalized_xl_string(value: &XlUnicodeString) -> String {
+fn normalized_xl_string(value: &XlUnicodeString) -> Result<String> {
     let text = match &value.text.characters {
         XlStringCharacters::Compressed(bytes) => {
             bytes.iter().map(|byte| char::from(*byte)).collect()
         }
-        XlStringCharacters::Unicode(words) => String::from_utf16_lossy(words),
+        XlStringCharacters::Unicode(words) => String::from_utf16(words)
+            .map_err(|_| Error::invalid(0, "XLS string contains an unpaired UTF-16 surrogate"))?,
     };
-    text.to_lowercase()
+    Ok(text.to_lowercase())
 }
 
 fn validate_function_groups_and_table_styles(records: &[BiffRecord]) -> Result<()> {
@@ -28793,7 +28797,7 @@ fn validate_function_groups_and_table_styles(records: &[BiffRecord]) -> Result<(
             BiffRecordData::FnGroupName(value) => {
                 if !function_groups_started
                     || function_category_count >= 256
-                    || !function_category_names.insert(normalized_xl_string(&value.name))
+                    || !function_category_names.insert(normalized_xl_string(&value.name)?)
                 {
                     return Err(Error::invalid(
                         records[index].offset.into(),
@@ -28806,7 +28810,7 @@ fn validate_function_groups_and_table_styles(records: &[BiffRecord]) -> Result<(
             BiffRecordData::FnGrp12(value) => {
                 if !function_groups_started
                     || function_category_count >= 256
-                    || !function_category_names.insert(normalized_xl_string(&value.name))
+                    || !function_category_names.insert(normalized_xl_string(&value.name)?)
                 {
                     return Err(Error::invalid(
                         records[index].offset.into(),
@@ -29167,52 +29171,63 @@ impl BoundSheet8Record {
 }
 
 impl ShortXlUnicodeString {
+    pub fn new(value: impl Into<String>) -> Self {
+        let value = value.into();
+        let flags = u8::from(value.chars().any(|character| u32::from(character) > 0xff));
+        Self { flags, value }
+    }
+
     fn read(bytes: &[u8], cursor: &mut usize) -> Result<Self> {
         let count = usize::from(take_u8(bytes, cursor, "truncated sheet-name length")?);
         let flags = take_u8(bytes, cursor, "truncated sheet-name flags")?;
-        let characters = if flags & 1 == 0 {
-            XlStringCharacters::Compressed(
-                take_bytes(bytes, cursor, count, "truncated compressed sheet name")?.to_vec(),
-            )
+        let value = if flags & 1 == 0 {
+            take_bytes(bytes, cursor, count, "truncated compressed sheet name")?
+                .iter()
+                .map(|value| char::from(*value))
+                .collect()
         } else {
             let byte_count = count
                 .checked_mul(2)
                 .ok_or_else(|| Error::Limit("sheet-name byte count overflow".into()))?;
             let raw = take_bytes(bytes, cursor, byte_count, "truncated Unicode sheet name")?;
-            XlStringCharacters::Unicode(
-                raw.chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                    .collect(),
-            )
+            let units = raw
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect::<Vec<_>>();
+            String::from_utf16(&units).map_err(|_| {
+                Error::invalid(
+                    cursor.saturating_sub(byte_count) as u64,
+                    "sheet name contains an unpaired UTF-16 surrogate",
+                )
+            })?
         };
-        Ok(Self { flags, characters })
+        Ok(Self { flags, value })
     }
 
     fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
-        let count = match &self.characters {
-            XlStringCharacters::Compressed(values) => {
-                if self.flags & 1 != 0 {
-                    return Err(Error::invalid(0, "compressed sheet name has UTF-16 flag"));
-                }
-                values.len()
-            }
-            XlStringCharacters::Unicode(values) => {
-                if self.flags & 1 == 0 {
-                    return Err(Error::invalid(0, "Unicode sheet name lacks UTF-16 flag"));
-                }
-                values.len()
-            }
+        let encoded = if self.flags & 1 == 0 {
+            self.value
+                .chars()
+                .map(|character| {
+                    u8::try_from(u32::from(character)).map_err(|_| {
+                        Error::invalid(0, "sheet name is not representable as compressed Unicode")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            self.value
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        let count = if self.flags & 1 == 0 {
+            encoded.len()
+        } else {
+            encoded.len() / 2
         };
         bytes.push(u8::try_from(count).map_err(|_| Error::Limit("sheet name exceeds u8".into()))?);
         bytes.push(self.flags);
-        match &self.characters {
-            XlStringCharacters::Compressed(values) => bytes.extend_from_slice(values),
-            XlStringCharacters::Unicode(values) => {
-                for value in values {
-                    bytes.extend_from_slice(&value.to_le_bytes());
-                }
-            }
-        }
+        bytes.extend_from_slice(&encoded);
         Ok(())
     }
 }
@@ -33835,7 +33850,7 @@ mod tests {
                         sheet_type: 0,
                         name: ShortXlUnicodeString {
                             flags: 0,
-                            characters: XlStringCharacters::Compressed(b"Sheet1".to_vec()),
+                            value: "Sheet1".to_owned(),
                         },
                     }),
                 },
@@ -33876,7 +33891,7 @@ mod tests {
                         sheet_type: 0,
                         name: ShortXlUnicodeString {
                             flags: 0,
-                            characters: XlStringCharacters::Compressed(b"S".to_vec()),
+                            value: "S".to_owned(),
                         },
                     }),
                 },
@@ -33922,7 +33937,7 @@ mod tests {
         let BiffRecordData::BoundSheet8(sheet) = &mut stream.records[1].data else {
             unreachable!()
         };
-        sheet.name.characters = XlStringCharacters::Compressed(b"Sheet1".to_vec());
+        sheet.name.value = "Sheet1".to_owned();
 
         let mut invalid = stream.clone();
         let BiffRecordData::BoundSheet8(sheet) = &mut invalid.records[1].data else {

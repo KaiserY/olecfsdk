@@ -977,6 +977,30 @@ fn audit_record_sequence(
 ) -> Result<()> {
     for record in &sequence.records {
         match &record.data {
+            PptRecordData::CompatibilityTextChars(code_units) => report_record_issue(
+                strict,
+                diagnostics,
+                ParseDiagnosticCode::NonconformingRecord,
+                record.offset,
+                "TextCharsAtom",
+                "2.9.40",
+                format!(
+                    "preserved {} UTF-16 code units containing an unpaired surrogate",
+                    code_units.len()
+                ),
+            )?,
+            PptRecordData::CompatibilityCString(code_units) => report_record_issue(
+                strict,
+                diagnostics,
+                ParseDiagnosticCode::NonconformingRecord,
+                record.offset,
+                "CString",
+                "2.9.7",
+                format!(
+                    "preserved {} UTF-16 code units containing an unpaired surrogate",
+                    code_units.len()
+                ),
+            )?,
             PptRecordData::MalformedSpecRecord(value) => report_record_issue(
                 strict,
                 diagnostics,

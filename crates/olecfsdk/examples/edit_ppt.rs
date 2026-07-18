@@ -20,16 +20,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .find_map(|(body_index, body)| {
                         body.records.iter().find_map(|record| match &record.data {
                             PptRecordData::TextChars(characters) if !characters.is_empty() => {
-                                let replacement = if characters[0] == u16::from(b'X') {
-                                    u16::from(b'Y')
+                                let replacement = if characters.starts_with('X') {
+                                    'Y'
                                 } else {
-                                    u16::from(b'X')
+                                    'X'
                                 };
                                 Some((slide.id(), body_index, true, replacement))
                             }
                             PptRecordData::TextBytes(characters) if !characters.is_empty() => {
-                                let replacement = if characters[0] == b'X' { b'Y' } else { b'X' };
-                                Some((slide.id(), body_index, false, u16::from(replacement)))
+                                let replacement = if characters.starts_with('X') {
+                                    'Y'
+                                } else {
+                                    'X'
+                                };
+                                Some((slide.id(), body_index, false, replacement))
                             }
                             _ => None,
                         })
@@ -42,12 +46,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for record in body.records_mut() {
             match (&mut record.data, unicode) {
                 (PptRecordData::TextChars(characters), true) if !characters.is_empty() => {
-                    characters[0] = replacement;
+                    let end = characters
+                        .chars()
+                        .next()
+                        .expect("nonempty PPT String")
+                        .len_utf8();
+                    characters.replace_range(..end, &replacement.to_string());
                     return Ok(());
                 }
                 (PptRecordData::TextBytes(characters), false) if !characters.is_empty() => {
-                    characters[0] = u8::try_from(replacement)
-                        .map_err(|_| olecfsdk::Error::invalid(0, "PPT byte text exceeds u8"))?;
+                    let end = characters
+                        .chars()
+                        .next()
+                        .expect("nonempty PPT String")
+                        .len_utf8();
+                    characters.replace_range(..end, &replacement.to_string());
                     return Ok(());
                 }
                 _ => {}

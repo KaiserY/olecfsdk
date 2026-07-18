@@ -16,22 +16,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if start >= main_length {
                 return None;
             }
-            match &piece.value.characters {
-                TextPieceCharacters::Compressed(characters) => {
-                    let first = *characters.first()?;
-                    let edited = if first == b'X' { b'Y' } else { b'X' };
-                    Some((start, TextPieceCharacters::Compressed(vec![edited])))
-                }
-                TextPieceCharacters::Utf16(characters) => {
-                    let first = *characters.first()?;
-                    let edited = if first == u16::from(b'X') {
-                        u16::from(b'Y')
-                    } else {
-                        u16::from(b'X')
-                    };
-                    Some((start, TextPieceCharacters::Utf16(vec![edited])))
-                }
+            let TextPieceCharacters::String(value) = &piece.value.characters else {
+                return None;
+            };
+            let first = value.value.chars().next()?;
+            if first.len_utf16() != 1 {
+                return None;
             }
+            let edited = if first == 'X' { "Y" } else { "X" };
+            Some((start, edited.to_owned()))
         })
         .ok_or_else(|| io::Error::other("DOC has no editable main-text character"))?;
 

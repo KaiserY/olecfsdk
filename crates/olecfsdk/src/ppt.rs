@@ -15,7 +15,7 @@ use crate::{
     Error, Result, SdkBitfield, SdkObject,
     cfb::CompoundFile,
     forms::ParentControlStorageModel,
-    io::{BinaryFormat, Reader, SdkRead, SdkWrite, Writer},
+    io::{BinaryFormat, Reader, SdkRead, SdkSize, SdkWrite, Writer},
     limits::Limits,
     office_art::{
         OfficeArtBStoreDelay, OfficeArtBStoreDelayLayout, OfficeArtBlipReference,
@@ -298,12 +298,17 @@ pub enum PptRecordData {
     Notes(NotesAtom),
     OutlineTextRef(OutlineTextRefAtom),
     TextHeader(TextHeaderAtom),
-    TextChars(Vec<u16>),
-    TextBytes(Vec<u8>),
+    TextChars(String),
+    TextBytes(String),
+    /// Exact UTF-16 units from a nonconforming TextCharsAtom. Strict file
+    /// roots reject this variant; compatible roots preserve it explicitly.
+    CompatibilityTextChars(Vec<u16>),
     StyleTextProp(StyleTextPropAtom),
     MalformedStyleTextProp(MalformedStyleTextPropAtom),
     UnresolvedStyleTextProp(Vec<u8>),
-    CString(Vec<u16>),
+    CString(String),
+    /// Exact UTF-16 units from a nonconforming CString.
+    CompatibilityCString(Vec<u16>),
     SlidePersist(SlidePersistAtom),
     ColorScheme(ColorSchemeAtom),
     ExternalObjectRef(ExternalObjectRefAtom),
@@ -484,10 +489,10 @@ pub enum ProgrammableTagKind {
 }
 
 impl ProgBinaryTag {
-    pub fn tag_units(&self) -> Option<&[u16]> {
+    pub fn tag(&self) -> Option<&str> {
         self.records.records.iter().find_map(|record| {
-            if let PptRecordData::CString(units) = &record.data {
-                Some(units.as_slice())
+            if let PptRecordData::CString(value) = &record.data {
+                Some(value.as_str())
             } else {
                 None
             }
@@ -495,28 +500,13 @@ impl ProgBinaryTag {
     }
 
     pub fn tag_kind(&self) -> Option<ProgrammableTagKind> {
-        let units = self.tag_units()?;
-        Some(match units {
-            [0x5f, 0x5f, 0x5f, 0x50, 0x50, 0x54, 0x39] => ProgrammableTagKind::Ppt9,
-            [0x5f, 0x5f, 0x5f, 0x50, 0x50, 0x54, 0x31, 0x30] => ProgrammableTagKind::Ppt10,
-            [0x5f, 0x5f, 0x5f, 0x50, 0x50, 0x54, 0x31, 0x31] => ProgrammableTagKind::Ppt11,
-            [0x5f, 0x5f, 0x5f, 0x50, 0x50, 0x54, 0x31, 0x32] => ProgrammableTagKind::Ppt12,
-            [
-                0x5f,
-                0x5f,
-                0x5f,
-                0x50,
-                0x50,
-                0x54,
-                0x4d,
-                0x61,
-                0x63,
-                0x31,
-                0x31,
-            ] => ProgrammableTagKind::PptMac11,
-            [0x5f, 0x5f, 0x5f, 0x50, 0x50, 0x54, 0x32, 0x30, 0x30, 0x31] => {
-                ProgrammableTagKind::Ppt2001
-            }
+        Some(match self.tag()? {
+            "___PPT9" => ProgrammableTagKind::Ppt9,
+            "___PPT10" => ProgrammableTagKind::Ppt10,
+            "___PPT11" => ProgrammableTagKind::Ppt11,
+            "___PPT12" => ProgrammableTagKind::Ppt12,
+            "___PPTMac11" => ProgrammableTagKind::PptMac11,
+            "___PPT2001" => ProgrammableTagKind::Ppt2001,
             _ => ProgrammableTagKind::Other,
         })
     }
@@ -652,9 +642,70 @@ pub struct OutlineTextRefAtom {
     pub index: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PptTextType {
+    Title,
+    Body,
+    Notes,
+    Other,
+    CenterBody,
+    CenterTitle,
+    HalfBody,
+    QuarterBody,
+    Compatibility(u32),
+}
+
+impl PptTextType {
+    pub const fn from_raw(value: u32) -> Self {
+        match value {
+            0 => Self::Title,
+            1 => Self::Body,
+            2 => Self::Notes,
+            4 => Self::Other,
+            5 => Self::CenterBody,
+            6 => Self::CenterTitle,
+            7 => Self::HalfBody,
+            8 => Self::QuarterBody,
+            value => Self::Compatibility(value),
+        }
+    }
+
+    pub const fn raw(self) -> u32 {
+        match self {
+            Self::Title => 0,
+            Self::Body => 1,
+            Self::Notes => 2,
+            Self::Other => 4,
+            Self::CenterBody => 5,
+            Self::CenterTitle => 6,
+            Self::HalfBody => 7,
+            Self::QuarterBody => 8,
+            Self::Compatibility(value) => value,
+        }
+    }
+}
+
+impl SdkRead for PptTextType {
+    fn read_from<R: Read + std::io::Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        Ok(Self::from_raw(reader.read_u32()?))
+    }
+}
+
+impl SdkWrite for PptTextType {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        writer.write_u32(self.raw())
+    }
+}
+
+impl SdkSize for PptTextType {
+    fn sdk_size(&self) -> u64 {
+        4
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct TextHeaderAtom {
-    pub text_type: u32,
+    pub text_type: PptTextType,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
@@ -676,11 +727,175 @@ pub struct ExternalObjectRefAtom {
     pub external_object_id: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PptPlaceholderType {
+    None,
+    MasterTitle,
+    MasterBody,
+    MasterCenterTitle,
+    MasterSubTitle,
+    MasterNotesSlideImage,
+    MasterNotesBody,
+    MasterDate,
+    MasterSlideNumber,
+    MasterFooter,
+    MasterHeader,
+    NotesSlideImage,
+    NotesBody,
+    Title,
+    Body,
+    CenterTitle,
+    SubTitle,
+    VerticalTitle,
+    VerticalBody,
+    Object,
+    Graph,
+    Table,
+    ClipArt,
+    OrganizationChart,
+    Media,
+    VerticalObject,
+    Picture,
+    Compatibility(u8),
+}
+
+impl PptPlaceholderType {
+    pub const fn from_raw(value: u8) -> Self {
+        match value {
+            0x00 => Self::None,
+            0x01 => Self::MasterTitle,
+            0x02 => Self::MasterBody,
+            0x03 => Self::MasterCenterTitle,
+            0x04 => Self::MasterSubTitle,
+            0x05 => Self::MasterNotesSlideImage,
+            0x06 => Self::MasterNotesBody,
+            0x07 => Self::MasterDate,
+            0x08 => Self::MasterSlideNumber,
+            0x09 => Self::MasterFooter,
+            0x0a => Self::MasterHeader,
+            0x0b => Self::NotesSlideImage,
+            0x0c => Self::NotesBody,
+            0x0d => Self::Title,
+            0x0e => Self::Body,
+            0x0f => Self::CenterTitle,
+            0x10 => Self::SubTitle,
+            0x11 => Self::VerticalTitle,
+            0x12 => Self::VerticalBody,
+            0x13 => Self::Object,
+            0x14 => Self::Graph,
+            0x15 => Self::Table,
+            0x16 => Self::ClipArt,
+            0x17 => Self::OrganizationChart,
+            0x18 => Self::Media,
+            0x19 => Self::VerticalObject,
+            0x1a => Self::Picture,
+            value => Self::Compatibility(value),
+        }
+    }
+
+    pub const fn raw(self) -> u8 {
+        match self {
+            Self::None => 0x00,
+            Self::MasterTitle => 0x01,
+            Self::MasterBody => 0x02,
+            Self::MasterCenterTitle => 0x03,
+            Self::MasterSubTitle => 0x04,
+            Self::MasterNotesSlideImage => 0x05,
+            Self::MasterNotesBody => 0x06,
+            Self::MasterDate => 0x07,
+            Self::MasterSlideNumber => 0x08,
+            Self::MasterFooter => 0x09,
+            Self::MasterHeader => 0x0a,
+            Self::NotesSlideImage => 0x0b,
+            Self::NotesBody => 0x0c,
+            Self::Title => 0x0d,
+            Self::Body => 0x0e,
+            Self::CenterTitle => 0x0f,
+            Self::SubTitle => 0x10,
+            Self::VerticalTitle => 0x11,
+            Self::VerticalBody => 0x12,
+            Self::Object => 0x13,
+            Self::Graph => 0x14,
+            Self::Table => 0x15,
+            Self::ClipArt => 0x16,
+            Self::OrganizationChart => 0x17,
+            Self::Media => 0x18,
+            Self::VerticalObject => 0x19,
+            Self::Picture => 0x1a,
+            Self::Compatibility(value) => value,
+        }
+    }
+}
+
+impl SdkRead for PptPlaceholderType {
+    fn read_from<R: Read + std::io::Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        Ok(Self::from_raw(reader.read_u8()?))
+    }
+}
+
+impl SdkWrite for PptPlaceholderType {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        writer.write_u8(self.raw())
+    }
+}
+
+impl SdkSize for PptPlaceholderType {
+    fn sdk_size(&self) -> u64 {
+        1
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PptPlaceholderSize {
+    Full,
+    Half,
+    Quarter,
+    Compatibility(u8),
+}
+
+impl PptPlaceholderSize {
+    pub const fn from_raw(value: u8) -> Self {
+        match value {
+            0 => Self::Full,
+            1 => Self::Half,
+            2 => Self::Quarter,
+            value => Self::Compatibility(value),
+        }
+    }
+
+    pub const fn raw(self) -> u8 {
+        match self {
+            Self::Full => 0,
+            Self::Half => 1,
+            Self::Quarter => 2,
+            Self::Compatibility(value) => value,
+        }
+    }
+}
+
+impl SdkRead for PptPlaceholderSize {
+    fn read_from<R: Read + std::io::Seek>(reader: &mut Reader<R>) -> Result<Self> {
+        Ok(Self::from_raw(reader.read_u8()?))
+    }
+}
+
+impl SdkWrite for PptPlaceholderSize {
+    fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        writer.write_u8(self.raw())
+    }
+}
+
+impl SdkSize for PptPlaceholderSize {
+    fn sdk_size(&self) -> u64 {
+        1
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct PlaceholderAtom {
     pub position: i32,
-    pub placement_id: u8,
-    pub size: u8,
+    pub placement_id: PptPlaceholderType,
+    pub size: PptPlaceholderSize,
     pub unused: i16,
 }
 
@@ -2058,6 +2273,42 @@ pub struct PptLiveTextBodyRef<'a> {
     pub records: &'a [PptRecord],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PptTextEncoding {
+    Utf16,
+    Bytes,
+}
+
+/// One physical TextCharsAtom or TextBytesAtom in a live text body. Normal
+/// values borrow a Rust string directly; malformed UTF-16 remains explicit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PptLiveTextAtomRef<'a> {
+    String {
+        source_record: &'a PptRecord,
+        value: &'a str,
+        encoding: PptTextEncoding,
+    },
+    CompatibilityUtf16 {
+        source_record: &'a PptRecord,
+        code_units: &'a [u16],
+    },
+}
+
+/// One OfficeArt SpContainer in a live persist object, joined to its FSP,
+/// placeholder, outline-text body, and table marker owners.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PptLiveShapeRef<'a> {
+    pub source_record: &'a PptRecord,
+    pub parent_shape_record: Option<&'a PptRecord>,
+    pub group_record: Option<&'a PptRecord>,
+    pub shape_record: &'a PptRecord,
+    pub shape: &'a crate::office_art::OfficeArtShape,
+    pub placeholder_record: Option<&'a PptRecord>,
+    pub placeholder: Option<&'a PlaceholderAtom>,
+    pub outline_text: Option<PptLiveOutlineTextRef<'a>>,
+    pub table_property: Option<&'a crate::office_art::OfficeArtProperty>,
+}
+
 /// Mutable static record group for one list text body. It deliberately does
 /// not collapse text, styles, bookmarks, special information, or interactive
 /// records into a string projection.
@@ -2079,6 +2330,40 @@ impl<'a> PptLiveTextBodyMut<'a> {
 
     pub fn records_mut(&mut self) -> &mut [PptRecord] {
         self.records
+    }
+}
+
+impl<'a> PptLiveTextBodyRef<'a> {
+    pub fn character_atoms(self) -> impl Iterator<Item = PptLiveTextAtomRef<'a>> {
+        self.records.iter().filter_map(|record| match &record.data {
+            PptRecordData::TextChars(value) => Some(PptLiveTextAtomRef::String {
+                source_record: record,
+                value,
+                encoding: PptTextEncoding::Utf16,
+            }),
+            PptRecordData::TextBytes(value) => Some(PptLiveTextAtomRef::String {
+                source_record: record,
+                value,
+                encoding: PptTextEncoding::Bytes,
+            }),
+            PptRecordData::CompatibilityTextChars(code_units) => {
+                Some(PptLiveTextAtomRef::CompatibilityUtf16 {
+                    source_record: record,
+                    code_units,
+                })
+            }
+            _ => None,
+        })
+    }
+
+    pub fn style_text_properties(self) -> impl Iterator<Item = &'a StyleTextPropAtom> {
+        self.records.iter().filter_map(|record| {
+            if let PptRecordData::StyleTextProp(value) = &record.data {
+                Some(value)
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -2124,9 +2409,13 @@ impl PptSlideId {
     }
 }
 
-impl PptLiveSlideRef<'_, '_> {
+impl<'view, 'a> PptLiveSlideRef<'view, 'a> {
     pub const fn id(self) -> PptSlideId {
         PptSlideId(self.persist.slide_id)
+    }
+
+    pub fn shapes(self) -> Result<Vec<PptLiveShapeRef<'a>>> {
+        self.object.shapes()
     }
 }
 
@@ -2217,6 +2506,24 @@ impl<'a> PptLivePersistObject<'a> {
             cursor = end;
         }
         bodies
+    }
+
+    /// Returns text-body groups physically contained in the persist object
+    /// itself. This is the native path for notes text and shape-local text;
+    /// list text bodies remain available through [`Self::text_bodies`].
+    pub fn record_text_bodies(self) -> Vec<PptLiveTextBodyRef<'a>> {
+        let mut bodies = Vec::new();
+        collect_record_text_bodies(self.record, &mut bodies);
+        bodies
+    }
+
+    /// Returns live OfficeArt shapes in physical z-order. Each shape retains
+    /// the unique SpContainer/FSP source and any exact PPT client-data links.
+    pub fn shapes(self) -> Result<Vec<PptLiveShapeRef<'a>>> {
+        let outline_text = self.outline_text_references()?;
+        let mut shapes = Vec::new();
+        collect_live_shapes(self.record, None, None, &outline_text, &mut shapes);
+        Ok(shapes)
     }
 
     /// Resolves every live `OutlineTextRefAtom.index` in this persist object
@@ -2442,6 +2749,213 @@ fn collect_live_outline_text_links<'a>(
         for child in &children.records {
             collect_live_outline_text_links(child, containing_shape, text_bodies, output);
         }
+    }
+}
+
+impl<'a> PptLiveShapeRef<'a> {
+    pub const fn shape_id(self) -> u32 {
+        self.shape.shape_id
+    }
+
+    pub const fn shape_type(self) -> u16 {
+        self.shape_record.header.instance
+    }
+
+    pub const fn is_table(self) -> bool {
+        self.table_property.is_some()
+    }
+
+    /// Returns directly nested SpContainers in their physical order. For a
+    /// table these are its actual child shapes; row/column projection remains
+    /// separate because it depends on anchors and merged-cell geometry.
+    pub fn child_shapes(self) -> Vec<PptLiveShapeRef<'a>> {
+        if !self
+            .shape
+            .flags
+            .contains(crate::office_art::OfficeArtShapeFlags::GROUP)
+        {
+            return Vec::new();
+        }
+        let mut shapes = Vec::new();
+        if let Some(group_record) = self.group_record {
+            collect_group_shapes(group_record, self.source_record, &mut shapes);
+        } else {
+            collect_direct_child_shapes(self.source_record, &mut shapes);
+        }
+        shapes
+    }
+
+    pub fn text_bodies(self) -> Vec<PptLiveTextBodyRef<'a>> {
+        let mut bodies = Vec::new();
+        collect_record_text_bodies(self.source_record, &mut bodies);
+        bodies
+    }
+}
+
+fn collect_live_shapes<'a>(
+    record: &'a PptRecord,
+    parent_shape_record: Option<&'a PptRecord>,
+    group_record: Option<&'a PptRecord>,
+    outline_text: &[PptLiveOutlineTextRef<'a>],
+    output: &mut Vec<PptLiveShapeRef<'a>>,
+) {
+    let mut child_parent = parent_shape_record;
+    let child_group = if record.header.record_type == 0xf003 {
+        Some(record)
+    } else {
+        group_record
+    };
+    if record.header.record_type == 0xf004 {
+        if let Some(shape) =
+            make_live_shape(record, parent_shape_record, group_record, outline_text)
+        {
+            output.push(shape);
+        }
+        child_parent = Some(record);
+    }
+    if let Some(children) = ppt_record_children(record) {
+        for child in &children.records {
+            collect_live_shapes(child, child_parent, child_group, outline_text, output);
+        }
+    }
+}
+
+fn make_live_shape<'a>(
+    source_record: &'a PptRecord,
+    parent_shape_record: Option<&'a PptRecord>,
+    group_record: Option<&'a PptRecord>,
+    outline_text: &[PptLiveOutlineTextRef<'a>],
+) -> Option<PptLiveShapeRef<'a>> {
+    let mut shape_record = None;
+    let mut shape = None;
+    let mut placeholder_record = None;
+    let mut placeholder = None;
+    let mut table_property = None;
+    visit_shape_owned_records(source_record, &mut |record| {
+        match &record.data {
+        PptRecordData::OfficeArt(office_art) => match &office_art.data {
+            OfficeArtRecordData::Shape(value) if shape.is_none() => {
+                shape_record = Some(record);
+                shape = Some(value);
+            }
+            OfficeArtRecordData::PropertyTable(table) => {
+                if let Some(property) = table.properties.iter().find(|property| {
+                    property.property_id == 0x039f
+                        && matches!(property.value, crate::office_art::OfficeArtPropertyValue::Simple(value) if value & 1 != 0)
+                }) {
+                    table_property = Some(property);
+                }
+            }
+            _ => {}
+        },
+        PptRecordData::Placeholder(value) if placeholder.is_none() => {
+            placeholder_record = Some(record);
+            placeholder = Some(value);
+        }
+        _ => {}
+    }
+    });
+    let shape_record = shape_record?;
+    let outline_text = outline_text
+        .iter()
+        .find(|reference| {
+            reference
+                .shape_record
+                .is_some_and(|record| std::ptr::eq(record, source_record))
+        })
+        .copied();
+    Some(PptLiveShapeRef {
+        source_record,
+        parent_shape_record,
+        group_record,
+        shape_record,
+        shape: shape?,
+        placeholder_record,
+        placeholder,
+        outline_text,
+        table_property,
+    })
+}
+
+fn collect_direct_child_shapes<'a>(record: &'a PptRecord, output: &mut Vec<PptLiveShapeRef<'a>>) {
+    let Some(children) = ppt_record_children(record) else {
+        return;
+    };
+    for child in &children.records {
+        if child.header.record_type == 0xf004 {
+            if let Some(shape) = make_live_shape(child, Some(record), None, &[]) {
+                output.push(shape);
+            }
+        } else {
+            collect_direct_child_shapes(child, output);
+        }
+    }
+}
+
+fn collect_group_shapes<'a>(
+    group_record: &'a PptRecord,
+    table_shape_record: &'a PptRecord,
+    output: &mut Vec<PptLiveShapeRef<'a>>,
+) {
+    let Some(children) = ppt_record_children(group_record) else {
+        return;
+    };
+    for child in &children.records {
+        if child.header.record_type == 0xf004 {
+            if !std::ptr::eq(child, table_shape_record)
+                && let Some(shape) = make_live_shape(child, None, Some(group_record), &[])
+            {
+                output.push(shape);
+            }
+        } else if child.header.record_type != 0xf003 {
+            collect_group_shapes(child, table_shape_record, output);
+        }
+    }
+}
+
+fn visit_shape_owned_records<'a>(record: &'a PptRecord, visit: &mut impl FnMut(&'a PptRecord)) {
+    visit(record);
+    if let Some(children) = ppt_record_children(record) {
+        for child in &children.records {
+            if child.header.record_type != 0xf004 {
+                visit_shape_owned_records(child, visit);
+            }
+        }
+    }
+}
+
+fn ppt_record_children(record: &PptRecord) -> Option<&PptRecordSequence> {
+    match &record.data {
+        PptRecordData::Container(children)
+        | PptRecordData::ProgTags(children)
+        | PptRecordData::BinaryTagData(BinaryTagData::Records(children)) => Some(children),
+        PptRecordData::ProgBinaryTag(value) => Some(&value.records),
+        _ => None,
+    }
+}
+
+fn collect_record_text_bodies<'a>(record: &'a PptRecord, output: &mut Vec<PptLiveTextBodyRef<'a>>) {
+    let Some(children) = ppt_record_children(record) else {
+        return;
+    };
+    let mut cursor = 0usize;
+    while cursor < children.records.len() {
+        let child = &children.records[cursor];
+        if let PptRecordData::TextHeader(header) = &child.data {
+            let end = children.records[cursor + 1..]
+                .iter()
+                .position(|candidate| matches!(candidate.data, PptRecordData::TextHeader(_)))
+                .map_or(children.records.len(), |relative| cursor + 1 + relative);
+            output.push(PptLiveTextBodyRef {
+                header_record: child,
+                header,
+                records: &children.records[cursor..end],
+            });
+            cursor = end;
+            continue;
+        }
+        collect_record_text_bodies(child, output);
+        cursor += 1;
     }
 }
 
@@ -3472,13 +3986,15 @@ impl PowerPointDocument {
             self,
             &persist_object_directory,
             document_children,
-            0,
-            SLIDE_CONTAINER,
-            PptLivePersistObjectRole::PresentationSlide,
-            "SlideListWithTextContainer",
-            "SlidePersistAtom.persistIdRef",
-            "2.4.14.5",
-            "SlidePersistAtom.persistIdRef does not resolve to SlideContainer",
+            ListPersistObjectSpec {
+                list_instance: 0,
+                target_record_type: SLIDE_CONTAINER,
+                role: PptLivePersistObjectRole::PresentationSlide,
+                list_name: "SlideListWithTextContainer",
+                source_field: "SlidePersistAtom.persistIdRef",
+                specification_section: "2.4.14.5",
+                error_message: "SlidePersistAtom.persistIdRef does not resolve to SlideContainer",
+            },
             strict,
             diagnostics,
         )?;
@@ -3486,13 +4002,15 @@ impl PowerPointDocument {
             self,
             &persist_object_directory,
             document_children,
-            2,
-            NOTES_CONTAINER,
-            PptLivePersistObjectRole::NotesSlide,
-            "NotesListWithTextContainer",
-            "NotesPersistAtom.persistIdRef",
-            "2.4.14.7",
-            "NotesPersistAtom.persistIdRef does not resolve to NotesContainer",
+            ListPersistObjectSpec {
+                list_instance: 2,
+                target_record_type: NOTES_CONTAINER,
+                role: PptLivePersistObjectRole::NotesSlide,
+                list_name: "NotesListWithTextContainer",
+                source_field: "NotesPersistAtom.persistIdRef",
+                specification_section: "2.4.14.7",
+                error_message: "NotesPersistAtom.persistIdRef does not resolve to NotesContainer",
+            },
             strict,
             diagnostics,
         )?;
@@ -4161,39 +4679,42 @@ fn optional_live_object<'a>(
     }))
 }
 
-#[allow(clippy::too_many_arguments)]
+struct ListPersistObjectSpec {
+    list_instance: u16,
+    target_record_type: u16,
+    role: PptLivePersistObjectRole,
+    list_name: &'static str,
+    source_field: &'static str,
+    specification_section: &'static str,
+    error_message: &'static str,
+}
+
 fn resolve_list_persist_objects<'a>(
     document: &'a PowerPointDocument,
     directory: &PersistObjectDirectory,
     document_children: &'a PptRecordSequence,
-    list_instance: u16,
-    target_record_type: u16,
-    role: PptLivePersistObjectRole,
-    list_name: &str,
-    source_field: &'static str,
-    specification_section: &'static str,
-    error_message: &'static str,
+    spec: ListPersistObjectSpec,
     strict: bool,
     diagnostics: &mut Vec<ParseDiagnostic>,
 ) -> Result<Vec<PptLivePersistObject<'a>>> {
     let Some(list_record) = optional_direct_record(
         document_children,
         SLIDE_LIST_WITH_TEXT_CONTAINER,
-        Some(list_instance),
-        list_name,
+        Some(spec.list_instance),
+        spec.list_name,
     )?
     else {
         return Ok(Vec::new());
     };
-    let list = ppt_container_children(list_record, list_name)?;
+    let list = ppt_container_children(list_record, spec.list_name)?;
     let mut objects = Vec::new();
-    for (source_record, source, list_records) in direct_slide_persist_atoms(list, list_name)? {
+    for (source_record, source, list_records) in direct_slide_persist_atoms(list, spec.list_name)? {
         let resolved = document.resolve_live_persist_object(
             directory,
             source.persist_id_ref,
             source_record.offset,
-            &[target_record_type],
-            error_message,
+            &[spec.target_record_type],
+            spec.error_message,
         );
         let (reference, record) = match resolved {
             Ok(value) => value,
@@ -4202,8 +4723,8 @@ fn resolve_list_persist_objects<'a>(
                     diagnostics,
                     ParseDiagnosticCode::InvalidReference,
                     source_record.offset,
-                    source_field,
-                    specification_section,
+                    spec.source_field,
+                    spec.specification_section,
                     error.to_string(),
                 );
                 continue;
@@ -4212,7 +4733,7 @@ fn resolve_list_persist_objects<'a>(
         };
         objects.push(PptLivePersistObject {
             reference,
-            role,
+            role: spec.role,
             source_record,
             record,
             list_records,
@@ -4466,12 +4987,16 @@ impl PptRecordSequence {
                 })
             } else if header.record_type == TEXT_HEADER_ATOM && body.len() == 4 {
                 PptRecordData::TextHeader(TextHeaderAtom {
-                    text_type: read_u32(body, 0),
+                    text_type: PptTextType::from_raw(read_u32(body, 0)),
                 })
             } else if header.record_type == TEXT_CHARS_ATOM && body.len().is_multiple_of(2) {
-                PptRecordData::TextChars(read_utf16(body))
+                let code_units = read_utf16(body);
+                match String::from_utf16(&code_units) {
+                    Ok(value) => PptRecordData::TextChars(value),
+                    Err(_) => PptRecordData::CompatibilityTextChars(code_units),
+                }
             } else if header.record_type == TEXT_BYTES_ATOM {
-                PptRecordData::TextBytes(body.to_vec())
+                PptRecordData::TextBytes(body.iter().copied().map(char::from).collect())
             } else if header.record_type == STYLE_TEXT_PROP_ATOM {
                 match corresponding_text_character_count {
                     Some(character_count) => StyleTextPropAtom::parse(body, character_count)
@@ -4485,7 +5010,11 @@ impl PptRecordSequence {
                     None => PptRecordData::UnresolvedStyleTextProp(body.to_vec()),
                 }
             } else if header.record_type == C_STRING_ATOM && body.len().is_multiple_of(2) {
-                PptRecordData::CString(read_utf16(body))
+                let code_units = read_utf16(body);
+                match String::from_utf16(&code_units) {
+                    Ok(value) => PptRecordData::CString(value),
+                    Err(_) => PptRecordData::CompatibilityCString(code_units),
+                }
             } else if header.record_type == SLIDE_PERSIST_ATOM && body.len() == 20 {
                 PptRecordData::SlidePersist(parse_fixed(body).expect("fixed SlidePersistAtom"))
             } else if header.record_type == COLOR_SCHEME_ATOM && body.len() == 32 {
@@ -4964,9 +5493,13 @@ impl PptRecordSequence {
                 // its style runs can still cover the implicit paragraph terminator.
                 PptRecordData::TextHeader(_) => corresponding_text_character_count = Some(0),
                 PptRecordData::TextChars(values) => {
-                    corresponding_text_character_count = u32::try_from(values.len()).ok()
+                    corresponding_text_character_count =
+                        u32::try_from(values.encode_utf16().count()).ok()
                 }
                 PptRecordData::TextBytes(values) => {
+                    corresponding_text_character_count = u32::try_from(values.chars().count()).ok()
+                }
+                PptRecordData::CompatibilityTextChars(values) => {
                     corresponding_text_character_count = u32::try_from(values.len()).ok()
                 }
                 _ => {}
@@ -5194,6 +5727,14 @@ impl PptRecord {
             .checked_add(HEADER_LEN as u64)
             .ok_or_else(|| Error::Limit("PPT child record offset overflow".into()))?;
         match &mut self.data {
+            PptRecordData::CompatibilityTextChars(_) | PptRecordData::CompatibilityCString(_)
+                if !preserve_compatibility =>
+            {
+                return Err(Error::invalid(
+                    self.offset,
+                    "PPT invalid UTF-16 requires compatibility-preserving save",
+                ));
+            }
             PptRecordData::Container(children) => {
                 children.relayout(body_offset, None, preserve_compatibility)?;
                 if self.header.record_type == 0xf001 && !preserve_compatibility {
@@ -5320,13 +5861,19 @@ impl PptRecord {
                 if self.header.record_type != TEXT_CHARS_ATOM {
                     return Err(Error::invalid(0, "TextCharsAtom header changed"));
                 }
-                write_utf16(values)
+                write_utf16_string(values)
             }
             PptRecordData::TextBytes(values) => {
                 if self.header.record_type != TEXT_BYTES_ATOM {
                     return Err(Error::invalid(0, "TextBytesAtom header changed"));
                 }
-                values.clone()
+                write_byte_string(values)?
+            }
+            PptRecordData::CompatibilityTextChars(values) => {
+                if self.header.record_type != TEXT_CHARS_ATOM {
+                    return Err(Error::invalid(0, "compatible TextCharsAtom header changed"));
+                }
+                write_utf16(values)
             }
             PptRecordData::StyleTextProp(value) => {
                 if self.header.record_type != STYLE_TEXT_PROP_ATOM {
@@ -5355,6 +5902,12 @@ impl PptRecord {
             PptRecordData::CString(values) => {
                 if self.header.record_type != C_STRING_ATOM {
                     return Err(Error::invalid(0, "CString header changed"));
+                }
+                write_utf16_string(values)
+            }
+            PptRecordData::CompatibilityCString(values) => {
+                if self.header.record_type != C_STRING_ATOM {
+                    return Err(Error::invalid(0, "compatible CString header changed"));
                 }
                 write_utf16(values)
             }
@@ -8047,6 +8600,28 @@ fn write_utf16(values: &[u16]) -> Vec<u8> {
     bytes
 }
 
+fn write_utf16_string(value: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(value.encode_utf16().count().saturating_mul(2));
+    for code_unit in value.encode_utf16() {
+        bytes.extend_from_slice(&code_unit.to_le_bytes());
+    }
+    bytes
+}
+
+fn write_byte_string(value: &str) -> Result<Vec<u8>> {
+    value
+        .chars()
+        .map(|character| {
+            u8::try_from(u32::from(character)).map_err(|_| {
+                Error::invalid(
+                    u64::from(u32::from(character)),
+                    "TextBytesAtom String contains a character above U+00FF",
+                )
+            })
+        })
+        .collect()
+}
+
 fn parse_fixed<T: SdkRead>(bytes: &[u8]) -> Option<T> {
     let mut reader = Reader::new(Cursor::new(bytes)).ok()?;
     let value = T::read_from(&mut reader).ok()?;
@@ -8298,7 +8873,7 @@ mod tests {
         let PptRecordData::ProgBinaryTag(value) = &parsed.records.records[0].data else {
             panic!("expected ProgBinaryTag");
         };
-        assert_eq!(value.tag_units(), Some(tag_units.as_slice()));
+        assert_eq!(value.tag(), Some("___PPT12"));
         assert_eq!(value.tag_kind(), Some(ProgrammableTagKind::Ppt12));
         assert!(value.binary_tag_data().is_some());
         assert_eq!(parsed.to_bytes().unwrap(), bytes);

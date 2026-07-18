@@ -54,9 +54,9 @@ use super::{
     Sepx, ShapeAnchor, ShapeAnchorTable, SmartTagBookmarks, SmartTagData,
     SmartTagRecognizerStateTable, SpellingStateTable, SprmGroup, SprmKind, SprmOperand,
     StructuredTagBookmarks, StructuredTagType, StyleFormatting, StyleSheet, SubdocumentTable,
-    TableCharacterCacheTable, TextPiece, TextPieceCharacters, TextboxBreak, TextboxBreakTable,
-    TextboxDocumentPart, TextboxStory, TextboxStoryChain, TextboxStoryTable, UserInputMethods,
-    UserVariables, XmlSchemaReferences, XmlTransformPath,
+    TableCharacterCacheTable, TextPiece, TextPieceCharacters, TextPieceEncoding, TextboxBreak,
+    TextboxBreakTable, TextboxDocumentPart, TextboxStory, TextboxStoryChain, TextboxStoryTable,
+    UserInputMethods, UserVariables, XmlSchemaReferences, XmlTransformPath,
 };
 
 const WORD_DOCUMENT_STREAM: &str = "/WordDocument";
@@ -298,9 +298,12 @@ pub struct DocTextPieceRef<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DocTextPieceCharactersRef<'a> {
-    Compressed(&'a [u8]),
-    Utf16(&'a [u16]),
+pub enum DocTextPieceValueRef<'a> {
+    String {
+        value: &'a str,
+        encoding: TextPieceEncoding,
+    },
+    CompatibilityUtf16(&'a [u16]),
 }
 
 /// One PAPX FKP interval intersected with a document part.
@@ -310,6 +313,65 @@ pub struct DocParagraphRef<'a> {
     source: &'a DocPapxRun,
     global_cp_range: DocCpRange,
     local_cp_range: DocCpRange,
+}
+
+/// The paragraph style selected after applying the PAPX style index and its
+/// ordered `sprmPIstd`/`sprmPIstdPermute` direct modifications. The style
+/// definition remains borrowed from the one STSH owner.
+#[derive(Clone, Copy, Debug)]
+pub struct DocParagraphStyleRef<'a> {
+    document_part: DocDocumentPartRef<'a>,
+    style_index: u16,
+    source: &'a super::StyleDefinition,
+}
+
+/// MS-DOC paragraph outline level. Values zero through eight are the nine
+/// outline levels; 0x09 is body text and therefore not an outline paragraph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DocOutlineLevel {
+    Level1,
+    Level2,
+    Level3,
+    Level4,
+    Level5,
+    Level6,
+    Level7,
+    Level8,
+    Level9,
+    BodyText,
+}
+
+/// One top-level content block in a document part. A completed outer table is
+/// emitted once; its member paragraphs remain reachable through the table,
+/// row, and cell relationships instead of appearing again beside it.
+#[derive(Clone, Debug)]
+pub enum DocBlockRef<'a> {
+    Paragraph(DocParagraphRef<'a>),
+    Table(DocTableRef<'a>),
+}
+
+/// Document-order block relationship index for one document part.
+#[derive(Clone, Debug)]
+pub struct DocBlocks<'a> {
+    blocks: Vec<DocBlockRef<'a>>,
+    diagnostics: Vec<DocTableDiagnostic>,
+}
+
+/// One PlcfSed interval in the Main Document, joined to its SED and optional
+/// Sepx owner without copying either structure.
+#[derive(Clone, Copy, Debug)]
+pub struct DocSectionRef<'a> {
+    document_part: DocDocumentPartRef<'a>,
+    section_index: usize,
+    local_cp_range: DocCpRange,
+    global_cp_range: DocCpRange,
+    source: &'a super::Sed,
+    properties: &'a DocSectionProperties,
+}
+
+#[derive(Clone, Debug)]
+pub struct DocSections<'a> {
+    sections: Vec<DocSectionRef<'a>>,
 }
 
 /// The role of a PAPX interval after applying the MS-DOC table-depth and
@@ -1112,6 +1174,15 @@ impl<'a> DocTextRangeRef<'a> {
         })
     }
 
+    pub fn special_contents(self) -> Result<Vec<DocSpecialContentRef<'a>>> {
+        Ok(self
+            .document_part
+            .special_contents()?
+            .into_iter()
+            .filter(|content| self.local_cp_range.contains(content.character()))
+            .collect())
+    }
+
     pub fn tables(self) -> Result<DocTables<'a>> {
         let mut tables = self.document_part.tables()?;
         tables
@@ -1564,9 +1635,9 @@ impl<'a> DocDocumentPartRef<'a> {
                 }
                 let character_start = usize::try_from(start - source_start).ok()?;
                 let character_end = usize::try_from(end - source_start).ok()?;
-                let width = match source.value.characters {
-                    TextPieceCharacters::Compressed(_) => 1,
-                    TextPieceCharacters::Utf16(_) => 2,
+                let width = match source.value.characters.encoding() {
+                    TextPieceEncoding::Compressed => 1,
+                    TextPieceEncoding::Utf16 => 2,
                 };
                 let fc_start = source
                     .value
@@ -1631,6 +1702,109 @@ impl<'a> DocDocumentPartRef<'a> {
             })
     }
 
+    /// Combines ordinary paragraphs and completed outer tables in document
+    /// order. Table member paragraphs are not duplicated as sibling blocks.
+    pub fn blocks(self) -> Result<DocBlocks<'a>> {
+        let tables = self.tables()?;
+        let outer_tables = tables
+            .tables
+            .iter()
+            .filter(|candidate| {
+                !tables.tables.iter().any(|container| {
+                    container.table_depth < candidate.table_depth
+                        && container.global_cp_range.start.0 <= candidate.global_cp_range.start.0
+                        && candidate.global_cp_range.end.0 <= container.global_cp_range.end.0
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut blocks = self
+            .paragraphs()
+            .filter(|paragraph| {
+                !outer_tables.iter().any(|table| {
+                    table.global_cp_range.start.0 <= paragraph.global_cp_range.start.0
+                        && paragraph.global_cp_range.end.0 <= table.global_cp_range.end.0
+                })
+            })
+            .map(DocBlockRef::Paragraph)
+            .collect::<Vec<_>>();
+        blocks.extend(outer_tables.into_iter().map(DocBlockRef::Table));
+        blocks.sort_by_key(DocBlockRef::global_cp_start);
+        Ok(DocBlocks {
+            blocks,
+            diagnostics: tables.diagnostics,
+        })
+    }
+
+    /// Joins the Main Document's PlcfSed ranges to their SED and Sepx owners.
+    pub fn sections(self) -> Result<DocSections<'a>> {
+        if self.part != FieldDocumentPart::Main {
+            return Err(Error::invalid(
+                u64::from(self.global_cp_range.start.0),
+                "PlcfSed ranges belong only to the Main Document",
+            ));
+        }
+        let table = &self.file.table.sections.value;
+        if table.character_positions.len() != table.sections.len() + 1
+            || table.sections.len() != self.file.word_document.section_properties.len()
+        {
+            return Err(Error::invalid(0, "PlcfSed/SED/Sepx cardinality changed"));
+        }
+        let mut sections = Vec::with_capacity(table.sections.len());
+        for (section_index, ((range, source), properties)) in table
+            .character_positions
+            .windows(2)
+            .zip(&table.sections)
+            .zip(&self.file.word_document.section_properties)
+            .enumerate()
+        {
+            let start = u32::try_from(range[0])
+                .map_err(|_| Error::invalid(0, "PlcfSed has a negative start CP"))?;
+            let end = u32::try_from(range[1])
+                .map_err(|_| Error::invalid(0, "PlcfSed has a negative end CP"))?;
+            if start > end || end > self.local_cp_range().end.0 {
+                return Err(Error::invalid(
+                    u64::from(start),
+                    "PlcfSed range exceeds the Main Document",
+                ));
+            }
+            if properties.section_index != section_index || properties.offset != source.sepx_offset
+            {
+                return Err(Error::invalid(
+                    u64::try_from(section_index).unwrap_or(u64::MAX),
+                    "SED/Sepx relationship identity changed",
+                ));
+            }
+            sections.push(DocSectionRef {
+                document_part: self,
+                section_index,
+                local_cp_range: DocCpRange {
+                    start: DocCp(start),
+                    end: DocCp(end),
+                },
+                global_cp_range: DocCpRange {
+                    start: DocCp(
+                        self.global_cp_range
+                            .start
+                            .0
+                            .checked_add(start)
+                            .ok_or_else(|| Error::Limit("DOC section CP overflow".into()))?,
+                    ),
+                    end: DocCp(
+                        self.global_cp_range
+                            .start
+                            .0
+                            .checked_add(end)
+                            .ok_or_else(|| Error::Limit("DOC section CP overflow".into()))?,
+                    ),
+                },
+                source,
+                properties,
+            });
+        }
+        Ok(DocSections { sections })
+    }
+
     pub fn character_runs(self) -> impl Iterator<Item = DocCharacterRunRef<'a>> {
         let part_start = self.global_cp_range.start.0;
         self.file
@@ -1668,12 +1842,12 @@ impl<'a> DocDocumentPartRef<'a> {
                 return None;
             }
             let index = usize::try_from(local_cp.0 - piece.local_cp_range.start.0).ok()?;
-            match piece.characters() {
-                DocTextPieceCharactersRef::Compressed(value) => {
-                    value.get(index).copied().map(u16::from)
-                }
-                DocTextPieceCharactersRef::Utf16(value) => value.get(index).copied(),
-            }
+            piece
+                .source
+                .value
+                .characters
+                .code_units_iter()
+                .nth(piece.character_start + index)
         })
     }
 
@@ -2015,41 +2189,24 @@ impl<'a> DocDocumentPartRef<'a> {
         let mut links = Vec::new();
         for piece in self.text_pieces() {
             let piece_start = piece.local_cp_range.start.0;
-            match piece.characters() {
-                DocTextPieceCharactersRef::Compressed(characters) => {
-                    for (index, character) in characters.iter().copied().enumerate() {
-                        if !matches!(character, 0x01 | 0x14) {
-                            continue;
-                        }
-                        let local_cp = piece_start
-                            .checked_add(u32::try_from(index).map_err(|_| {
-                                Error::Limit("DOC special-character index exceeds u32".into())
-                            })?)
-                            .ok_or_else(|| {
-                                Error::Limit("DOC special-character CP overflow".into())
-                            })?;
-                        self.push_special_content_link(
-                            DocCp(local_cp),
-                            character.into(),
-                            &mut links,
-                        );
-                    }
+            for (index, character) in piece
+                .source
+                .value
+                .characters
+                .code_units_iter()
+                .skip(piece.character_start)
+                .take(piece.character_end - piece.character_start)
+                .enumerate()
+            {
+                if !matches!(character, 0x0001 | 0x0014) {
+                    continue;
                 }
-                DocTextPieceCharactersRef::Utf16(characters) => {
-                    for (index, character) in characters.iter().copied().enumerate() {
-                        if !matches!(character, 0x0001 | 0x0014) {
-                            continue;
-                        }
-                        let local_cp = piece_start
-                            .checked_add(u32::try_from(index).map_err(|_| {
-                                Error::Limit("DOC special-character index exceeds u32".into())
-                            })?)
-                            .ok_or_else(|| {
-                                Error::Limit("DOC special-character CP overflow".into())
-                            })?;
-                        self.push_special_content_link(DocCp(local_cp), character, &mut links);
-                    }
-                }
+                let local_cp = piece_start
+                    .checked_add(u32::try_from(index).map_err(|_| {
+                        Error::Limit("DOC special-character index exceeds u32".into())
+                    })?)
+                    .ok_or_else(|| Error::Limit("DOC special-character CP overflow".into()))?;
+                self.push_special_content_link(DocCp(local_cp), character, &mut links);
             }
         }
         Ok(links)
@@ -2322,13 +2479,23 @@ impl<'a> DocTextPieceRef<'a> {
         self.fc_range
     }
 
-    pub fn characters(self) -> DocTextPieceCharactersRef<'a> {
+    /// Returns the conforming Rust string slice for this CP intersection, or
+    /// the exact invalid UTF-16 units retained by compatible parsing.
+    pub fn value(self) -> Result<DocTextPieceValueRef<'a>> {
         match &self.source.value.characters {
-            TextPieceCharacters::Compressed(value) => DocTextPieceCharactersRef::Compressed(
-                &value[self.character_start..self.character_end],
-            ),
-            TextPieceCharacters::Utf16(value) => {
-                DocTextPieceCharactersRef::Utf16(&value[self.character_start..self.character_end])
+            TextPieceCharacters::String(value) => Ok(DocTextPieceValueRef::String {
+                value: self
+                    .source
+                    .value
+                    .characters
+                    .string_range(self.character_start..self.character_end)?
+                    .expect("conforming DOC String variant has a string range"),
+                encoding: value.encoding,
+            }),
+            TextPieceCharacters::CompatibilityUtf16 { code_units } => {
+                Ok(DocTextPieceValueRef::CompatibilityUtf16(
+                    &code_units[self.character_start..self.character_end],
+                ))
             }
         }
     }
@@ -2351,6 +2518,17 @@ impl<'a> DocParagraphRef<'a> {
         self.local_cp_range
     }
 
+    /// Returns this paragraph as the existing CP-range relationship view, so
+    /// its pieces, character runs, fields, special content, and tables can be
+    /// traversed without materializing a second content node.
+    pub const fn range(self) -> DocTextRangeRef<'a> {
+        DocTextRangeRef {
+            document_part: self.document_part,
+            local_cp_range: self.local_cp_range,
+            global_cp_range: self.global_cp_range,
+        }
+    }
+
     pub fn text_pieces(self) -> impl Iterator<Item = DocTextPieceRef<'a>> {
         self.document_part.text_pieces().filter(move |piece| {
             piece.global_cp_range.start.0 < self.global_cp_range.end.0
@@ -2363,6 +2541,62 @@ impl<'a> DocParagraphRef<'a> {
             run.global_cp_range.start.0 < self.global_cp_range.end.0
                 && self.global_cp_range.start.0 < run.global_cp_range.end.0
         })
+    }
+
+    /// Resolves the paragraph style selected by the PAPX and Pcd.Prm layers.
+    /// This does not infer headings from a style name or visual formatting.
+    pub fn style(self) -> Result<DocParagraphStyleRef<'a>> {
+        let direct = self.document_part.file.direct_paragraph_formatting_at_cp(
+            self.document_part.part,
+            self.local_cp_range.start.0,
+        )?;
+        let style_index = effective_paragraph_style_index(&direct)?;
+        let source = self
+            .document_part
+            .file
+            .table
+            .styles
+            .as_ref()
+            .and_then(|styles| styles.value.styles.get(usize::from(style_index)))
+            .and_then(|style| style.definition.as_ref())
+            .ok_or_else(|| {
+                Error::invalid(
+                    u64::from(style_index),
+                    "paragraph references an unavailable STSH style",
+                )
+            })?;
+        if source.base.style_kind != super::StyleKind::Paragraph {
+            return Err(Error::invalid(
+                u64::from(style_index),
+                "paragraph references a non-paragraph STSH style",
+            ));
+        }
+        Ok(DocParagraphStyleRef {
+            document_part: self.document_part,
+            style_index,
+            source,
+        })
+    }
+
+    /// Computes the paragraph's normative outline level from its selected
+    /// style hierarchy followed by direct paragraph properties.
+    pub fn outline_level(self) -> Result<DocOutlineLevel> {
+        let direct = self.document_part.file.direct_paragraph_formatting_at_cp(
+            self.document_part.part,
+            self.local_cp_range.start.0,
+        )?;
+        let style_index = effective_paragraph_style_index(&direct)?;
+        let style = self.document_part.file.style_properties(style_index)?;
+        if style.style_kind != super::StyleKind::Paragraph {
+            return Err(Error::invalid(
+                u64::from(style_index),
+                "paragraph references a non-paragraph STSH style",
+            ));
+        }
+        let mut level = 9;
+        apply_outline_properties(&style.paragraph_properties, &mut level)?;
+        apply_outline_properties(&direct.applied_properties, &mut level)?;
+        DocOutlineLevel::from_raw(level)
     }
 
     pub fn formatting_at_start(self) -> Result<DocDirectFormattingRef<'a>> {
@@ -2432,6 +2666,60 @@ impl<'a> DocParagraphRef<'a> {
     }
 }
 
+impl<'a> DocParagraphStyleRef<'a> {
+    pub const fn document_part(self) -> DocDocumentPartRef<'a> {
+        self.document_part
+    }
+
+    pub const fn style_index(self) -> u16 {
+        self.style_index
+    }
+
+    pub const fn source(self) -> &'a super::StyleDefinition {
+        self.source
+    }
+
+    pub fn properties(self) -> Result<DocStyleProperties> {
+        self.document_part.file.style_properties(self.style_index)
+    }
+}
+
+impl DocOutlineLevel {
+    pub const fn raw(self) -> u8 {
+        match self {
+            Self::Level1 => 0,
+            Self::Level2 => 1,
+            Self::Level3 => 2,
+            Self::Level4 => 3,
+            Self::Level5 => 4,
+            Self::Level6 => 5,
+            Self::Level7 => 6,
+            Self::Level8 => 7,
+            Self::Level9 => 8,
+            Self::BodyText => 9,
+        }
+    }
+
+    fn from_raw(value: u8) -> Result<Self> {
+        match value {
+            0 => Ok(Self::Level1),
+            1 => Ok(Self::Level2),
+            2 => Ok(Self::Level3),
+            3 => Ok(Self::Level4),
+            4 => Ok(Self::Level5),
+            5 => Ok(Self::Level6),
+            6 => Ok(Self::Level7),
+            7 => Ok(Self::Level8),
+            8 => Ok(Self::Level9),
+            9 => Ok(Self::BodyText),
+            _ => Err(Error::invalid(
+                u64::from(value),
+                "paragraph outline level exceeds 0x09",
+            )),
+        }
+    }
+}
+
 impl DocParagraphKind {
     pub const fn table_depth(self) -> Option<u32> {
         match self {
@@ -2439,6 +2727,16 @@ impl DocParagraphKind {
             Self::TableParagraph { table_depth }
             | Self::CellMark { table_depth }
             | Self::TableTerminatingParagraph { table_depth } => Some(table_depth),
+        }
+    }
+}
+
+impl DocSpecialContentRef<'_> {
+    pub const fn character(self) -> DocCp {
+        match self {
+            Self::Picture { character, .. }
+            | Self::Binary { character, .. }
+            | Self::OleObject { character, .. } => character,
         }
     }
 }
@@ -2653,6 +2951,76 @@ impl<'a> DocTables<'a> {
                 && cell.global_cp_range.start.0 <= table.global_cp_range.start.0
                 && table.global_cp_range.end.0 <= cell.global_cp_range.end.0
         })
+    }
+}
+
+impl<'a> DocBlocks<'a> {
+    pub fn blocks(&self) -> &[DocBlockRef<'a>] {
+        &self.blocks
+    }
+
+    pub fn diagnostics(&self) -> &[DocTableDiagnostic] {
+        &self.diagnostics
+    }
+}
+
+impl<'a> DocSections<'a> {
+    pub fn sections(&self) -> &[DocSectionRef<'a>] {
+        &self.sections
+    }
+}
+
+impl<'a> DocSectionRef<'a> {
+    pub const fn document_part(self) -> DocDocumentPartRef<'a> {
+        self.document_part
+    }
+
+    pub const fn section_index(self) -> usize {
+        self.section_index
+    }
+
+    pub const fn local_cp_range(self) -> DocCpRange {
+        self.local_cp_range
+    }
+
+    pub const fn global_cp_range(self) -> DocCpRange {
+        self.global_cp_range
+    }
+
+    pub const fn source(self) -> &'a super::Sed {
+        self.source
+    }
+
+    pub const fn properties(self) -> &'a DocSectionProperties {
+        self.properties
+    }
+
+    pub fn blocks(self) -> Result<DocBlocks<'a>> {
+        let mut blocks = self.document_part.blocks()?;
+        blocks
+            .blocks
+            .retain(|block| cp_ranges_overlap(block.local_cp_range(), self.local_cp_range));
+        Ok(blocks)
+    }
+}
+
+impl DocBlockRef<'_> {
+    pub const fn global_cp_range(&self) -> DocCpRange {
+        match self {
+            Self::Paragraph(paragraph) => paragraph.global_cp_range,
+            Self::Table(table) => table.global_cp_range,
+        }
+    }
+
+    pub const fn local_cp_range(&self) -> DocCpRange {
+        match self {
+            Self::Paragraph(paragraph) => paragraph.local_cp_range,
+            Self::Table(table) => table.local_cp_range,
+        }
+    }
+
+    const fn global_cp_start(&self) -> u32 {
+        self.global_cp_range().start.0
     }
 }
 
@@ -4601,8 +4969,10 @@ impl DocFile {
         let structured_tag_bookmarks = parse_bookmark_set(
             &table_bytes,
             fib.structured_tag_bookmark_locations(),
-            ["SttbfBkmkSdt", "PlcfBkfSdt", "PlcfBklSdt"],
-            "structured-tag bookmarks",
+            DocCompatibilityGroup {
+                labels: ["SttbfBkmkSdt", "PlcfBkfSdt", "PlcfBklSdt"],
+                structure: "structured-tag bookmarks",
+            },
             StructuredTagBookmarks::from_bytes,
             options,
             &mut diagnostics,
@@ -4618,8 +4988,10 @@ impl DocFile {
         let smart_tag_bookmarks = parse_bookmark_set(
             &table_bytes,
             fib.smart_tag_bookmark_locations(),
-            ["SttbfBkmkFactoid", "PlcfBkfFactoid", "PlcfBklFactoid"],
-            "smart-tag bookmarks",
+            DocCompatibilityGroup {
+                labels: ["SttbfBkmkFactoid", "PlcfBkfFactoid", "PlcfBklFactoid"],
+                structure: "smart-tag bookmarks",
+            },
             SmartTagBookmarks::from_bytes,
             options,
             &mut diagnostics,
@@ -4628,8 +5000,10 @@ impl DocFile {
         let format_consistency_bookmarks = parse_bookmark_set(
             &table_bytes,
             fib.format_consistency_bookmark_locations(),
-            ["SttbfBkmkFcc", "PlcfBkfFcc", "PlcfBklFcc"],
-            "format-consistency bookmarks",
+            DocCompatibilityGroup {
+                labels: ["SttbfBkmkFcc", "PlcfBkfFcc", "PlcfBklFcc"],
+                structure: "format-consistency bookmarks",
+            },
             FormatConsistencyBookmarks::from_bytes,
             options,
             &mut diagnostics,
@@ -4638,8 +5012,10 @@ impl DocFile {
         let repair_bookmarks = parse_bookmark_set(
             &table_bytes,
             fib.repair_bookmark_locations(),
-            ["SttbfBkmkBpRepairs", "PlcfBkfBpRepairs", "PlcfBklBpRepairs"],
-            "repair bookmarks",
+            DocCompatibilityGroup {
+                labels: ["SttbfBkmkBpRepairs", "PlcfBkfBpRepairs", "PlcfBklBpRepairs"],
+                structure: "repair bookmarks",
+            },
             RepairBookmarks::from_bytes,
             options,
             &mut diagnostics,
@@ -4675,7 +5051,7 @@ impl DocFile {
             physical_bytes: value.value,
         });
 
-        let text_pieces = parse_text_pieces(&clx.value, &word_bytes, limits)?;
+        let text_pieces = parse_text_pieces(&clx.value, &word_bytes, options, &mut diagnostics)?;
         let character_format_pages =
             parse_fkp_pages(&character_bin_table.value, &word_bytes, ChpxFkp::from_bytes)?;
         let paragraph_format_pages =
@@ -5358,7 +5734,7 @@ impl DocFile {
         let mut text_layout_changed = false;
         for (current_piece_index, piece) in self.word_document.text_pieces.iter().enumerate() {
             let source_piece_index = self.word_document.source_piece_indices[current_piece_index];
-            let bytes = piece.value.to_bytes();
+            let bytes = piece.value.to_bytes()?;
             let expected_characters = piece
                 .value
                 .cp_end
@@ -5440,7 +5816,7 @@ impl DocFile {
                 destination_character_count: expected_characters,
                 destination_start: None,
                 character_replacements,
-                compressed: matches!(&piece.value.characters, TextPieceCharacters::Compressed(_)),
+                compressed: piece.value.characters.encoding() == TextPieceEncoding::Compressed,
                 bytes,
             });
         }
@@ -5741,8 +6117,9 @@ impl DocFile {
     /// currently materialized CP reference whose coordinate space is affected.
     ///
     /// The range is relative to the Main Document, as specified by MS-DOC
-    /// section 2.3.1. The replacement must use the physical encoding of the
-    /// first affected text piece. CHPX and PAPX boundaries are rebuilt from
+    /// section 2.3.1. The replacement is a Rust string; a compressed source
+    /// piece is retained when every scalar fits U+00FF and is transactionally
+    /// upgraded to UTF-16 otherwise. CHPX and PAPX boundaries are rebuilt from
     /// logical runs; the paragraph/cell/section terminator sequence must stay
     /// unchanged so paragraph formatting inheritance is unambiguous. A
     /// cross-piece edit removes any emptied PlcPcd descriptors and rebuilds
@@ -5750,7 +6127,7 @@ impl DocFile {
     pub fn replace_main_text_range(
         &mut self,
         range: Range<u32>,
-        replacement: TextPieceCharacters,
+        replacement: impl Into<String>,
     ) -> Result<()> {
         self.replace_text_range(FieldDocumentPart::Main, range, replacement)
     }
@@ -5761,9 +6138,10 @@ impl DocFile {
         &mut self,
         part: FieldDocumentPart,
         range: Range<u32>,
-        replacement: TextPieceCharacters,
+        replacement: impl Into<String>,
     ) -> Result<()> {
         let mut edited = self.clone();
+        let replacement = edited.encode_text_replacement(part, &range, replacement.into())?;
         edited.replace_text_range_composed(
             part,
             range,
@@ -5783,7 +6161,7 @@ impl DocFile {
     pub fn replace_main_text_range_with_papx_runs(
         &mut self,
         range: Range<u32>,
-        replacement: TextPieceCharacters,
+        replacement: impl Into<String>,
         papx_runs: Vec<DocPapxRun>,
     ) -> Result<()> {
         self.replace_text_range_with_papx_runs(
@@ -5804,10 +6182,11 @@ impl DocFile {
         &mut self,
         part: FieldDocumentPart,
         range: Range<u32>,
-        replacement: TextPieceCharacters,
+        replacement: impl Into<String>,
         papx_runs: Vec<DocPapxRun>,
     ) -> Result<()> {
         let mut edited = self.clone();
+        let replacement = edited.encode_text_replacement(part, &range, replacement.into())?;
         edited.replace_text_range_composed(
             part,
             range,
@@ -5819,6 +6198,52 @@ impl DocFile {
         edited.validate_document_part_structure(part)?;
         *self = edited;
         Ok(())
+    }
+
+    fn encode_text_replacement(
+        &self,
+        part: FieldDocumentPart,
+        range: &Range<u32>,
+        replacement: String,
+    ) -> Result<TextPieceCharacters> {
+        if range.start > range.end {
+            return Err(Error::invalid(0, "DOC text replacement range is reversed"));
+        }
+        let (part_start, part_len) = document_part_range(&self.word_document.fib, part)?;
+        if range.end > part_len {
+            return Err(Error::invalid(
+                u64::from(range.end),
+                "DOC text replacement exceeds its document part",
+            ));
+        }
+        let global_start = part_start
+            .checked_add(range.start)
+            .ok_or_else(|| Error::Limit("DOC global text edit start overflow".into()))?;
+        let source = self
+            .word_document
+            .text_pieces
+            .iter()
+            .find(|piece| {
+                let Ok(start) = u32::try_from(piece.value.cp_start) else {
+                    return false;
+                };
+                let Ok(end) = u32::try_from(piece.value.cp_end) else {
+                    return false;
+                };
+                start <= global_start
+                    && (global_start < end || (range.start == range.end && global_start == end))
+            })
+            .ok_or_else(|| {
+                Error::invalid(
+                    u64::from(global_start),
+                    "DOC text replacement has no containing text piece",
+                )
+            })?;
+        match source.value.characters.encoding() {
+            TextPieceEncoding::Utf16 => Ok(TextPieceCharacters::utf16(replacement)),
+            TextPieceEncoding::Compressed => TextPieceCharacters::compressed(replacement.clone())
+                .or_else(|_| Ok(TextPieceCharacters::utf16(replacement))),
+        }
     }
 
     /// Resolves only the direct paragraph-formatting layers at a part-local
@@ -5992,11 +6417,13 @@ impl DocFile {
         collect_style_properties(
             &styles.value,
             style_index,
-            &mut active,
-            &mut lineage,
-            &mut paragraph_properties,
-            &mut character_properties,
-            &mut table_properties,
+            &mut StylePropertyAccumulator {
+                active: &mut active,
+                lineage: &mut lineage,
+                paragraph: &mut paragraph_properties,
+                character: &mut character_properties,
+                table: &mut table_properties,
+            },
         )?;
         let definition = styles
             .value
@@ -6031,26 +6458,7 @@ impl DocFile {
     /// their normative relationship to the current style value.
     pub fn effective_cf_spec_at_cp(&self, part: FieldDocumentPart, local_cp: u32) -> Result<bool> {
         let direct = self.direct_formatting_at_cp(part, local_cp)?;
-        let mut style_index = direct.paragraph.style_index;
-        let papx_properties = expand_direct_paragraph_properties(
-            &direct.paragraph.papx_properties,
-            self.data.as_ref(),
-            Some(style_index),
-        )?;
-        for property in &papx_properties.properties {
-            if property.sprm.kind() != SprmKind::Known(KnownSprm::PIstdPermute) {
-                continue;
-            }
-            let SprmOperand::StylePermutation(permutation) = &property.operand else {
-                return Err(Error::invalid(
-                    0,
-                    "sprmPIstdPermute operand is not SPPOperand",
-                ));
-            };
-            if let Some(remapped) = permutation.remap(style_index) {
-                style_index = remapped;
-            }
-        }
+        let style_index = effective_paragraph_style_index(&direct.paragraph)?;
         let style = self.style_properties(style_index)?;
         if style.style_kind != super::StyleKind::Paragraph {
             return Err(Error::invalid(
@@ -6511,7 +6919,7 @@ impl DocFile {
                 (overlap_start < overlap_end).then_some((
                     overlap_start,
                     overlap_end,
-                    matches!(piece.value.characters, TextPieceCharacters::Compressed(_)),
+                    piece.value.characters.encoding() == TextPieceEncoding::Compressed,
                 ))
             })
             .collect::<Vec<_>>();
@@ -6522,9 +6930,9 @@ impl DocFile {
             let piece_replacement = if index == 0 {
                 replacement.clone()
             } else if compressed {
-                TextPieceCharacters::Compressed(Vec::new())
+                TextPieceCharacters::compressed(String::new())?
             } else {
-                TextPieceCharacters::Utf16(Vec::new())
+                TextPieceCharacters::utf16(String::new())
             };
             self.replace_text_range_inner(
                 part,
@@ -6665,23 +7073,15 @@ impl DocFile {
             &local_edit,
         )?;
         let piece = &mut self.word_document.text_pieces[piece_index].value;
-        match (&mut piece.characters, replacement) {
-            (
-                TextPieceCharacters::Compressed(characters),
-                TextPieceCharacters::Compressed(value),
-            ) => {
-                characters.splice(local_start..local_end, value);
-            }
-            (TextPieceCharacters::Utf16(characters), TextPieceCharacters::Utf16(value)) => {
-                characters.splice(local_start..local_end, value);
-            }
-            _ => {
-                return Err(Error::invalid(
+        piece
+            .characters
+            .replace_code_unit_range(local_start..local_end, &replacement)
+            .map_err(|error| {
+                Error::invalid(
                     u64::from(range.start),
-                    "DOC text replacement encoding differs from its text piece",
-                ));
-            }
-        }
+                    format!("DOC text replacement failed: {error}"),
+                )
+            })?;
         let remove_piece = piece.character_count() == 0;
         if remove_piece && self.word_document.text_pieces.len() == 1 {
             return Err(Error::invalid(
@@ -7402,17 +7802,82 @@ fn grpprl_for_group(properties: &GrpPrl, group: SprmGroup) -> GrpPrl {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+fn effective_paragraph_style_index(formatting: &DocDirectParagraphFormatting) -> Result<u16> {
+    let mut style_index = formatting.style_index;
+    for property in &formatting.applied_properties.properties {
+        match property.sprm.kind() {
+            SprmKind::Known(KnownSprm::PIstd) => {
+                let SprmOperand::Word(value) = &property.operand else {
+                    return Err(Error::invalid(0, "sprmPIstd operand is not an istd"));
+                };
+                style_index = u16::from_le_bytes(*value);
+            }
+            SprmKind::Known(KnownSprm::PIstdPermute) => {
+                let SprmOperand::StylePermutation(permutation) = &property.operand else {
+                    return Err(Error::invalid(
+                        0,
+                        "sprmPIstdPermute operand is not SPPOperand",
+                    ));
+                };
+                if let Some(remapped) = permutation.remap(style_index) {
+                    style_index = remapped;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(style_index)
+}
+
+fn apply_outline_properties(properties: &GrpPrl, level: &mut u8) -> Result<()> {
+    for property in &properties.properties {
+        match property.sprm.kind() {
+            SprmKind::Known(KnownSprm::POutLvl) => {
+                let SprmOperand::Byte(value) = &property.operand else {
+                    return Err(Error::invalid(
+                        0,
+                        "sprmPOutLvl operand is not an unsigned byte",
+                    ));
+                };
+                if *value > 9 {
+                    return Err(Error::invalid(
+                        u64::from(*value),
+                        "sprmPOutLvl exceeds 0x09",
+                    ));
+                }
+                *level = *value;
+            }
+            SprmKind::Known(KnownSprm::PIncLvl) if *level != 9 => {
+                let SprmOperand::Byte(value) = &property.operand else {
+                    return Err(Error::invalid(
+                        0,
+                        "sprmPIncLvl operand is not a signed byte",
+                    ));
+                };
+                *level = i16::from(*level)
+                    .saturating_add(i16::from(i8::from_le_bytes([*value])))
+                    .clamp(0, 9) as u8;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+struct StylePropertyAccumulator<'a> {
+    active: &'a mut BTreeSet<u16>,
+    lineage: &'a mut Vec<u16>,
+    paragraph: &'a mut Vec<super::Prl>,
+    character: &'a mut Vec<super::Prl>,
+    table: &'a mut Vec<super::Prl>,
+}
+
 fn collect_style_properties(
     styles: &StyleSheet,
     style_index: u16,
-    active: &mut BTreeSet<u16>,
-    lineage: &mut Vec<u16>,
-    paragraph: &mut Vec<super::Prl>,
-    character: &mut Vec<super::Prl>,
-    table: &mut Vec<super::Prl>,
+    accumulator: &mut StylePropertyAccumulator<'_>,
 ) -> Result<()> {
-    if !active.insert(style_index) {
+    if !accumulator.active.insert(style_index) {
         return Err(Error::invalid(
             u64::from(style_index),
             "STSH base-style references contain a cycle",
@@ -7429,55 +7894,67 @@ fn collect_style_properties(
             )
         })?;
     if definition.base.base_style_index != 0x0fff {
-        collect_style_properties(
-            styles,
-            definition.base.base_style_index,
-            active,
-            lineage,
-            paragraph,
-            character,
-            table,
-        )?;
+        collect_style_properties(styles, definition.base.base_style_index, accumulator)?;
     }
-    lineage.push(style_index);
+    accumulator.lineage.push(style_index);
     match &definition.formatting {
         StyleFormatting::Paragraph {
             paragraph: value,
             character: value_character,
         } => {
-            paragraph.extend(value.properties.properties.iter().cloned());
-            character.extend(value_character.properties.properties.iter().cloned());
+            accumulator
+                .paragraph
+                .extend(value.properties.properties.iter().cloned());
+            accumulator
+                .character
+                .extend(value_character.properties.properties.iter().cloned());
         }
         StyleFormatting::Character { character: value } => {
-            character.extend(value.properties.properties.iter().cloned());
+            accumulator
+                .character
+                .extend(value.properties.properties.iter().cloned());
         }
         StyleFormatting::RevisionParagraph {
             paragraph: value,
             character: value_character,
             ..
         } => {
-            paragraph.extend(value.properties.properties.iter().cloned());
-            character.extend(value_character.properties.properties.iter().cloned());
+            accumulator
+                .paragraph
+                .extend(value.properties.properties.iter().cloned());
+            accumulator
+                .character
+                .extend(value_character.properties.properties.iter().cloned());
         }
         StyleFormatting::RevisionCharacter {
             character: value, ..
         } => {
-            character.extend(value.properties.properties.iter().cloned());
+            accumulator
+                .character
+                .extend(value.properties.properties.iter().cloned());
         }
         StyleFormatting::Table {
             table: value_table,
             paragraph: value_paragraph,
             character: value_character,
         } => {
-            table.extend(value_table.properties.properties.iter().cloned());
-            paragraph.extend(value_paragraph.properties.properties.iter().cloned());
-            character.extend(value_character.properties.properties.iter().cloned());
+            accumulator
+                .table
+                .extend(value_table.properties.properties.iter().cloned());
+            accumulator
+                .paragraph
+                .extend(value_paragraph.properties.properties.iter().cloned());
+            accumulator
+                .character
+                .extend(value_character.properties.properties.iter().cloned());
         }
         StyleFormatting::Numbering { paragraph: value } => {
-            paragraph.extend(value.properties.properties.iter().cloned());
+            accumulator
+                .paragraph
+                .extend(value.properties.properties.iter().cloned());
         }
     }
-    active.remove(&style_index);
+    accumulator.active.remove(&style_index);
     Ok(())
 }
 
@@ -7528,26 +8005,7 @@ fn effective_character_toggle_from_formatting(
     formatting: &DocDirectFormatting,
     target: KnownSprm,
 ) -> Result<bool> {
-    let mut style_index = formatting.paragraph.style_index;
-    let papx_properties = expand_direct_paragraph_properties(
-        &formatting.paragraph.papx_properties,
-        file.data.as_ref(),
-        Some(style_index),
-    )?;
-    for property in &papx_properties.properties {
-        if property.sprm.kind() != SprmKind::Known(KnownSprm::PIstdPermute) {
-            continue;
-        }
-        let SprmOperand::StylePermutation(permutation) = &property.operand else {
-            return Err(Error::invalid(
-                0,
-                "sprmPIstdPermute operand is not SPPOperand",
-            ));
-        };
-        if let Some(remapped) = permutation.remap(style_index) {
-            style_index = remapped;
-        }
-    }
+    let style_index = effective_paragraph_style_index(&formatting.paragraph)?;
     let style = file.style_properties(style_index)?;
     if style.style_kind != super::StyleKind::Paragraph {
         return Err(Error::invalid(
@@ -8222,26 +8680,51 @@ fn relocate_non_main_document_part_cps(
     Ok(())
 }
 
-fn parse_text_pieces(clx: &Clx, word: &[u8], limits: Limits) -> Result<Vec<DocTextPiece>> {
+fn parse_text_pieces(
+    clx: &Clx,
+    word: &[u8],
+    options: ParseOptions,
+    diagnostics: &mut Vec<ParseDiagnostic>,
+) -> Result<Vec<DocTextPiece>> {
     if clx.piece_table.character_positions.len() != clx.piece_table.pieces.len() + 1 {
         return Err(Error::invalid(0, "PlcPcd CP/Pcd cardinality mismatch"));
     }
-    ensure_entry_limit("DOC text pieces", clx.piece_table.pieces.len(), limits)?;
-    clx.piece_table
-        .pieces
-        .iter()
-        .enumerate()
-        .map(|(piece_index, descriptor)| {
-            Ok(DocTextPiece {
-                piece_index,
-                value: descriptor.text_piece(
-                    word,
-                    clx.piece_table.character_positions[piece_index],
-                    clx.piece_table.character_positions[piece_index + 1],
-                )?,
-            })
-        })
-        .collect()
+    ensure_entry_limit(
+        "DOC text pieces",
+        clx.piece_table.pieces.len(),
+        options.limits,
+    )?;
+    let mut pieces = Vec::with_capacity(clx.piece_table.pieces.len());
+    for (piece_index, descriptor) in clx.piece_table.pieces.iter().enumerate() {
+        let value = descriptor.text_piece(
+            word,
+            clx.piece_table.character_positions[piece_index],
+            clx.piece_table.character_positions[piece_index + 1],
+        )?;
+        if value.characters.compatibility_code_units().is_some() {
+            let error = Error::invalid(
+                u64::from(value.file_offset),
+                "DOC text piece contains an unpaired UTF-16 surrogate",
+            );
+            if options.is_strict() {
+                return Err(error);
+            }
+            diagnostics.push(ParseDiagnostic::warning(
+                ParseDiagnosticCode::NonconformingRecord,
+                BinaryFormat::Doc,
+                Some("WordDocument"),
+                Some(u64::from(value.file_offset)),
+                "PlcPcd",
+                SpecificationReference {
+                    document: "MS-DOC",
+                    section: "2.8.1",
+                },
+                error.to_string(),
+            ));
+        }
+        pieces.push(DocTextPiece { piece_index, value });
+    }
+    Ok(pieces)
 }
 
 fn parse_object_pool(
@@ -8683,13 +9166,14 @@ fn collect_nil_picf_field_types(
 }
 
 fn picture_characters_in_piece(piece: &TextPiece) -> Vec<(u32, u32)> {
-    let (width, characters): (u64, Box<dyn Iterator<Item = bool> + '_>) = match &piece.characters {
-        TextPieceCharacters::Compressed(values) => {
-            (1, Box::new(values.iter().map(|value| *value == 1)))
-        }
-        TextPieceCharacters::Utf16(values) => (2, Box::new(values.iter().map(|value| *value == 1))),
+    let width = match piece.characters.encoding() {
+        TextPieceEncoding::Compressed => 1,
+        TextPieceEncoding::Utf16 => 2,
     };
-    characters
+    piece
+        .characters
+        .code_units_iter()
+        .map(|value| value == 1)
         .enumerate()
         .filter_map(|(index, is_picture)| {
             if !is_picture {
@@ -8778,10 +9262,7 @@ fn text_character_at_cp(word: &DocWordDocumentStream, cp: u32) -> Option<u16> {
         .iter()
         .find(|piece| piece.value.cp_start <= cp && cp < piece.value.cp_end)?;
     let index = usize::try_from(cp - piece.value.cp_start).ok()?;
-    match &piece.value.characters {
-        TextPieceCharacters::Compressed(values) => values.get(index).copied().map(u16::from),
-        TextPieceCharacters::Utf16(values) => values.get(index).copied(),
-    }
+    piece.value.characters.code_units_iter().nth(index)
 }
 
 fn parse_data_stream(
@@ -9551,12 +10032,16 @@ fn parse_list_definitions(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy)]
+struct DocCompatibilityGroup<const N: usize> {
+    labels: [&'static str; N],
+    structure: &'static str,
+}
+
 fn parse_bookmark_set<T>(
     table: &[u8],
     locations: Option<[FibFcLcb; 3]>,
-    labels: [&'static str; 3],
-    structure: &'static str,
+    group: DocCompatibilityGroup<3>,
     parse: impl Fn(&[u8], &[u8], &[u8]) -> Result<T>,
     options: ParseOptions,
     diagnostics: &mut Vec<ParseDiagnostic>,
@@ -9565,15 +10050,14 @@ fn parse_bookmark_set<T>(
     let Some(locations) = locations else {
         return Ok(None);
     };
-    let locations = match complete_location_array(locations, structure) {
+    let locations = match complete_location_array(locations, group.structure) {
         Ok(Some(value)) => value,
         Ok(None) => return Ok(None),
         Err(error) => {
             return preserve_compatibility_group(
                 table,
                 locations,
-                labels,
-                structure,
+                group,
                 error,
                 options,
                 diagnostics,
@@ -9583,9 +10067,9 @@ fn parse_bookmark_set<T>(
     };
     let parsed = (|| {
         parse(
-            bounded_slice(table, locations[0], labels[0])?,
-            bounded_slice(table, locations[1], labels[1])?,
-            bounded_slice(table, locations[2], labels[2])?,
+            bounded_slice(table, locations[0], group.labels[0])?,
+            bounded_slice(table, locations[1], group.labels[1])?,
+            bounded_slice(table, locations[2], group.labels[2])?,
         )
     })();
     match parsed {
@@ -9598,8 +10082,7 @@ fn parse_bookmark_set<T>(
         Err(error) => preserve_compatibility_group(
             table,
             locations,
-            labels,
-            structure,
+            group,
             error,
             options,
             diagnostics,
@@ -9608,12 +10091,10 @@ fn parse_bookmark_set<T>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn preserve_compatibility_group<T, const N: usize>(
     table: &[u8],
     locations: [FibFcLcb; N],
-    labels: [&'static str; N],
-    structure: &'static str,
+    group: DocCompatibilityGroup<N>,
     error: Error,
     options: ParseOptions,
     diagnostics: &mut Vec<ParseDiagnostic>,
@@ -9630,10 +10111,10 @@ fn preserve_compatibility_group<T, const N: usize>(
             .iter()
             .find(|location| location.lcb != 0)
             .map_or(0, |location| u64::from(location.fc)),
-        structure,
-        format!("preserved invalid {structure}: {reason}"),
+        group.structure,
+        format!("preserved invalid {}: {reason}", group.structure),
     );
-    for (location, label) in locations.into_iter().zip(labels) {
+    for (location, label) in locations.into_iter().zip(group.labels) {
         if location.lcb != 0 {
             compatibility_tables.push(DocCompatibilityTable {
                 label: label.to_owned(),
@@ -9671,8 +10152,10 @@ fn parse_range_protection(
             return preserve_compatibility_group(
                 table,
                 locations,
-                labels,
-                "range-protection tables",
+                DocCompatibilityGroup {
+                    labels,
+                    structure: "range-protection tables",
+                },
                 error,
                 options,
                 diagnostics,
@@ -9699,8 +10182,10 @@ fn parse_range_protection(
         Err(error) => preserve_compatibility_group(
             table,
             locations,
-            labels,
-            "range-protection tables",
+            DocCompatibilityGroup {
+                labels,
+                structure: "range-protection tables",
+            },
             error,
             options,
             diagnostics,
@@ -9727,8 +10212,10 @@ fn parse_user_input_methods(
             return preserve_compatibility_group(
                 table,
                 locations,
-                labels,
-                "user-input-method tables",
+                DocCompatibilityGroup {
+                    labels,
+                    structure: "user-input-method tables",
+                },
                 error,
                 options,
                 diagnostics,
@@ -9751,8 +10238,10 @@ fn parse_user_input_methods(
         Err(error) => preserve_compatibility_group(
             table,
             locations,
-            labels,
-            "user-input-method tables",
+            DocCompatibilityGroup {
+                labels,
+                structure: "user-input-method tables",
+            },
             error,
             options,
             diagnostics,
@@ -10283,10 +10772,7 @@ fn current_paragraph_ranges(pieces: &[DocTextPiece]) -> Result<Vec<(u32, u32)>> 
 }
 
 fn text_piece_u16_values(characters: &TextPieceCharacters) -> Box<dyn Iterator<Item = u16> + '_> {
-    match characters {
-        TextPieceCharacters::Compressed(values) => Box::new(values.iter().copied().map(u16::from)),
-        TextPieceCharacters::Utf16(values) => Box::new(values.iter().copied()),
-    }
+    characters.code_units_iter()
 }
 
 fn destination_paragraph_formatting_runs(
@@ -10820,19 +11306,10 @@ fn is_paragraph_terminator(value: u16) -> bool {
 }
 
 fn paragraph_terminators(characters: &TextPieceCharacters) -> Vec<u16> {
-    match characters {
-        TextPieceCharacters::Compressed(values) => values
-            .iter()
-            .copied()
-            .map(u16::from)
-            .filter(|value| is_paragraph_terminator(*value))
-            .collect(),
-        TextPieceCharacters::Utf16(values) => values
-            .iter()
-            .copied()
-            .filter(|value| is_paragraph_terminator(*value))
-            .collect(),
-    }
+    characters
+        .code_units_iter()
+        .filter(|value| is_paragraph_terminator(*value))
+        .collect()
 }
 
 fn non_paragraph_terminators(terminators: &[u16]) -> Vec<u16> {
@@ -10854,17 +11331,12 @@ fn text_value_at_cp(pieces: &[DocTextPiece], cp: u32) -> Result<u16> {
         }
         let index = usize::try_from(cp - start)
             .map_err(|_| Error::Limit("text CP exceeds usize".into()))?;
-        return match &piece.value.characters {
-            TextPieceCharacters::Compressed(values) => {
-                values.get(index).copied().map(u16::from).ok_or_else(|| {
-                    Error::invalid(u64::from(cp), "text CP exceeds compressed piece")
-                })
-            }
-            TextPieceCharacters::Utf16(values) => values
-                .get(index)
-                .copied()
-                .ok_or_else(|| Error::invalid(u64::from(cp), "text CP exceeds UTF-16 piece")),
-        };
+        return piece
+            .value
+            .characters
+            .code_units_iter()
+            .nth(index)
+            .ok_or_else(|| Error::invalid(u64::from(cp), "text CP exceeds its piece"));
     }
     Err(Error::invalid(
         u64::from(cp),
@@ -10945,29 +11417,18 @@ fn paragraph_terminators_in_range(
     start: usize,
     end: usize,
 ) -> Result<Vec<u16>> {
-    match characters {
-        TextPieceCharacters::Compressed(values) => values
-            .get(start..end)
-            .ok_or_else(|| Error::invalid(start as u64, "text replacement range exceeds piece"))
-            .map(|values| {
-                values
-                    .iter()
-                    .copied()
-                    .map(u16::from)
-                    .filter(|value| is_paragraph_terminator(*value))
-                    .collect()
-            }),
-        TextPieceCharacters::Utf16(values) => values
-            .get(start..end)
-            .ok_or_else(|| Error::invalid(start as u64, "text replacement range exceeds piece"))
-            .map(|values| {
-                values
-                    .iter()
-                    .copied()
-                    .filter(|value| is_paragraph_terminator(*value))
-                    .collect()
-            }),
+    if start > end || end > characters.character_count() {
+        return Err(Error::invalid(
+            start as u64,
+            "text replacement range exceeds piece",
+        ));
     }
+    Ok(characters
+        .code_units_iter()
+        .skip(start)
+        .take(end - start)
+        .filter(|value| is_paragraph_terminator(*value))
+        .collect())
 }
 
 fn paragraph_terminators_in_piece_range(
@@ -11008,20 +11469,18 @@ fn text_piece_character_replacement(
             .map_err(|_| Error::Limit("text piece character count exceeds u32".into()))?;
         return CpReplacement::new(end, end, 0);
     }
-    let (prefix, suffix) = match (source, destination) {
-        (TextPieceCharacters::Compressed(source), TextPieceCharacters::Compressed(destination)) => {
-            common_prefix_and_suffix(source, destination)
-        }
-        (TextPieceCharacters::Utf16(source), TextPieceCharacters::Utf16(destination)) => {
-            common_prefix_and_suffix(source, destination)
-        }
-        _ => {
-            return Err(Error::invalid(
-                0,
-                "text piece encoding and character count changed together",
-            ));
-        }
-    };
+    if source.encoding() != destination.encoding()
+        || source.compatibility_code_units().is_some()
+        || destination.compatibility_code_units().is_some()
+    {
+        return Err(Error::invalid(
+            0,
+            "text piece encoding and character count changed together",
+        ));
+    }
+    let source_units = source.code_units();
+    let destination_units = destination.code_units();
+    let (prefix, suffix) = common_prefix_and_suffix(&source_units, &destination_units);
     let old_start =
         u32::try_from(prefix).map_err(|_| Error::Limit("text edit start exceeds u32".into()))?;
     let old_end = u32::try_from(source_len - suffix)
@@ -11601,7 +12060,7 @@ mod tests {
 
     #[test]
     fn paragraph_terminator_inventory_distinguishes_text_from_structure() {
-        let compressed = TextPieceCharacters::Compressed(vec![b'A', 0x0d, 0x07, b'B']);
+        let compressed = TextPieceCharacters::compressed("A\r\u{7}B").unwrap();
         assert_eq!(paragraph_terminators(&compressed), vec![0x000d, 0x0007]);
         assert_eq!(
             non_paragraph_terminators(&paragraph_terminators(&compressed)),
@@ -11611,7 +12070,7 @@ mod tests {
             paragraph_terminators_in_range(&compressed, 1, 3).unwrap(),
             vec![0x000d, 0x0007]
         );
-        let utf16 = TextPieceCharacters::Utf16(vec![0x4e2d, 0x000c, 0x6587]);
+        let utf16 = TextPieceCharacters::utf16("中\u{c}文");
         assert_eq!(paragraph_terminators(&utf16), vec![0x000c]);
         assert!(paragraph_terminators_in_range(&utf16, 0, 4).is_err());
     }

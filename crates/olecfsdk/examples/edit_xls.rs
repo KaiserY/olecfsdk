@@ -1,6 +1,6 @@
 use std::{env, io, path::PathBuf};
 
-use olecfsdk::xls::{XlStringCharacters, XlsFile};
+use olecfsdk::xls::XlsFile;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (input, output) = paths("edit_xls <input.xls> <output.xls>")?;
@@ -15,15 +15,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some((workbook.name, sheet.id(), sheet.metadata().name.clone()))
         })
         .ok_or_else(|| io::Error::other("XLS has no editable worksheet"))?;
-    match &mut edited_name.characters {
-        XlStringCharacters::Compressed(characters) if characters.len() < 31 => {
-            characters.push(b'X');
-        }
-        XlStringCharacters::Unicode(characters) if characters.len() < 31 => {
-            characters.push(u16::from(b'X'));
-        }
-        XlStringCharacters::Compressed(characters) => characters[0] = b'X',
-        XlStringCharacters::Unicode(characters) => characters[0] = u16::from(b'X'),
+    if edited_name.value.encode_utf16().count() < 31 {
+        edited_name.value.push('X');
+    } else {
+        let first_character_bytes = edited_name
+            .value
+            .chars()
+            .next()
+            .expect("sheet names are nonempty")
+            .len_utf8();
+        edited_name
+            .value
+            .replace_range(..first_character_bytes, "X");
     }
 
     file.set_sheet_name(workbook_name, sheet_id, edited_name)?;
