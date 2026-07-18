@@ -186,7 +186,7 @@ impl OfficeSharedContent {
                         format!("preserved an invalid root property-set stream: {error}"),
                     ));
                     OfficePropertySetData::Compatibility {
-                        bytes: entry.data.clone(),
+                        bytes: entry.data.to_vec(),
                         reason: error.to_string(),
                     }
                 }
@@ -389,7 +389,7 @@ impl OfficeSharedContent {
                 }
                 OfficePropertySetData::Compatibility { bytes, .. } => bytes.clone(),
             };
-            candidate.create_or_replace_stream(&node.path, bytes)?;
+            candidate.upsert_stream(&node.path, bytes)?;
         }
         match &self.vba_project {
             Some(OfficeVbaProject::Parsed(project)) => {

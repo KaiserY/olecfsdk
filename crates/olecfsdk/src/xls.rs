@@ -25604,7 +25604,31 @@ impl BiffStream {
         validate_pivot_view_extensions(&self.records)?;
         validate_function_groups_and_table_styles(&self.records)?;
         validate_remaining_static_record_context(&self.records)?;
-        let mut bytes = Vec::new();
+        // Relayout has already assigned the last record's starting offset.
+        // Encode only that final record to derive the exact stream length and
+        // avoid both repeated growth for large workbooks and over-allocation
+        // for the usual four-byte EOF record in small workbooks.
+        let capacity =
+            self.records
+                .last()
+                .map_or(Ok(self.trailing_padding.len()), |record| {
+                    let final_record_len = record.data.encode_physical()?.iter().try_fold(
+                        0usize,
+                        |size, encoded| {
+                            size.checked_add(4)
+                                .and_then(|size| size.checked_add(encoded.payload.len()))
+                                .ok_or_else(|| {
+                                    Error::Limit("BIFF final record byte length overflow".into())
+                                })
+                        },
+                    )?;
+                    usize::try_from(record.offset)
+                        .ok()
+                        .and_then(|offset| offset.checked_add(final_record_len))
+                        .and_then(|size| size.checked_add(self.trailing_padding.len()))
+                        .ok_or_else(|| Error::Limit("BIFF output capacity overflow".into()))
+                })?;
+        let mut bytes = Vec::with_capacity(capacity);
         let mut sx_dbb_context: Option<SxDbbContext> = None;
         let mut rrd_rst_etxp_context: Option<RrdRstEtxpContext> = None;
         let mut rrd_info_version = None;
@@ -25724,6 +25748,7 @@ impl BiffStream {
             ));
         }
         bytes.extend_from_slice(&self.trailing_padding);
+        debug_assert_eq!(bytes.len(), capacity);
         Ok(bytes)
     }
 
@@ -25808,7 +25833,7 @@ impl RevisionLogStream {
     pub fn save(&self, compound_file: &mut CompoundFile) -> Result<()> {
         self.validate()?;
         let bytes = self.to_bytes()?;
-        compound_file.replace_stream(REVISION_LOG_STREAM_PATH, bytes)?;
+        compound_file.overwrite_stream(REVISION_LOG_STREAM_PATH, bytes)?;
         Ok(())
     }
 
@@ -25864,7 +25889,7 @@ impl UserNamesStream {
 
     pub fn save(&self, compound_file: &mut CompoundFile) -> Result<()> {
         self.validate()?;
-        compound_file.replace_stream(USER_NAMES_STREAM_PATH, self.to_bytes()?)?;
+        compound_file.overwrite_stream(USER_NAMES_STREAM_PATH, self.to_bytes()?)?;
         Ok(())
     }
 

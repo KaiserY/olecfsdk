@@ -175,21 +175,26 @@ impl PptFile {
 
     fn relayout_with_policy(&mut self, preserve_compatibility: bool) -> Result<()> {
         let mut rebuilt = self.clone();
-        let CurrentUserData::Parsed(current_user) = &rebuilt.current_user.data else {
+        rebuilt.relayout_in_place_with_policy(preserve_compatibility)?;
+        *self = rebuilt;
+        Ok(())
+    }
+
+    fn relayout_in_place_with_policy(&mut self, preserve_compatibility: bool) -> Result<()> {
+        let CurrentUserData::Parsed(current_user) = &self.current_user.data else {
             return Err(Error::invalid(
                 0,
                 "PPT relayout requires a conforming CurrentUserAtom",
             ));
         };
         let presentation = if preserve_compatibility {
-            rebuilt
-                .document
+            self.document
                 .live_presentation_compatible(current_user)
                 .map(ParseOutcome::into_value)
         } else {
-            rebuilt.document.live_presentation(current_user)
+            self.document.live_presentation(current_user)
         };
-        let pictures_layout = match &mut rebuilt.pictures {
+        let pictures_layout = match &mut self.pictures {
             Some(PicturesStream::Complete(pictures)) => Some(pictures.relayout()?),
             Some(PicturesStream::Compatibility { .. } | PicturesStream::Partial(_))
                 if preserve_compatibility =>
@@ -206,7 +211,7 @@ impl PptFile {
         };
         match presentation {
             Ok(_) => {
-                rebuilt.document.relocate_picture_references(
+                self.document.relocate_picture_references(
                     pictures_layout.as_ref(),
                     preserve_compatibility,
                 )?;
@@ -218,13 +223,11 @@ impl PptFile {
                         .is_none_or(|layout| !layout.changed()) => {}
             Err(error) => return Err(error),
         }
-        let CurrentUserData::Parsed(current_user) = &mut rebuilt.current_user.data else {
+        let CurrentUserData::Parsed(current_user) = &mut self.current_user.data else {
             unreachable!("CurrentUserAtom was checked above")
         };
-        rebuilt
-            .document
+        self.document
             .relayout_with_policy(current_user, preserve_compatibility)?;
-        *self = rebuilt;
         Ok(())
     }
 
@@ -332,7 +335,7 @@ impl PptFile {
         let result = rebuilt
             .document
             .edit_list_text_body(source_offset, text_body_index, edit)?;
-        rebuilt.relayout_with_policy(preserve_compatibility)?;
+        rebuilt.relayout_in_place_with_policy(preserve_compatibility)?;
         let presentation = if preserve_compatibility {
             rebuilt.live_presentation_compatible()?.into_value()
         } else {
@@ -400,7 +403,7 @@ impl PptFile {
             baseline_current_user,
             source_pictures_layout.as_ref(),
         )?;
-        rebuilt.relayout_with_policy(false)?;
+        rebuilt.relayout_in_place_with_policy(false)?;
 
         let CurrentUserData::Parsed(current_user) = &rebuilt.current_user.data else {
             unreachable!("append-user-edit retains the parsed CurrentUserAtom")
@@ -695,7 +698,7 @@ impl PptFile {
     pub fn to_compound_file_with_options(&self, options: SaveOptions) -> Result<CompoundFile> {
         let mut rebuilt = self.clone();
         if matches!(rebuilt.current_user.data, CurrentUserData::Parsed(_)) {
-            rebuilt.relayout_with_policy(options.preserves_compatibility())?;
+            rebuilt.relayout_in_place_with_policy(options.preserves_compatibility())?;
         }
         rebuilt.to_compound_file_with_current_layout(options)
     }
@@ -742,8 +745,8 @@ impl PptFile {
             }
         }
         let mut compound = self.compound_file.clone();
-        compound.replace_stream(DOCUMENT_STREAM, self.document.to_bytes()?)?;
-        compound.replace_stream(CURRENT_USER_STREAM, self.current_user.to_bytes()?)?;
+        compound.overwrite_stream(DOCUMENT_STREAM, self.document.to_bytes()?)?;
+        compound.overwrite_stream(CURRENT_USER_STREAM, self.current_user.to_bytes()?)?;
         sync_optional_stream(
             &mut compound,
             PICTURES_STREAM,
@@ -1215,7 +1218,7 @@ fn sync_optional_stream(
 ) -> Result<()> {
     match bytes {
         Some(bytes) => {
-            compound.create_or_replace_stream(path, bytes?)?;
+            compound.upsert_stream(path, bytes?)?;
         }
         None if compound.is_stream(path) => {
             compound.remove_stream(path)?;

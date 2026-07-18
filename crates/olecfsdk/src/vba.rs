@@ -239,10 +239,10 @@ impl LocatedVbaProject {
                 .zip(&self.identity.module_stream_paths)
                 .map(|(module, path)| Ok((path, module.stream.to_bytes()?)))
                 .collect::<Result<Vec<_>>>()?;
-            updated.replace_stream(&self.identity.directory_stream_path, encoded_directory)?;
-            updated.replace_stream(&self.identity.project_cache_stream_path, encoded_cache)?;
+            updated.overwrite_stream(&self.identity.directory_stream_path, encoded_directory)?;
+            updated.overwrite_stream(&self.identity.project_cache_stream_path, encoded_cache)?;
             for (path, bytes) in encoded_modules {
-                updated.replace_stream(path, bytes)?;
+                updated.overwrite_stream(path, bytes)?;
             }
             for path in &self.identity.srp_stream_paths {
                 updated.remove_stream(path)?;
@@ -445,7 +445,7 @@ impl VbaProject {
                 srp_streams.push(SrpStream {
                     path: entry.path.clone(),
                     name,
-                    implementation_specific_cache: entry.data.clone(),
+                    implementation_specific_cache: entry.data.to_vec(),
                 });
             }
         }

@@ -25,8 +25,24 @@ const MINI_SECTOR_LEN: usize = 64;
 const HEADER_DIFAT_LEN: usize = 109;
 
 pub(crate) fn write_compound(compound: &CompoundFile) -> Result<Vec<u8>> {
-    let mut output = Vec::new();
-    write_compound_to(compound, &mut output)?;
+    let layout = build_layout(
+        compound.version,
+        &compound.entries,
+        &compound.unallocated_sectors,
+    )?;
+    let output_len = layout_output_len(
+        &layout,
+        &compound.unallocated_sectors,
+        &compound.trailing_data,
+    )?;
+    let mut output = Vec::with_capacity(output_len);
+    emit_layout(
+        &layout,
+        &compound.unallocated_sectors,
+        &compound.trailing_data,
+        &mut output,
+    )?;
+    debug_assert_eq!(output.len(), output_len);
     Ok(output)
 }
 
@@ -49,10 +65,13 @@ pub(crate) fn write_empty_compound(version: Version) -> Result<Vec<u8>> {
         state_bits: 0,
         created: FileTime::ZERO,
         modified: FileTime::ZERO,
-        data: Vec::new(),
+        data: Vec::new().into(),
     }];
-    let mut output = Vec::new();
-    write_logical_compound_to(version, &entries, &[], &[], &mut output)?;
+    let layout = build_layout(version, &entries, &[])?;
+    let output_len = layout_output_len(&layout, &[], &[])?;
+    let mut output = Vec::with_capacity(output_len);
+    emit_layout(&layout, &[], &[], &mut output)?;
+    debug_assert_eq!(output.len(), output_len);
     Ok(output)
 }
 
@@ -372,6 +391,59 @@ fn emit_layout(
     }
     writer.write_all(trailing_data)?;
     Ok(())
+}
+
+fn layout_output_len(
+    layout: &CompoundLayout<'_>,
+    unallocated_sectors: &[Vec<u8>],
+    trailing_data: &[u8],
+) -> Result<usize> {
+    let mut len = layout.sector_len;
+    let mut add = |amount: usize| -> Result<()> {
+        len = len
+            .checked_add(amount)
+            .ok_or_else(|| Error::Limit("CFB output length overflow".into()))?;
+        Ok(())
+    };
+
+    add(checked_next_multiple(
+        layout.mini_stream_len,
+        layout.sector_len,
+        "root mini stream length",
+    )?)?;
+    add(layout
+        .mini_fat
+        .len()
+        .checked_mul(4)
+        .ok_or_else(|| Error::Limit("CFB MiniFAT byte length overflow".into()))?)?;
+    for entry in &layout.ordered {
+        if entry.kind == EntryKind::Stream && entry.data.len() >= MINI_STREAM_CUTOFF as usize {
+            add(checked_next_multiple(
+                entry.data.len(),
+                layout.sector_len,
+                "regular stream payload length",
+            )?)?;
+        }
+    }
+    add(layout
+        .padded_directory_entry_count
+        .checked_mul(DIRECTORY_ENTRY_LEN)
+        .ok_or_else(|| Error::Limit("CFB directory byte length overflow".into()))?)?;
+    add(layout
+        .difat_sector_ids
+        .len()
+        .checked_mul(layout.sector_len)
+        .ok_or_else(|| Error::Limit("CFB DIFAT byte length overflow".into()))?)?;
+    add(layout
+        .fat
+        .len()
+        .checked_mul(4)
+        .ok_or_else(|| Error::Limit("CFB FAT byte length overflow".into()))?)?;
+    for sector in unallocated_sectors {
+        add(sector.len())?;
+    }
+    add(trailing_data.len())?;
+    Ok(len)
 }
 
 fn ordered_entries(entries: &[Entry]) -> Result<Vec<&Entry>> {

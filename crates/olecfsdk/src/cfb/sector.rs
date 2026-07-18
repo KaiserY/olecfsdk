@@ -183,6 +183,7 @@ pub(crate) struct SectorSource<'a> {
     partial_sector: Option<SectorId>,
     partial_len: usize,
     partial_accessed: Cell<bool>,
+    partial_buffer: Vec<u8>,
 }
 
 impl<'a> SectorSource<'a> {
@@ -194,10 +195,17 @@ impl<'a> SectorSource<'a> {
                 "CFB file is shorter than its header sector",
             ));
         }
-        if !bytes.len().is_multiple_of(sector_len) || original_len > bytes.len() {
-            return Err(Error::invalid(0, "internal CFB sector image is not padded"));
+        if original_len > bytes.len() {
+            return Err(Error::invalid(
+                0,
+                "internal CFB image length exceeds its backing bytes",
+            ));
         }
-        let complete_sector_count = bytes.len() / sector_len;
+        let padded_len = original_len
+            .checked_add(sector_len - 1)
+            .map(|len| len / sector_len * sector_len)
+            .ok_or_else(|| Error::Limit("padded CFB length overflow".into()))?;
+        let complete_sector_count = padded_len / sector_len;
         let partial_len = original_len % sector_len;
         let partial_sector = if partial_len == 0 {
             None
@@ -214,6 +222,7 @@ impl<'a> SectorSource<'a> {
             partial_sector,
             partial_len,
             partial_accessed: Cell::new(false),
+            partial_buffer: Vec::new(),
         })
     }
 
@@ -225,7 +234,7 @@ impl<'a> SectorSource<'a> {
         self.sector_len
     }
 
-    pub(crate) fn sector(&self, id: SectorId) -> Result<&'a [u8]> {
+    pub(crate) fn sector(&mut self, id: SectorId) -> Result<&[u8]> {
         let index = usize::try_from(id.get())
             .map_err(|_| Error::invalid(0, "sector ID does not fit usize"))?;
         if index >= self.sector_count {
@@ -243,18 +252,23 @@ impl<'a> SectorSource<'a> {
             .ok_or_else(|| Error::invalid(0, "sector end overflow"))?;
         if self.partial_sector == Some(id) {
             self.partial_accessed.set(true);
+            self.partial_buffer.resize(self.sector_len, 0);
+            self.partial_buffer.fill(0);
+            self.partial_buffer[..self.partial_len]
+                .copy_from_slice(&self.bytes[start..start + self.partial_len]);
+            return Ok(&self.partial_buffer);
         }
         Ok(&self.bytes[start..end])
     }
 
-    pub(crate) fn full_sector(&self, id: SectorId) -> Result<&'a [u8]> {
+    pub(crate) fn full_sector(&mut self, id: SectorId) -> Result<&[u8]> {
         if self.valid_len(id) != self.sector_len {
             return Err(Error::invalid(
                 0,
                 "truncated CFB allocation or directory sector",
             ));
         }
-        self.sector(id)
+        SectorSource::sector(self, id)
     }
 
     pub(crate) fn valid_len(&self, id: SectorId) -> usize {
@@ -277,7 +291,7 @@ impl<'a> SectorSource<'a> {
         if self.partial_accessed.get() || self.partial_len == 0 {
             return &[];
         }
-        let start = self.bytes.len() - self.sector_len;
+        let start = self.sector_count * self.sector_len;
         &self.bytes[start..start + self.partial_len]
     }
 }
@@ -305,7 +319,7 @@ impl SectorRead for SectorSource<'_> {
     }
 
     fn sector(&mut self, id: SectorId) -> Result<Self::Sector<'_>> {
-        SectorSource::sector(self, id)
+        self.sector(id)
     }
 
     fn full_sector(&mut self, id: SectorId) -> Result<Self::Sector<'_>> {
@@ -628,7 +642,7 @@ mod tests {
         let mut bytes = vec![0; 3 * 512];
         bytes[512] = 7;
         bytes[1024] = 11;
-        let source = SectorSource::new(&bytes, bytes.len(), &header()).unwrap();
+        let mut source = SectorSource::new(&bytes, bytes.len(), &header()).unwrap();
         assert_eq!(source.sector_count(), 2);
         assert_eq!(source.sector(SectorId::new(0).unwrap()).unwrap()[0], 7);
         assert_eq!(source.sector(SectorId::new(1).unwrap()).unwrap()[0], 11);
@@ -643,5 +657,18 @@ mod tests {
         let source = SectorSource::new(&bytes, original_len, &header()).unwrap();
         assert_eq!(source.sector_count(), 2);
         assert_eq!(source.unaccessed_partial_data(), [3, 5, 7]);
+    }
+
+    #[test]
+    fn partial_sector_is_zero_padded_without_copying_the_complete_image() {
+        let mut bytes = vec![0; 2 * 512 + 3];
+        bytes[2 * 512..].copy_from_slice(&[3, 5, 7]);
+        let mut source = SectorSource::new(&bytes, bytes.len(), &header()).unwrap();
+
+        assert_eq!(source.sector_count(), 2);
+        let partial = source.sector(SectorId::new(1).unwrap()).unwrap();
+        assert_eq!(&partial[..3], &[3, 5, 7]);
+        assert!(partial[3..].iter().all(|byte| *byte == 0));
+        assert!(source.unaccessed_partial_data().is_empty());
     }
 }

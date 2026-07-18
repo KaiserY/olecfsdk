@@ -88,7 +88,7 @@ pub(crate) fn read_entries<S: SectorRead + ?Sized>(
             } else {
                 raw.modified_time
             },
-            data,
+            data: data.into(),
         });
     }
     entries.sort_by(|left, right| left.path.cmp(&right.path));

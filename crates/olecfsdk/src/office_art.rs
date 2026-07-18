@@ -3,6 +3,7 @@
 use std::{
     collections::BTreeSet,
     io::{Cursor, Read, Seek, Write},
+    sync::Arc,
 };
 
 use crate::{
@@ -504,27 +505,64 @@ pub struct OfficeArtMetafileBlip {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OfficeArtMetafileData {
-    Emf {
-        decoded: Vec<u8>,
-        original_encoded: Vec<u8>,
-    },
-    Wmf {
-        decoded: Vec<u8>,
-        original_encoded: Vec<u8>,
-    },
+    Emf(OfficeArtMetafileBytes),
+    Wmf(OfficeArtMetafileBytes),
     /// Encoded Macintosh PICT file data. MS-ODRAW treats this as an image leaf;
     /// decoded bytes remain editable and are re-encoded with the original
     /// OfficeArt compression mode.
-    Pict {
-        decoded: Vec<u8>,
-        original_encoded: Vec<u8>,
-    },
+    Pict(OfficeArtMetafileBytes),
     /// Unsupported compression or producer data rejected by the typed SDK.
     Opaque {
         reason: OfficeArtMetafileOpaqueReason,
         decoded: Option<Vec<u8>>,
         original_encoded: Vec<u8>,
     },
+}
+
+/// Exact clone-on-write state for one editable OfficeArt metafile payload.
+///
+/// The decoded baseline and encoded source share their allocations across
+/// record/file-root clones. Calling [`Self::decoded_mut`] detaches only the
+/// decoded bytes; unchanged serialization can therefore reuse the original
+/// encoded payload without decompressing it a second time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficeArtMetafileBytes {
+    decoded: Arc<Vec<u8>>,
+    original_decoded: Arc<Vec<u8>>,
+    original_encoded: Arc<Vec<u8>>,
+}
+
+impl OfficeArtMetafileBytes {
+    fn new(decoded: Vec<u8>, original_encoded: Vec<u8>) -> Self {
+        let decoded = Arc::new(decoded);
+        Self {
+            original_decoded: Arc::clone(&decoded),
+            decoded,
+            original_encoded: Arc::new(original_encoded),
+        }
+    }
+
+    pub fn decoded(&self) -> &[u8] {
+        self.decoded.as_slice()
+    }
+
+    pub fn decoded_mut(&mut self) -> &mut Vec<u8> {
+        Arc::make_mut(&mut self.decoded)
+    }
+
+    pub fn original_encoded(&self) -> &[u8] {
+        self.original_encoded.as_slice()
+    }
+
+    fn is_unchanged(&self) -> bool {
+        Arc::ptr_eq(&self.decoded, &self.original_decoded)
+            || self.decoded.as_slice() == self.original_decoded.as_slice()
+    }
+
+    fn commit(&mut self, encoded: Vec<u8>) {
+        self.original_decoded = Arc::clone(&self.decoded);
+        self.original_encoded = Arc::new(encoded);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -2660,18 +2698,15 @@ impl OfficeArtMetafileBlip {
         let encoded = payload[header_end..].to_vec();
         let decoded = decode_metafile_data(&encoded, metafile_header.compression, max_decoded_len);
         let file_data = match (record_type, decoded) {
-            (0xf01a, Some(decoded)) => OfficeArtMetafileData::Emf {
-                decoded,
-                original_encoded: encoded.clone(),
-            },
-            (0xf01b, Some(decoded)) => OfficeArtMetafileData::Wmf {
-                decoded,
-                original_encoded: encoded.clone(),
-            },
-            (0xf01c, Some(decoded)) => OfficeArtMetafileData::Pict {
-                decoded,
-                original_encoded: encoded,
-            },
+            (0xf01a, Some(decoded)) => {
+                OfficeArtMetafileData::Emf(OfficeArtMetafileBytes::new(decoded, encoded))
+            }
+            (0xf01b, Some(decoded)) => {
+                OfficeArtMetafileData::Wmf(OfficeArtMetafileBytes::new(decoded, encoded))
+            }
+            (0xf01c, Some(decoded)) => {
+                OfficeArtMetafileData::Pict(OfficeArtMetafileBytes::new(decoded, encoded))
+            }
             (_, None) => OfficeArtMetafileData::Opaque {
                 reason: match metafile_header.compression {
                     0x00 | 0xfe => OfficeArtMetafileOpaqueReason::DecodeFailed,
@@ -2701,33 +2736,11 @@ impl OfficeArtMetafileBlip {
         }
         self.metafile_header.write(payload);
         match &self.file_data {
-            OfficeArtMetafileData::Emf {
-                decoded,
-                original_encoded,
-            } => write_typed_metafile(
-                payload,
-                decoded,
-                original_encoded,
-                self.metafile_header.compression,
-            )?,
-            OfficeArtMetafileData::Wmf {
-                decoded,
-                original_encoded,
-            } => write_typed_metafile(
-                payload,
-                decoded,
-                original_encoded,
-                self.metafile_header.compression,
-            )?,
-            OfficeArtMetafileData::Pict {
-                decoded,
-                original_encoded,
-            } => write_typed_metafile(
-                payload,
-                decoded,
-                original_encoded,
-                self.metafile_header.compression,
-            )?,
+            OfficeArtMetafileData::Emf(data)
+            | OfficeArtMetafileData::Wmf(data)
+            | OfficeArtMetafileData::Pict(data) => {
+                write_typed_metafile(payload, data, self.metafile_header.compression)?
+            }
             OfficeArtMetafileData::Opaque {
                 original_encoded, ..
             } => payload.extend_from_slice(original_encoded),
@@ -2737,36 +2750,15 @@ impl OfficeArtMetafileBlip {
 
     fn relayout(&mut self) -> Result<()> {
         let (decoded_len, encoded) = match &self.file_data {
-            OfficeArtMetafileData::Emf {
-                decoded,
-                original_encoded,
-            }
-            | OfficeArtMetafileData::Wmf {
-                decoded,
-                original_encoded,
-            }
-            | OfficeArtMetafileData::Pict {
-                decoded,
-                original_encoded,
-            } => {
-                if decode_metafile_data(
-                    original_encoded,
-                    self.metafile_header.compression,
-                    decoded.len(),
-                )
-                .as_deref()
-                    == Some(decoded)
-                {
+            OfficeArtMetafileData::Emf(data)
+            | OfficeArtMetafileData::Wmf(data)
+            | OfficeArtMetafileData::Pict(data) => {
+                if data.is_unchanged() {
                     return Ok(());
                 }
                 let mut encoded = Vec::new();
-                write_typed_metafile(
-                    &mut encoded,
-                    decoded,
-                    original_encoded,
-                    self.metafile_header.compression,
-                )?;
-                (Some(decoded.len()), encoded)
+                write_typed_metafile(&mut encoded, data, self.metafile_header.compression)?;
+                (Some(data.decoded().len()), encoded)
             }
             OfficeArtMetafileData::Opaque { .. } => return Ok(()),
         };
@@ -2777,15 +2769,9 @@ impl OfficeArtMetafileBlip {
         self.metafile_header.saved_size = u32::try_from(encoded.len())
             .map_err(|_| Error::Limit("OfficeArt encoded metafile exceeds u32".into()))?;
         match &mut self.file_data {
-            OfficeArtMetafileData::Emf {
-                original_encoded, ..
-            }
-            | OfficeArtMetafileData::Wmf {
-                original_encoded, ..
-            }
-            | OfficeArtMetafileData::Pict {
-                original_encoded, ..
-            } => *original_encoded = encoded,
+            OfficeArtMetafileData::Emf(data)
+            | OfficeArtMetafileData::Wmf(data)
+            | OfficeArtMetafileData::Pict(data) => data.commit(encoded),
             OfficeArtMetafileData::Opaque { .. } => unreachable!("opaque data returned above"),
         }
         Ok(())
@@ -2814,25 +2800,22 @@ fn decode_metafile_data(
 
 fn write_typed_metafile(
     payload: &mut Vec<u8>,
-    current_decoded: &[u8],
-    original_encoded: &[u8],
+    data: &OfficeArtMetafileBytes,
     compression: u8,
 ) -> Result<()> {
-    if decode_metafile_data(original_encoded, compression, current_decoded.len()).as_deref()
-        == Some(current_decoded)
-    {
-        payload.extend_from_slice(original_encoded);
+    if data.is_unchanged() {
+        payload.extend_from_slice(data.original_encoded());
         return Ok(());
     }
     match compression {
         0x00 => {
             let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-            encoder.write_all(current_decoded)?;
+            encoder.write_all(data.decoded())?;
             payload.extend_from_slice(&encoder.finish()?);
             Ok(())
         }
         0xfe => {
-            payload.extend_from_slice(current_decoded);
+            payload.extend_from_slice(data.decoded());
             Ok(())
         }
         _ => Err(Error::invalid(
@@ -4492,10 +4475,10 @@ mod tests {
                 compression: 0xfe,
                 filter: 0xfe,
             },
-            file_data: OfficeArtMetafileData::Pict {
-                decoded: decoded.clone(),
-                original_encoded: decoded,
-            },
+            file_data: OfficeArtMetafileData::Pict(OfficeArtMetafileBytes::new(
+                decoded.clone(),
+                decoded,
+            )),
         };
         let record = OfficeArtRecord {
             header: OfficeArtRecordHeader {
@@ -4514,11 +4497,32 @@ mod tests {
         assert!(matches!(
             &reparsed.records[0].data,
             OfficeArtRecordData::MetafileBlip(OfficeArtMetafileBlip {
-                file_data: OfficeArtMetafileData::Pict { decoded, .. },
+                file_data: OfficeArtMetafileData::Pict(data),
                 ..
-            }) if decoded == &[0x00, 0x11, 0x02, 0xff]
+            }) if data.decoded() == [0x00, 0x11, 0x02, 0xff]
         ));
         assert_eq!(reparsed.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn metafile_clone_shares_exact_bytes_until_edited() {
+        let source = OfficeArtMetafileBytes::new(vec![1, 2, 3], vec![4, 5, 6]);
+        let mut cloned = source.clone();
+
+        assert!(Arc::ptr_eq(&source.decoded, &cloned.decoded));
+        assert!(Arc::ptr_eq(
+            &source.original_decoded,
+            &cloned.original_decoded
+        ));
+        assert!(Arc::ptr_eq(
+            &source.original_encoded,
+            &cloned.original_encoded
+        ));
+        cloned.decoded_mut()[0] = 7;
+        assert_eq!(source.decoded(), [1, 2, 3]);
+        assert_eq!(cloned.decoded(), [7, 2, 3]);
+        assert!(!Arc::ptr_eq(&source.decoded, &cloned.decoded));
+        assert!(!cloned.is_unchanged());
     }
 
     #[test]

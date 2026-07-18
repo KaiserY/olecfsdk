@@ -1,6 +1,8 @@
 use std::{
     io::{Cursor, Read, Write},
+    ops::Deref,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use crate::{
@@ -42,6 +44,74 @@ pub enum EntryKind {
     Stream,
 }
 
+/// Clone-on-write bytes for one fully materialized CFB stream.
+///
+/// Cloning this value shares the immutable allocation. Mutable
+/// [`CompoundFile`] APIs detach only the stream being changed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CfbStreamData(Arc<Vec<u8>>);
+
+impl CfbStreamData {
+    /// Borrows the materialized stream as bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+
+    /// Returns mutable bytes, copying only when another clone shares them.
+    pub fn to_mut(&mut self) -> &mut Vec<u8> {
+        Arc::make_mut(&mut self.0)
+    }
+
+    /// Unwraps uniquely owned bytes or copies them when they remain shared.
+    pub fn into_vec(self) -> Vec<u8> {
+        Arc::try_unwrap(self.0).unwrap_or_else(|shared| shared.as_ref().clone())
+    }
+}
+
+impl Deref for CfbStreamData {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl AsRef<[u8]> for CfbStreamData {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl From<Vec<u8>> for CfbStreamData {
+    fn from(value: Vec<u8>) -> Self {
+        Self(Arc::new(value))
+    }
+}
+
+impl From<CfbStreamData> for Vec<u8> {
+    fn from(value: CfbStreamData) -> Self {
+        value.into_vec()
+    }
+}
+
+impl PartialEq<Vec<u8>> for CfbStreamData {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl PartialEq<CfbStreamData> for Vec<u8> {
+    fn eq(&self, other: &CfbStreamData) -> bool {
+        self == other.as_slice()
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for CfbStreamData {
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub path: PathBuf,
@@ -51,7 +121,11 @@ pub struct Entry {
     pub state_bits: u32,
     pub created: FileTime,
     pub modified: FileTime,
-    pub data: Vec<u8>,
+    /// Immutable stream bytes shared by cheap [`CompoundFile`] clones.
+    ///
+    /// Mutable stream APIs use clone-on-write, so the allocation is copied
+    /// only when a shared stream is actually edited.
+    pub data: CfbStreamData,
 }
 
 impl Entry {
@@ -113,14 +187,7 @@ impl CompoundFile {
         } else {
             true
         };
-        let padded_len = bytes
-            .len()
-            .checked_add(sector_len - 1)
-            .map(|len| len / sector_len * sector_len)
-            .ok_or_else(|| Error::Limit("padded CFB length overflow".into()))?;
-        let mut padded_bytes = bytes.to_vec();
-        padded_bytes.resize(padded_len, 0);
-        let mut sectors = sector::SectorSource::new(&padded_bytes, bytes.len(), &header)?;
+        let mut sectors = sector::SectorSource::new(bytes, bytes.len(), &header)?;
         if sectors.sector_count() > u32::MAX as usize {
             return Err(Error::Limit("CFB sector count exceeds u32".into()));
         }
@@ -314,9 +381,10 @@ impl CompoundFile {
     }
     pub fn stream_mut(&mut self, path: impl AsRef<Path>) -> Option<&mut Vec<u8>> {
         let index = self.entry_index(path.as_ref())?;
-        self.entries[index]
-            .is_stream()
-            .then_some(&mut self.entries[index].data)
+        if !self.entries[index].is_stream() {
+            return None;
+        }
+        Some(self.entries[index].data.to_mut())
     }
     /// Opens a fully materialized stream for `Read + Write + Seek` and `set_len` edits.
     pub fn open_stream_mut(&mut self, path: impl AsRef<Path>) -> Result<OwnedCfbStream<'_>> {
@@ -325,7 +393,7 @@ impl CompoundFile {
             return Err(Error::invalid(0, "CFB entry is not a stream"));
         }
         Ok(OwnedCfbStream::new(
-            &mut self.entries[index].data,
+            self.entries[index].data.to_mut(),
             self.version,
         ))
     }
@@ -339,7 +407,26 @@ impl CompoundFile {
                 format!("CFB entry {} is not a stream", path.display()),
             ));
         }
-        Ok(std::mem::replace(&mut entry.data, data))
+        Ok(replace_stream_data(&mut entry.data, data))
+    }
+
+    /// Replaces a stream without materializing its previous shared bytes.
+    ///
+    /// File-root serializers use this path when the old value is intentionally
+    /// discarded. The public [`Self::replace_stream`] API still returns the
+    /// previous owned value for callers that need it.
+    pub(crate) fn overwrite_stream(&mut self, path: impl AsRef<Path>, data: Vec<u8>) -> Result<()> {
+        let path = path.as_ref();
+        let index = self.required_entry_index(path)?;
+        let entry = &mut self.entries[index];
+        if !entry.is_stream() {
+            return Err(Error::invalid(
+                0,
+                format!("CFB entry {} is not a stream", path.display()),
+            ));
+        }
+        entry.data = data.into();
+        Ok(())
     }
 
     pub fn create_or_replace_stream(
@@ -349,9 +436,10 @@ impl CompoundFile {
     ) -> Result<Option<Vec<u8>>> {
         let path = path.as_ref();
         match self.entry_index(path) {
-            Some(index) if self.entries[index].is_stream() => {
-                Ok(Some(std::mem::replace(&mut self.entries[index].data, data)))
-            }
+            Some(index) if self.entries[index].is_stream() => Ok(Some(replace_stream_data(
+                &mut self.entries[index].data,
+                data,
+            ))),
             Some(index) => Err(Error::invalid(
                 0,
                 format!(
@@ -363,6 +451,24 @@ impl CompoundFile {
                 self.create_stream(path, data)?;
                 Ok(None)
             }
+        }
+    }
+
+    pub(crate) fn upsert_stream(&mut self, path: impl AsRef<Path>, data: Vec<u8>) -> Result<()> {
+        let path = path.as_ref();
+        match self.entry_index(path) {
+            Some(index) if self.entries[index].is_stream() => {
+                self.entries[index].data = data.into();
+                Ok(())
+            }
+            Some(index) => Err(Error::invalid(
+                0,
+                format!(
+                    "CFB entry {} is not a stream",
+                    self.entries[index].path.display()
+                ),
+            )),
+            None => self.create_stream(path, data),
         }
     }
 
@@ -596,7 +702,7 @@ impl CompoundFile {
             state_bits: 0,
             created: FileTime::ZERO,
             modified: FileTime::ZERO,
-            data,
+            data: data.into(),
         });
         Ok(())
     }
@@ -701,6 +807,10 @@ impl CompoundFile {
     }
 }
 
+fn replace_stream_data(slot: &mut CfbStreamData, data: Vec<u8>) -> Vec<u8> {
+    std::mem::replace(slot, data.into()).into_vec()
+}
+
 pub fn round_trip_bytes(bytes: &[u8]) -> Result<Vec<u8>> {
     let original = CompoundFile::from_bytes(bytes)?;
     let output = original.to_bytes()?;
@@ -744,8 +854,14 @@ mod tests {
         let bytes = source.to_bytes().unwrap();
         let output = round_trip_bytes(&bytes).unwrap();
         let parsed = CompoundFile::from_bytes(&output).unwrap();
-        assert_eq!(parsed.entry("/WordDocument").unwrap().data, b"word");
-        assert_eq!(parsed.entry("/Macros/VBA/dir").unwrap().data, b"vba");
+        assert_eq!(
+            parsed.entry("/WordDocument").unwrap().data.as_slice(),
+            b"word"
+        );
+        assert_eq!(
+            parsed.entry("/Macros/VBA/dir").unwrap().data.as_slice(),
+            b"vba"
+        );
     }
 
     #[test]
@@ -784,6 +900,25 @@ mod tests {
                 Some(vec![0x33; 63].as_slice())
             );
         }
+    }
+
+    #[test]
+    fn compound_clone_shares_stream_bytes_until_mutation() {
+        let mut source = CompoundFile::new(Version::V3).unwrap();
+        source.create_stream("/Data", vec![0x31; 65_537]).unwrap();
+        let mut cloned = source.clone();
+
+        assert!(Arc::ptr_eq(
+            &source.entry("/Data").unwrap().data.0,
+            &cloned.entry("/Data").unwrap().data.0,
+        ));
+        cloned.stream_mut("/Data").unwrap()[0] = 0x52;
+        assert_eq!(source.stream("/Data").unwrap()[0], 0x31);
+        assert_eq!(cloned.stream("/Data").unwrap()[0], 0x52);
+        assert!(!Arc::ptr_eq(
+            &source.entry("/Data").unwrap().data.0,
+            &cloned.entry("/Data").unwrap().data.0,
+        ));
     }
 
     #[test]
@@ -1104,7 +1239,8 @@ mod tests {
             reopened
                 .remove_stream("DATA/NESTED/LEAF/VALUE")
                 .unwrap()
-                .data,
+                .data
+                .as_slice(),
             b"second"
         );
         let removed = reopened.remove_storage_all("data/nested").unwrap();

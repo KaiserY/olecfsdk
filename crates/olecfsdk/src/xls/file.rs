@@ -6655,7 +6655,7 @@ impl XlsFile {
                         ));
                         pivot_caches.push(XlsPivotCache::Compatibility {
                             stream_id,
-                            bytes: entry.data.clone(),
+                            bytes: entry.data.to_vec(),
                             reason: error.to_string(),
                         });
                     }
@@ -6883,7 +6883,7 @@ impl XlsFile {
                 } else {
                     workbook.tree.to_bytes()?
                 };
-                compound.create_or_replace_stream(name.path(), bytes)?;
+                compound.upsert_stream(name.path(), bytes)?;
             } else if compound.is_stream(name.path()) {
                 compound.remove_stream(name.path())?;
             }
@@ -6922,7 +6922,7 @@ impl XlsFile {
                 }
                 XlsPivotCache::Compatibility { bytes, .. } => bytes.clone(),
             };
-            compound.create_or_replace_stream(path, bytes)?;
+            compound.upsert_stream(path, bytes)?;
         }
         match &self.revision_log {
             Some(XlsRevisionLog::Parsed(log)) => {
@@ -6930,8 +6930,7 @@ impl XlsFile {
                     log.validate()?;
                     log.relationships()?;
                 }
-                compound
-                    .create_or_replace_stream(super::REVISION_LOG_STREAM_PATH, log.to_bytes()?)?;
+                compound.upsert_stream(super::REVISION_LOG_STREAM_PATH, log.to_bytes()?)?;
             }
             Some(XlsRevisionLog::Compatibility { .. }) if !options.preserves_compatibility() => {
                 return Err(Error::invalid(
@@ -6940,7 +6939,7 @@ impl XlsFile {
                 ));
             }
             Some(XlsRevisionLog::Compatibility { bytes, .. }) => {
-                compound.replace_stream(super::REVISION_LOG_STREAM_PATH, bytes.clone())?;
+                compound.overwrite_stream(super::REVISION_LOG_STREAM_PATH, bytes.clone())?;
             }
             None if compound.is_stream(super::REVISION_LOG_STREAM_PATH) => {
                 compound.remove_stream(super::REVISION_LOG_STREAM_PATH)?;
@@ -6952,8 +6951,7 @@ impl XlsFile {
                 if !options.preserves_compatibility() {
                     users.validate()?;
                 }
-                compound
-                    .create_or_replace_stream(super::USER_NAMES_STREAM_PATH, users.to_bytes()?)?;
+                compound.upsert_stream(super::USER_NAMES_STREAM_PATH, users.to_bytes()?)?;
             }
             Some(XlsUserNames::Compatibility { .. }) if !options.preserves_compatibility() => {
                 return Err(Error::invalid(
@@ -6962,7 +6960,7 @@ impl XlsFile {
                 ));
             }
             Some(XlsUserNames::Compatibility { bytes, .. }) => {
-                compound.create_or_replace_stream(super::USER_NAMES_STREAM_PATH, bytes.clone())?;
+                compound.upsert_stream(super::USER_NAMES_STREAM_PATH, bytes.clone())?;
             }
             None if compound.is_stream(super::USER_NAMES_STREAM_PATH) => {
                 compound.remove_stream(super::USER_NAMES_STREAM_PATH)?;

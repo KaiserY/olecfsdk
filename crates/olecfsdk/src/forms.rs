@@ -4245,10 +4245,10 @@ impl ParentControlStorage {
 
         let form_bytes = self.form.to_bytes()?;
         let object_bytes = self.object_stream.to_bytes(&self.form)?;
-        compound.replace_stream(self.path.join("f"), form_bytes)?;
-        compound.replace_stream(self.path.join("o"), object_bytes)?;
+        compound.overwrite_stream(self.path.join("f"), form_bytes)?;
+        compound.overwrite_stream(self.path.join("o"), object_bytes)?;
         if let Some(value) = &self.multi_page_x {
-            compound.replace_stream(self.path.join("x"), value.to_bytes()?)?;
+            compound.overwrite_stream(self.path.join("x"), value.to_bytes()?)?;
         }
         for child in &self.children {
             child

@@ -6063,11 +6063,11 @@ impl DocFile {
         )?;
 
         let mut compound = self.compound_file.clone();
-        compound.replace_stream(WORD_DOCUMENT_STREAM, word)?;
-        compound.replace_stream(self.table.name.path(), table)?;
+        compound.overwrite_stream(WORD_DOCUMENT_STREAM, word)?;
+        compound.overwrite_stream(self.table.name.path(), table)?;
         match data_bytes {
             Some(bytes) => {
-                compound.create_or_replace_stream(DATA_STREAM, bytes)?;
+                compound.upsert_stream(DATA_STREAM, bytes)?;
             }
             None if compound.is_stream(DATA_STREAM) => {
                 compound.remove_stream(DATA_STREAM)?;
@@ -6076,8 +6076,10 @@ impl DocFile {
         }
         if let Some(object_pool) = &self.object_pool {
             for object in &object_pool.objects {
-                compound
-                    .replace_stream(&object.descriptor_stream_path, object.descriptor.to_bytes())?;
+                compound.overwrite_stream(
+                    &object.descriptor_stream_path,
+                    object.descriptor.to_bytes(),
+                )?;
             }
         }
         self.shared.write_to_compound_file(&mut compound, options)?;
@@ -10612,7 +10614,7 @@ fn source_paragraph_formatting_runs(
     clx: &Clx,
     source_word: &[u8],
 ) -> Result<Vec<DocPapxRun>> {
-    let mut fragments = Vec::<DocPapxRun>::new();
+    let mut fragments = Vec::<(u32, u32, &PapxFkpRun)>::new();
     for page in pages {
         for (range, run) in page.value.file_positions.windows(2).zip(&page.value.runs) {
             if range[0] >= range[1] {
@@ -10651,28 +10653,21 @@ fn source_paragraph_formatting_runs(
                         "PapxFkp boundary is not aligned to its text-piece encoding",
                     ));
                 }
-                fragments.push(DocPapxRun {
-                    cp_start: cp_start
-                        .checked_add(u32::try_from(start_delta / width).map_err(|_| {
-                            Error::Limit("logical paragraph run start exceeds u32".into())
-                        })?)
-                        .ok_or_else(|| {
-                            Error::Limit("logical paragraph run start overflow".into())
-                        })?,
-                    cp_end: cp_start
-                        .checked_add(u32::try_from(end_delta / width).map_err(|_| {
-                            Error::Limit("logical paragraph run limit exceeds u32".into())
-                        })?)
-                        .ok_or_else(|| {
-                            Error::Limit("logical paragraph run limit overflow".into())
-                        })?,
-                    paragraph_height_info: run.paragraph_height_info,
-                    properties: run.properties.clone(),
-                });
+                let fragment_start = cp_start
+                    .checked_add(u32::try_from(start_delta / width).map_err(|_| {
+                        Error::Limit("logical paragraph run start exceeds u32".into())
+                    })?)
+                    .ok_or_else(|| Error::Limit("logical paragraph run start overflow".into()))?;
+                let fragment_end = cp_start
+                    .checked_add(u32::try_from(end_delta / width).map_err(|_| {
+                        Error::Limit("logical paragraph run limit exceeds u32".into())
+                    })?)
+                    .ok_or_else(|| Error::Limit("logical paragraph run limit overflow".into()))?;
+                fragments.push((fragment_start, fragment_end, run));
             }
         }
     }
-    fragments.sort_by_key(|run| (run.cp_start, run.cp_end));
+    fragments.sort_by_key(|(cp_start, cp_end, _)| (*cp_start, *cp_end));
     let source_ranges = source_paragraph_ranges(clx, source_word)?;
     source_ranges
         .into_iter()
@@ -10680,11 +10675,12 @@ fn source_paragraph_formatting_runs(
             let marker = end.saturating_sub(1);
             let formatting = fragments
                 .iter()
-                .find(|run| run.cp_start <= marker && marker < run.cp_end)
-                .or_else(|| fragments.iter().find(|run| run.cp_end == end))
+                .find(|(cp_start, cp_end, _)| *cp_start <= marker && marker < *cp_end)
+                .or_else(|| fragments.iter().find(|(_, cp_end, _)| *cp_end == end))
                 .ok_or_else(|| {
                     Error::invalid(u64::from(start), "paragraph has no PapxFkp formatting run")
-                })?;
+                })?
+                .2;
             Ok(DocPapxRun {
                 cp_start: start,
                 cp_end: end,
@@ -10956,9 +10952,16 @@ fn rebuild_character_formatting_pages(
     word: &mut Vec<u8>,
     fib: &mut Fib,
 ) -> Result<(PlcBte, Vec<DocFkpPage<ChpxFkp>>)> {
-    let logical_runs = normalize_logical_character_runs(logical_runs.to_vec())?;
+    for run in logical_runs {
+        if run.cp_start >= run.cp_end {
+            return Err(Error::invalid(
+                u64::from(run.cp_start),
+                "logical character formatting run is empty",
+            ));
+        }
+    }
     let physical_runs =
-        destination_character_formatting_runs(&logical_runs, current_pieces, encoded_pieces)?;
+        destination_character_formatting_runs(logical_runs, current_pieces, encoded_pieces)?;
     let pages = paginate_character_formatting_runs(&physical_runs)?;
     let meaningful_end = usize::try_from(fib.rg_lw.cb_mac)
         .map_err(|_| Error::Limit("FIB cbMac exceeds usize".into()))?;
