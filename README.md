@@ -19,6 +19,27 @@ XLS retains BIFF records plus nested BOF/EOF substreams (including files that
 contain both `/Workbook` and `/Book`). The SDK does not substitute lossy
 plain-text, slide-summary, or cell-string projections for these trees.
 
+The parse-time CFB is an immutable preservation snapshot. Typed edits update
+the Rust tree; `to_compound_file`, `to_bytes`, and `save` rebuild every managed
+stream from that tree while carrying unrelated CFB entries forward. Default
+open/save operations are strict. Producer deviations must be opened through a
+`*_compatible` entry point, inspected through its structured diagnostics, and
+saved with `SaveOptions::preserving_compatibility()` only when retaining those
+explicit compatibility nodes is intentional.
+
+Runnable examples perform a semantic edit and strict reopen of the result:
+
+```sh
+cargo run -p olecfsdk --example edit_doc -- input.doc output.doc
+cargo run -p olecfsdk --example edit_xls -- input.xls output.xls
+cargo run -p olecfsdk --example edit_ppt -- input.ppt output.ppt
+```
+
+PPT's ordinary save preserves and relocates its existing physical incremental
+history. Call the separate `PptHistoryStrategy` APIs only when an append or a
+normalized live-state rebuild is explicitly required; history policy is not a
+parse or compatibility option.
+
 ## CFB baseline
 
 - CFB v3/v4 containers open into an owned logical storage/stream model and are

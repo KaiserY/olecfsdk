@@ -19,13 +19,14 @@ use cache::{SrpStream, SrpStreamName, VbaProjectStream};
 use compression::CompressedContainer;
 use directory::{DirStream, ModuleDescriptor};
 use module::ModuleStream;
-use project::{ProjectStream, ProjectWmStream};
+use project::{ProjectLkStream, ProjectStream, ProjectWmStream};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VbaProject {
     pub vba_storage_path: PathBuf,
     pub project: Option<ProjectStream>,
     pub project_wm: Option<ProjectWmStream>,
+    pub project_lk: Option<ProjectLkStream>,
     pub directory_container: CompressedContainer,
     pub directory: DirStream,
     pub cache: VbaProjectStream,
@@ -123,6 +124,9 @@ impl VbaProject {
         let project_wm = stream_anywhere(compound_file, "PROJECTwm")
             .map(|entry| ProjectWmStream::from_bytes(&entry.data))
             .transpose()?;
+        let project_lk = stream_anywhere(compound_file, "PROJECTlk")
+            .map(|entry| ProjectLkStream::from_bytes_with_limits(&entry.data, limits))
+            .transpose()?;
         let code_page = CodePage(directory.code_page().unwrap_or(1252));
         let mut modules = Vec::new();
         for descriptor in directory.modules() {
@@ -144,6 +148,7 @@ impl VbaProject {
             vba_storage_path,
             project,
             project_wm,
+            project_lk,
             directory_container,
             directory,
             cache,
@@ -245,6 +250,7 @@ mod tests {
         vba::directory::{
             DirRecord, MarkerRecordKind, MbcsStringRecordKind, U16RecordKind, U32RecordKind,
         },
+        vba::project::LicenseInfo,
     };
 
     #[test]
@@ -273,7 +279,7 @@ mod tests {
                 },
                 DirRecord::Terminator,
             ],
-            trailing: Vec::new(),
+            reserved: 0,
         };
         let encoded_directory =
             CompressedContainer::from_uncompressed(&directory.to_bytes().unwrap())
@@ -305,9 +311,21 @@ mod tests {
         compound
             .create_stream("/VBA/__SRP_A1", vec![1, 2, 3])
             .unwrap();
+        let project_lk = ProjectLkStream {
+            version: ProjectLkStream::VERSION,
+            licenses: vec![LicenseInfo {
+                class_id: [0x44; 16],
+                license_key: b"opaque-license".to_vec(),
+                license_required: 1,
+            }],
+        };
+        compound
+            .create_stream("/PROJECTlk", project_lk.to_bytes().unwrap())
+            .unwrap();
 
         let mut project = VbaProject::from_compound_file(&compound).unwrap();
         assert_eq!(project.srp_streams.len(), 1);
+        assert_eq!(project.project_lk, Some(project_lk.clone()));
         assert_eq!(
             project
                 .replace_module_source("module1", b"Sub Changed()\r\nEnd Sub")
@@ -327,6 +345,7 @@ mod tests {
         );
         assert!(reopened.cache.performance_cache.is_empty());
         assert!(reopened.srp_streams.is_empty());
+        assert_eq!(reopened.project_lk, Some(project_lk));
         assert_eq!(reopened.directory.module_offsets().collect::<Vec<_>>(), [0]);
         assert!(reopened.modules[0].stream.performance_cache.is_empty());
         assert_eq!(

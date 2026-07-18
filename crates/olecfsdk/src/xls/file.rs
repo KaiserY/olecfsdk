@@ -1,4 +1,11 @@
 //! Typed file and substream roots for the Excel binary format.
+//!
+//! [`XlsFile`] is the write authority for every managed BIFF stream. Its private
+//! source CFB remains an immutable snapshot for unrelated entries; serialization
+//! rebuilds workbook, pivot-cache, revision, and user-name streams from the
+//! current Rust trees. Strict entry points and saves are the default. Compatible
+//! parsing returns structured diagnostics, and compatibility nodes require an
+//! explicit compatibility-preserving save policy.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -88,6 +95,9 @@ pub struct BiffWorkbookTree {
 }
 
 /// Complete typed root for an Excel binary file.
+///
+/// See the runnable `edit_xls` example for open, relationship traversal, sheet
+/// name edit, save, and strict reopen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct XlsFile {
     compound_file: CompoundFile,
@@ -5916,10 +5926,13 @@ impl XlsFile {
             .transpose()
     }
 
+    /// Opens a path in strict mode and returns its owned MS-XLS tree.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self::open_with_options(path, ParseOptions::default())?.into_value())
     }
 
+    /// Opens a path in compatible mode, returning every structured diagnostic
+    /// alongside the owned tree.
     pub fn open_compatible(path: impl AsRef<Path>) -> Result<ParseOutcome<Self>> {
         Self::open_with_options(path, ParseOptions::compatible(Limits::default()))
     }
@@ -5932,10 +5945,12 @@ impl XlsFile {
         Self::from_compound_outcome(compound, options)
     }
 
+    /// Parses a complete CFB byte slice in strict mode.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         Ok(Self::from_bytes_with_options(bytes, ParseOptions::default())?.into_value())
     }
 
+    /// Parses a complete CFB byte slice in compatible mode.
     pub fn from_bytes_compatible(bytes: &[u8]) -> Result<ParseOutcome<Self>> {
         Self::from_bytes_with_options(bytes, ParseOptions::compatible(Limits::default()))
     }
@@ -5952,6 +5967,7 @@ impl XlsFile {
         Self::from_compound_outcome(compound, options)
     }
 
+    /// Consumes an owned CFB and parses its managed streams in strict mode.
     pub fn from_compound_file(compound_file: CompoundFile) -> Result<Self> {
         Ok(
             Self::from_compound_file_with_options(compound_file, ParseOptions::default())?
@@ -6269,14 +6285,17 @@ impl XlsFile {
         ))
     }
 
+    /// Rebuilds every managed BIFF stream and returns a strict CFB.
     pub fn to_compound_file(&self) -> Result<CompoundFile> {
         self.to_compound_file_with_options(SaveOptions::default())
     }
 
+    /// Rebuilds managed BIFF streams while retaining compatibility nodes.
     pub fn to_compound_file_preserving_compatibility(&self) -> Result<CompoundFile> {
         self.to_compound_file_with_options(SaveOptions::preserving_compatibility())
     }
 
+    /// Rebuilds managed BIFF streams under the requested compatibility policy.
     pub fn to_compound_file_with_options(&self, options: SaveOptions) -> Result<CompoundFile> {
         if self.workbooks.is_empty() {
             return Err(Error::invalid(0, "XLS file has no BIFF workbook stream"));
@@ -6399,19 +6418,27 @@ impl XlsFile {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        self.to_compound_file()?.to_bytes()
+        self.to_bytes_with_options(SaveOptions::default())
     }
 
     pub fn to_bytes_preserving_compatibility(&self) -> Result<Vec<u8>> {
-        self.to_compound_file_preserving_compatibility()?.to_bytes()
+        self.to_bytes_with_options(SaveOptions::preserving_compatibility())
+    }
+
+    pub fn to_bytes_with_options(&self, options: SaveOptions) -> Result<Vec<u8>> {
+        self.to_compound_file_with_options(options)?.to_bytes()
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.to_compound_file()?.save(path)
+        self.save_with_options(path, SaveOptions::default())
     }
 
     pub fn save_preserving_compatibility(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.to_compound_file_preserving_compatibility()?.save(path)
+        self.save_with_options(path, SaveOptions::preserving_compatibility())
+    }
+
+    pub fn save_with_options(&self, path: impl AsRef<Path>, options: SaveOptions) -> Result<()> {
+        self.to_compound_file_with_options(options)?.save(path)
     }
 }
 
@@ -7708,6 +7735,21 @@ mod tests {
             Some(super::super::REVISION_LOG_STREAM_PATH)
         );
         assert!(outcome.value.to_compound_file().is_err());
+        assert!(
+            outcome
+                .value
+                .to_bytes_with_options(SaveOptions::default())
+                .is_err()
+        );
+        let preserved_bytes = outcome
+            .value
+            .to_bytes_with_options(SaveOptions::preserving_compatibility())
+            .unwrap();
+        let preserved_bytes = CompoundFile::from_bytes(&preserved_bytes).unwrap();
+        assert_eq!(
+            preserved_bytes.stream(super::super::REVISION_LOG_STREAM_PATH),
+            Some([1, 2, 3].as_slice())
+        );
         let preserved = outcome
             .value
             .to_compound_file_preserving_compatibility()

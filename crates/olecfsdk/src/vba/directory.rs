@@ -8,7 +8,8 @@ const DIR_TERMINATOR: u16 = 0x0010;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DirStream {
     pub records: Vec<DirRecord>,
-    pub trailing: Vec<u8>,
+    /// MS-OVBA 2.3.4.2 Reserved field following the 0x0010 terminator.
+    pub reserved: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -163,10 +164,20 @@ impl DirStream {
             let id = take_u16(bytes, &mut cursor, "truncated VBA dir record id")?;
             if id == DIR_TERMINATOR {
                 records.push(DirRecord::Terminator);
-                return Ok(Self {
-                    records,
-                    trailing: bytes[cursor..].to_vec(),
-                });
+                let reserved = take_u32(bytes, &mut cursor, "truncated VBA dir Reserved field")?;
+                if reserved != 0 {
+                    return Err(Error::invalid(
+                        cursor.saturating_sub(4) as u64,
+                        "VBA dir Reserved field must be zero",
+                    ));
+                }
+                if cursor != bytes.len() {
+                    return Err(Error::invalid(
+                        cursor as u64,
+                        "VBA dir stream has bytes after Reserved field",
+                    ));
+                }
+                return Ok(Self { records, reserved });
             }
             if id == PROJECT_VERSION {
                 records.push(DirRecord::ProjectVersion {
@@ -210,10 +221,10 @@ impl DirStream {
                 )));
             }
         }
-        Ok(Self {
-            records,
-            trailing: Vec::new(),
-        })
+        Err(Error::invalid(
+            bytes.len() as u64,
+            "VBA dir stream has no 0x0010 terminator",
+        ))
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
@@ -229,7 +240,19 @@ impl DirStream {
             record.write_to(&mut bytes)?;
             saw_terminator = matches!(record, DirRecord::Terminator);
         }
-        bytes.extend_from_slice(&self.trailing);
+        if !saw_terminator {
+            return Err(Error::invalid(
+                bytes.len() as u64,
+                "VBA dir stream has no 0x0010 terminator",
+            ));
+        }
+        if self.reserved != 0 {
+            return Err(Error::invalid(
+                bytes.len() as u64,
+                "VBA dir Reserved field must be zero",
+            ));
+        }
+        bytes.extend_from_slice(&self.reserved.to_le_bytes());
         Ok(bytes)
     }
 
@@ -809,6 +832,7 @@ mod tests {
         bytes.extend_from_slice(&0x0001_0002u32.to_le_bytes());
         bytes.extend_from_slice(&3u16.to_le_bytes());
         bytes.extend_from_slice(&DIR_TERMINATOR.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
 
         let stream = DirStream::from_bytes(&bytes).unwrap();
         assert_eq!(stream.code_page(), Some(1252));
@@ -838,7 +862,7 @@ mod tests {
                 },
                 DirRecord::Terminator,
             ],
-            trailing: Vec::new(),
+            reserved: 0,
         };
         assert_eq!(
             stream.modules(),
@@ -861,6 +885,18 @@ mod tests {
         write_sized(&mut odd, 0x0047, &[1]).unwrap();
         assert!(DirStream::from_bytes(&odd).is_err());
         assert!(DirStream::from_bytes(&[1, 0, 4, 0, 0]).is_err());
+        assert!(DirStream::from_bytes(&DIR_TERMINATOR.to_le_bytes()).is_err());
+        assert!(
+            DirStream::from_bytes(&[
+                DIR_TERMINATOR as u8,
+                (DIR_TERMINATOR >> 8) as u8,
+                1,
+                0,
+                0,
+                0,
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -887,8 +923,8 @@ mod tests {
         ];
         for record in records {
             let stream = DirStream {
-                records: vec![record],
-                trailing: Vec::new(),
+                records: vec![record, DirRecord::Terminator],
+                reserved: 0,
             };
             let bytes = stream.to_bytes().unwrap();
             assert_eq!(DirStream::from_bytes(&bytes).unwrap(), stream);

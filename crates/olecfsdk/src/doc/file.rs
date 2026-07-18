@@ -1,7 +1,16 @@
 //! Typed file and primary content-tree roots for the Word binary format.
+//!
+//! [`DocFile`] owns the parsed MS-DOC tree and keeps its source CFB private as
+//! an immutable preservation snapshot. Typed edits do not mutate that snapshot;
+//! serialization rebuilds `WordDocument`, the selected Table stream, `Data`,
+//! and `ObjectPool` state from the current tree, then carries unrelated entries
+//! forward. Strict entry points and saves are the default. Compatible parsing
+//! returns structured diagnostics, and compatibility nodes require an explicit
+//! compatibility-preserving save policy.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     ops::Range,
     path::{Path, PathBuf},
 };
@@ -19,6 +28,7 @@ use crate::{
         ParseDiagnostic, ParseDiagnosticCode, ParseOptions, ParseOutcome, SpecificationReference,
         compound_from_bytes, compound_from_path, compound_outcome,
     },
+    save::SaveOptions,
     shared::MsoEnvelope,
 };
 
@@ -898,6 +908,9 @@ pub struct DocCompatibilityObjectStorage {
 /// entries remain available through [`Self::source_compound_file`]; saving
 /// preserves that source hierarchy and replaces managed streams from these
 /// typed fields.
+///
+/// See the runnable `edit_doc` example for open, traversal, semantic text edit,
+/// save, and strict reopen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DocFile {
     compound_file: CompoundFile,
@@ -4151,10 +4164,13 @@ impl DocFile {
         &self.compound_file
     }
 
+    /// Opens a path in strict mode and returns its owned MS-DOC tree.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self::open_with_options(path, ParseOptions::default())?.into_value())
     }
 
+    /// Opens a path in compatible mode, returning every structured diagnostic
+    /// alongside the owned tree.
     pub fn open_compatible(path: impl AsRef<Path>) -> Result<ParseOutcome<Self>> {
         Self::open_with_options(path, ParseOptions::compatible(Limits::default()))
     }
@@ -4167,10 +4183,12 @@ impl DocFile {
         Self::from_compound_outcome(compound, options)
     }
 
+    /// Parses a complete CFB byte slice in strict mode.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         Ok(Self::from_bytes_with_options(bytes, ParseOptions::default())?.into_value())
     }
 
+    /// Parses a complete CFB byte slice in compatible mode.
     pub fn from_bytes_compatible(bytes: &[u8]) -> Result<ParseOutcome<Self>> {
         Self::from_bytes_with_options(bytes, ParseOptions::compatible(Limits::default()))
     }
@@ -4187,6 +4205,7 @@ impl DocFile {
         Self::from_compound_outcome(compound, options)
     }
 
+    /// Consumes an owned CFB and parses its managed streams in strict mode.
     pub fn from_compound_file(compound_file: CompoundFile) -> Result<Self> {
         Ok(
             Self::from_compound_file_with_options(compound_file, ParseOptions::default())?
@@ -4837,7 +4856,37 @@ impl DocFile {
         ))
     }
 
+    /// Rebuilds managed streams from the typed tree and returns a strict CFB.
     pub fn to_compound_file(&self) -> Result<CompoundFile> {
+        self.to_compound_file_with_options(SaveOptions::default())
+    }
+
+    /// Rebuilds managed streams while explicitly retaining compatibility nodes.
+    pub fn to_compound_file_preserving_compatibility(&self) -> Result<CompoundFile> {
+        self.to_compound_file_with_options(SaveOptions::preserving_compatibility())
+    }
+
+    /// Rebuilds managed streams under the requested compatibility policy.
+    pub fn to_compound_file_with_options(&self, options: SaveOptions) -> Result<CompoundFile> {
+        let compound = self.to_compound_file_with_current_layout()?;
+        if !options.preserves_compatibility() {
+            // Validate the bytes the native CFB writer actually emits.  The
+            // source tree may carry compatibility-only physical CFB state
+            // that the writer canonicalizes while serializing.
+            let bytes = compound.to_bytes()?;
+            Self::from_bytes(&bytes)?;
+        }
+        Ok(compound)
+    }
+
+    fn validate_emitted_bytes(bytes: &[u8], options: SaveOptions) -> Result<()> {
+        if !options.preserves_compatibility() {
+            Self::from_bytes(bytes)?;
+        }
+        Ok(())
+    }
+
+    fn to_compound_file_with_current_layout(&self) -> Result<CompoundFile> {
         self.validate_links()?;
         let mut word = self.word_document.physical_bytes.clone();
         let mut table = TableLayout::new(self.table.physical_bytes.clone());
@@ -5610,11 +5659,30 @@ impl DocFile {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        self.to_compound_file()?.to_bytes()
+        self.to_bytes_with_options(SaveOptions::default())
+    }
+
+    pub fn to_bytes_preserving_compatibility(&self) -> Result<Vec<u8>> {
+        self.to_bytes_with_options(SaveOptions::preserving_compatibility())
+    }
+
+    pub fn to_bytes_with_options(&self, options: SaveOptions) -> Result<Vec<u8>> {
+        let bytes = self.to_compound_file_with_current_layout()?.to_bytes()?;
+        Self::validate_emitted_bytes(&bytes, options)?;
+        Ok(bytes)
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.to_compound_file()?.save(path)
+        self.save_with_options(path, SaveOptions::default())
+    }
+
+    pub fn save_preserving_compatibility(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.save_with_options(path, SaveOptions::preserving_compatibility())
+    }
+
+    pub fn save_with_options(&self, path: impl AsRef<Path>, options: SaveOptions) -> Result<()> {
+        fs::write(path, self.to_bytes_with_options(options)?)?;
+        Ok(())
     }
 
     /// Replaces a character range in the Main Document and relocates every

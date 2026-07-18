@@ -1,4 +1,12 @@
 //! Typed file root for the PowerPoint binary format.
+//!
+//! [`PptFile`] owns the recursive MS-PPT record tree and keeps its source CFB
+//! private as an immutable preservation snapshot. Serialization rebuilds the
+//! managed PowerPoint Document, Current User, and Pictures streams from the
+//! current tree. Strict entry points and saves are the default; compatible
+//! parsing returns structured diagnostics and requires an explicit preserving
+//! save policy for compatibility nodes. The independent [`PptHistoryStrategy`]
+//! controls physical incremental history and is not a compatibility switch.
 
 use std::path::Path;
 
@@ -33,6 +41,9 @@ const PICTURES_STREAM: &str = "/Pictures";
 /// content is flattened into text, slide summaries, or image shortcuts. The
 /// source CFB image is private so it cannot compete with these typed streams
 /// as a write authority.
+///
+/// See the runnable `edit_ppt` example for open, live-presentation traversal,
+/// slide-text edit, save, and strict reopen.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PptFile {
     compound_file: CompoundFile,
@@ -74,10 +85,13 @@ impl PptFile {
         &self.compound_file
     }
 
+    /// Opens a path in strict mode and returns its owned MS-PPT tree.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self::open_with_options(path, ParseOptions::default())?.into_value())
     }
 
+    /// Opens a path in compatible mode, returning every structured diagnostic
+    /// alongside the owned tree.
     pub fn open_compatible(path: impl AsRef<Path>) -> Result<ParseOutcome<Self>> {
         Self::open_with_options(path, ParseOptions::compatible(Limits::default()))
     }
@@ -90,10 +104,12 @@ impl PptFile {
         Self::from_compound_outcome(compound, options)
     }
 
+    /// Parses a complete CFB byte slice in strict mode.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         Ok(Self::from_bytes_with_options(bytes, ParseOptions::default())?.into_value())
     }
 
+    /// Parses a complete CFB byte slice in compatible mode.
     pub fn from_bytes_compatible(bytes: &[u8]) -> Result<ParseOutcome<Self>> {
         Self::from_bytes_with_options(bytes, ParseOptions::compatible(Limits::default()))
     }
@@ -110,6 +126,7 @@ impl PptFile {
         Self::from_compound_outcome(compound, options)
     }
 
+    /// Consumes an owned CFB and parses its managed streams in strict mode.
     pub fn from_compound_file(compound_file: CompoundFile) -> Result<Self> {
         Ok(
             Self::from_compound_file_with_options(compound_file, ParseOptions::default())?
@@ -570,10 +587,13 @@ impl PptFile {
         self.to_compound_file_with_options(SaveOptions::default())
     }
 
+    /// Rebuilds managed streams while retaining explicit compatibility nodes.
     pub fn to_compound_file_preserving_compatibility(&self) -> Result<CompoundFile> {
         self.to_compound_file_with_options(SaveOptions::preserving_compatibility())
     }
 
+    /// Rebuilds managed streams under the requested compatibility policy.
+    /// Physical history is preserved unless a history-strategy API is used.
     pub fn to_compound_file_with_options(&self, options: SaveOptions) -> Result<CompoundFile> {
         let mut rebuilt = self.clone();
         if matches!(rebuilt.current_user.data, CurrentUserData::Parsed(_)) {
@@ -635,11 +655,15 @@ impl PptFile {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        self.to_compound_file()?.to_bytes()
+        self.to_bytes_with_options(SaveOptions::default())
     }
 
     pub fn to_bytes_preserving_compatibility(&self) -> Result<Vec<u8>> {
-        self.to_compound_file_preserving_compatibility()?.to_bytes()
+        self.to_bytes_with_options(SaveOptions::preserving_compatibility())
+    }
+
+    pub fn to_bytes_with_options(&self, options: SaveOptions) -> Result<Vec<u8>> {
+        self.to_compound_file_with_options(options)?.to_bytes()
     }
 
     pub fn to_bytes_with_history_strategy(&self, strategy: PptHistoryStrategy) -> Result<Vec<u8>> {
@@ -648,11 +672,15 @@ impl PptFile {
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.to_compound_file()?.save(path)
+        self.save_with_options(path, SaveOptions::default())
     }
 
     pub fn save_preserving_compatibility(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.to_compound_file_preserving_compatibility()?.save(path)
+        self.save_with_options(path, SaveOptions::preserving_compatibility())
+    }
+
+    pub fn save_with_options(&self, path: impl AsRef<Path>, options: SaveOptions) -> Result<()> {
+        self.to_compound_file_with_options(options)?.save(path)
     }
 
     pub fn save_with_history_strategy(
@@ -1668,6 +1696,21 @@ mod tests {
             Some((document.len() - 11) as u64)
         );
         assert!(outcome.value.to_compound_file().is_err());
+        assert!(
+            outcome
+                .value
+                .to_bytes_with_options(SaveOptions::default())
+                .is_err()
+        );
+        let preserved_bytes = outcome
+            .value
+            .to_bytes_with_options(SaveOptions::preserving_compatibility())
+            .unwrap();
+        let preserved_bytes = CompoundFile::from_bytes(&preserved_bytes).unwrap();
+        assert_eq!(
+            preserved_bytes.stream(DOCUMENT_STREAM),
+            Some(document.as_slice())
+        );
         assert_eq!(
             outcome
                 .value
