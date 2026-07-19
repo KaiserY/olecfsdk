@@ -520,6 +520,32 @@ pub enum OfficeArtMetafileData {
     },
 }
 
+/// File format of one decoded or natively encoded OfficeArt BLIP payload.
+///
+/// This closed enum replaces record-type literals at SDK call sites while
+/// retaining the exact distinction needed for an OOXML image content type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum OfficeArtImageFormat {
+    Emf,
+    Wmf,
+    Pict,
+    Jpeg,
+    Png,
+    Dib,
+    Tiff,
+}
+
+/// Borrowed image payload exposed by a typed OfficeArt BLIP record.
+///
+/// Bitmap payloads already use their native encoded form. Metafiles expose
+/// their decoded bytes because the OfficeArt compression wrapper is not part
+/// of the image file stored in an OOXML media part.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeArtImageRef<'a> {
+    pub format: OfficeArtImageFormat,
+    pub data: &'a [u8],
+}
+
 /// Exact clone-on-write state for one editable OfficeArt metafile payload.
 ///
 /// The decoded baseline and encoded source share their allocations across
@@ -635,14 +661,10 @@ pub enum OfficeArtClientMarker {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OfficeArtClientAnchor {
     /// Shared 18-byte representation used by sheet and chart anchors.
-    Words18 {
-        flags: u16,
-        coordinates: [u16; 8],
-    },
-    HeaderFooter {
-        width: i32,
-        height: i32,
-    },
+    Words18 { flags: u16, coordinates: [u16; 8] },
+    /// Eight-byte host-defined representation retained as four wire words.
+    /// PowerPoint interprets these as y1, x1, x2, y2 master coordinates.
+    Words8 { coordinates: [i16; 4] },
     /// 16-byte host anchor used by PowerPoint drawing clients.
     PowerPointRect(OfficeArtRect),
 }
@@ -879,8 +901,11 @@ impl OfficeArtStream {
         Ok(())
     }
 
-    pub fn visit(&self, mut visitor: impl FnMut(&OfficeArtRecord)) {
-        fn visit_records(records: &[OfficeArtRecord], visitor: &mut impl FnMut(&OfficeArtRecord)) {
+    pub fn visit<'a>(&'a self, mut visitor: impl FnMut(&'a OfficeArtRecord)) {
+        fn visit_records<'a>(
+            records: &'a [OfficeArtRecord],
+            visitor: &mut impl FnMut(&'a OfficeArtRecord),
+        ) {
             for record in records {
                 visitor(record);
                 match &record.data {
@@ -2095,6 +2120,39 @@ impl OfficeArtIncompleteRecordData {
 }
 
 impl OfficeArtRecord {
+    /// Returns this record's supported image payload without copying it.
+    ///
+    /// `None` means that the record is not a supported typed BLIP. In
+    /// particular, opaque metafile payloads remain distinguishable through
+    /// [`OfficeArtRecordData::MetafileBlip`] and are never guessed here.
+    pub fn image_ref(&self) -> Option<OfficeArtImageRef<'_>> {
+        let (format, data) = match &self.data {
+            OfficeArtRecordData::BitmapBlip(blip) => {
+                let format = match self.header.record_type {
+                    0xf01d | 0xf02a => OfficeArtImageFormat::Jpeg,
+                    0xf01e => OfficeArtImageFormat::Png,
+                    0xf01f => OfficeArtImageFormat::Dib,
+                    0xf029 => OfficeArtImageFormat::Tiff,
+                    _ => return None,
+                };
+                let data = match &blip.file_data {
+                    OfficeArtBitmapData::Dib(data) | OfficeArtBitmapData::Encoded(data) => {
+                        data.as_slice()
+                    }
+                };
+                (format, data)
+            }
+            OfficeArtRecordData::MetafileBlip(blip) => match &blip.file_data {
+                OfficeArtMetafileData::Emf(data) => (OfficeArtImageFormat::Emf, data.decoded()),
+                OfficeArtMetafileData::Wmf(data) => (OfficeArtImageFormat::Wmf, data.decoded()),
+                OfficeArtMetafileData::Pict(data) => (OfficeArtImageFormat::Pict, data.decoded()),
+                OfficeArtMetafileData::Opaque { .. } => return None,
+            },
+            _ => return None,
+        };
+        Some(OfficeArtImageRef { format, data })
+    }
+
     fn direct_children(&self) -> Result<Option<&[OfficeArtRecord]>> {
         match &self.data {
             OfficeArtRecordData::Container(children) => {
@@ -2341,6 +2399,76 @@ impl OfficeArtRecord {
         }
         Ok(())
     }
+}
+
+/// Borrows an image payload from one complete encoded OfficeArt BLIP record.
+/// Bitmap formats and uncompressed metafiles require no allocation. A
+/// compressed metafile returns `None`; callers that need it should use the
+/// typed [`OfficeArtRecord`] parser, which owns the decoded payload.
+pub fn image_ref_from_record_bytes(bytes: &[u8]) -> Result<Option<OfficeArtImageRef<'_>>> {
+    let header = OfficeArtRecordHeader::read_slice(bytes)?;
+    let payload_len = usize::try_from(header.declared_length)
+        .map_err(|_| Error::Limit("OfficeArt BLIP length exceeds usize".into()))?;
+    let record_len = HEADER_LEN
+        .checked_add(payload_len)
+        .ok_or_else(|| Error::Limit("OfficeArt BLIP record length overflow".into()))?;
+    let payload = bytes
+        .get(HEADER_LEN..record_len)
+        .ok_or_else(|| {
+            Error::invalid(
+                0,
+                format!(
+                    "delayed OfficeArt record {:#06x}/instance {:#05x} declares {} payload bytes, only {} are available",
+                    header.record_type,
+                    header.instance,
+                    payload_len,
+                    bytes.len().saturating_sub(HEADER_LEN)
+                ),
+            )
+        })?;
+    if let Some(uid_count) = bitmap_uid_count(header.record_type, header.instance) {
+        let prefix_len = uid_count
+            .checked_mul(16)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| Error::Limit("OfficeArt bitmap prefix length overflow".into()))?;
+        let data = payload
+            .get(prefix_len..)
+            .ok_or_else(|| Error::invalid(0, "delayed OfficeArt bitmap prefix is truncated"))?;
+        let format = match header.record_type {
+            0xf01d | 0xf02a => OfficeArtImageFormat::Jpeg,
+            0xf01e => OfficeArtImageFormat::Png,
+            0xf01f => OfficeArtImageFormat::Dib,
+            0xf029 => OfficeArtImageFormat::Tiff,
+            _ => unreachable!("bitmap UID validation accepted an unknown record type"),
+        };
+        return Ok(Some(OfficeArtImageRef { format, data }));
+    }
+    let Some(uid_count) = metafile_uid_count(header.record_type, header.instance) else {
+        return Ok(None);
+    };
+    let uid_len = uid_count
+        .checked_mul(16)
+        .ok_or_else(|| Error::Limit("OfficeArt metafile UID length overflow".into()))?;
+    let header_end = uid_len
+        .checked_add(34)
+        .ok_or_else(|| Error::Limit("OfficeArt metafile header length overflow".into()))?;
+    let metafile_header = payload
+        .get(uid_len..header_end)
+        .and_then(OfficeArtMetafileHeader::parse)
+        .ok_or_else(|| Error::invalid(0, "delayed OfficeArt metafile header is truncated"))?;
+    if metafile_header.compression != 0xfe {
+        return Ok(None);
+    }
+    let format = match header.record_type {
+        0xf01a => OfficeArtImageFormat::Emf,
+        0xf01b => OfficeArtImageFormat::Wmf,
+        0xf01c => OfficeArtImageFormat::Pict,
+        _ => unreachable!("metafile UID validation accepted an unknown record type"),
+    };
+    Ok(Some(OfficeArtImageRef {
+        format,
+        data: &payload[header_end..],
+    }))
 }
 
 struct CountingWriter<'a> {
@@ -3190,9 +3318,11 @@ impl OfficeArtClientAnchor {
                     u16::from_le_bytes([payload[offset], payload[offset + 1]])
                 }),
             }),
-            8 => Some(Self::HeaderFooter {
-                width: i32::from_le_bytes(payload[0..4].try_into().expect("four bytes")),
-                height: i32::from_le_bytes(payload[4..8].try_into().expect("four bytes")),
+            8 => Some(Self::Words8 {
+                coordinates: std::array::from_fn(|index| {
+                    let offset = index * 2;
+                    i16::from_le_bytes([payload[offset], payload[offset + 1]])
+                }),
             }),
             16 => Some(Self::PowerPointRect(OfficeArtRect::parse(payload))),
             _ => None,
@@ -3207,9 +3337,10 @@ impl OfficeArtClientAnchor {
                     payload.extend_from_slice(&coordinate.to_le_bytes());
                 }
             }
-            Self::HeaderFooter { width, height } => {
-                payload.extend_from_slice(&width.to_le_bytes());
-                payload.extend_from_slice(&height.to_le_bytes());
+            Self::Words8 { coordinates } => {
+                for coordinate in coordinates {
+                    payload.extend_from_slice(&coordinate.to_le_bytes());
+                }
             }
             Self::PowerPointRect(rect) => rect.write(payload),
         }

@@ -22,7 +22,10 @@ use crate::{
     forms::ParentControlStorageModel,
     io::{BinaryFormat, SdkEnumValue},
     limits::Limits,
-    office_art::{OfficeArtDrawingGraph, OfficeArtStream},
+    office_art::{
+        OfficeArtClientAnchor, OfficeArtDrawingGraph, OfficeArtImageRef, OfficeArtPropertyValue,
+        OfficeArtRecord, OfficeArtRecordData, OfficeArtShape, OfficeArtStream,
+    },
     parse::{
         ParseDiagnostic, ParseDiagnosticCode, ParseOptions, ParseOutcome, SpecificationReference,
         compound_from_bytes, compound_from_path, compound_from_vec, compound_outcome,
@@ -54,7 +57,7 @@ use super::{
     SupBookRecord, SupBookSheetName, SxStreamIdRecord, SxViewRecord, SxVsRecord, TableRecord,
     TxoRecord, USER_NAMES_STREAM_NAME, UserBViewRecord, UserNamesStream, UserSViewBeginChartRecord,
     UserSViewBeginRecord, UserSViewEndRecord, UsrChkRecord, UsrExclRecord, UsrInfoRecord,
-    WORKBOOK_STREAM_PATH, XctRecord, XfRecord, XlStringCharacters,
+    WORKBOOK_STREAM_PATH, XctRecord, XfExtRecord, XfRecord, XlStringCharacters,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -669,6 +672,37 @@ pub struct XlsDrawingRef<'a> {
     sheet: XlsSheetRef<'a>,
     source_record: &'a BiffRecord,
     value: &'a MsoDrawingRecord,
+}
+
+/// One worksheet picture joined to its OfficeArt shape, BIFF client anchor,
+/// one-based workbook BLIP-store identity, and borrowed image payload.
+#[derive(Clone, Copy, Debug)]
+pub struct XlsPictureRef<'a> {
+    sheet: XlsSheetRef<'a>,
+    drawing_order: usize,
+    shape_type: u16,
+    shape: &'a OfficeArtShape,
+    properties: &'a [OfficeArtRecord],
+    anchor: OfficeArtClientAnchor,
+    blip_identifier: u32,
+    image: XlsPictureImageLink<'a>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct XlsPictureCrop {
+    top: i32,
+    bottom: i32,
+    left: i32,
+    right: i32,
+}
+
+/// Resolution state of an XLS picture's workbook-global BLIP reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XlsPictureImageLink<'a> {
+    Resolved(OfficeArtImageRef<'a>),
+    Delayed { offset: u32 },
+    Unsupported,
+    Missing,
 }
 
 pub struct XlsObjects<'a> {
@@ -3348,6 +3382,224 @@ impl<'a> XlsDrawingRef<'a> {
     }
 }
 
+impl<'a> XlsPictureRef<'a> {
+    pub const fn sheet(self) -> XlsSheetRef<'a> {
+        self.sheet
+    }
+
+    /// Zero-based non-patriarch shape order within the worksheet drawing.
+    pub const fn drawing_order(self) -> usize {
+        self.drawing_order
+    }
+
+    pub const fn shape_type(self) -> u16 {
+        self.shape_type
+    }
+
+    pub const fn shape(self) -> &'a OfficeArtShape {
+        self.shape
+    }
+
+    pub fn crop(self) -> XlsPictureCrop {
+        XlsPictureCrop {
+            top: xls_signed_shape_property_or(self.properties, 0x0100, 0),
+            bottom: xls_signed_shape_property_or(self.properties, 0x0101, 0),
+            left: xls_signed_shape_property_or(self.properties, 0x0102, 0),
+            right: xls_signed_shape_property_or(self.properties, 0x0103, 0),
+        }
+    }
+
+    pub const fn anchor(self) -> OfficeArtClientAnchor {
+        self.anchor
+    }
+
+    pub const fn blip_identifier(self) -> u32 {
+        self.blip_identifier
+    }
+
+    pub const fn image(self) -> XlsPictureImageLink<'a> {
+        self.image
+    }
+}
+
+impl XlsPictureCrop {
+    pub const fn top(self) -> i32 {
+        self.top
+    }
+
+    pub const fn bottom(self) -> i32 {
+        self.bottom
+    }
+
+    pub const fn left(self) -> i32 {
+        self.left
+    }
+
+    pub const fn right(self) -> i32 {
+        self.right
+    }
+}
+
+fn collect_office_art_containers<'a>(
+    records: &'a [OfficeArtRecord],
+    record_type: u16,
+    result: &mut Vec<&'a OfficeArtRecord>,
+) {
+    for record in records {
+        if record.header.record_type == record_type {
+            result.push(record);
+        }
+        if let OfficeArtRecordData::Container(children)
+        | OfficeArtRecordData::CompatibilityContainer(children) = &record.data
+        {
+            collect_office_art_containers(children, record_type, result);
+        }
+    }
+}
+
+fn collect_xls_pictures<'a>(
+    records: &'a [OfficeArtRecord],
+    sheet: XlsSheetRef<'a>,
+    blip_store_entries: &'a [OfficeArtRecord],
+    drawing_order: &mut usize,
+    result: &mut Vec<XlsPictureRef<'a>>,
+) -> Result<()> {
+    for record in records {
+        let children = match &record.data {
+            OfficeArtRecordData::Container(children)
+            | OfficeArtRecordData::CompatibilityContainer(children) => Some(children.as_slice()),
+            _ => None,
+        };
+        if record.header.record_type == 0xf004
+            && let Some(children) = children
+        {
+            let shape = children.iter().find_map(|child| match &child.data {
+                OfficeArtRecordData::Shape(shape) => Some((child.header.instance, shape)),
+                _ => None,
+            });
+            let anchor = children.iter().find_map(|child| match &child.data {
+                OfficeArtRecordData::ClientAnchor(anchor) => Some(*anchor),
+                _ => None,
+            });
+            if let Some((shape_type, shape)) = shape
+                && !shape
+                    .flags
+                    .contains(crate::office_art::OfficeArtShapeFlags::PATRIARCH)
+            {
+                let current_order = *drawing_order;
+                *drawing_order = drawing_order
+                    .checked_add(1)
+                    .ok_or_else(|| Error::Limit("XLS drawing order overflow".into()))?;
+                if let Some(blip_identifier) = xls_shape_blip_identifier(children)? {
+                    let anchor = anchor.ok_or_else(|| {
+                        Error::invalid(
+                            0,
+                            format!("XLS picture shape {} has no client anchor", shape.shape_id),
+                        )
+                    })?;
+                    result.push(XlsPictureRef {
+                        sheet,
+                        drawing_order: current_order,
+                        shape_type,
+                        shape,
+                        properties: children,
+                        anchor,
+                        blip_identifier,
+                        image: resolve_xls_picture_image(blip_store_entries, blip_identifier),
+                    });
+                }
+            }
+        }
+        if let Some(children) = children {
+            collect_xls_pictures(children, sheet, blip_store_entries, drawing_order, result)?;
+        }
+    }
+    Ok(())
+}
+
+fn xls_shape_blip_identifier(records: &[OfficeArtRecord]) -> Result<Option<u32>> {
+    let property = records
+        .iter()
+        .filter_map(|record| match &record.data {
+            OfficeArtRecordData::PropertyTable(table) => Some(table.properties.as_slice()),
+            _ => None,
+        })
+        .flat_map(|properties| properties.iter())
+        .rfind(|property| property.property_id == 0x0104);
+    let Some(property) = property else {
+        return Ok(None);
+    };
+    let OfficeArtPropertyValue::Simple(identifier) = property.value else {
+        return Err(Error::invalid(
+            0,
+            "XLS picture BLIP property is not a simple value",
+        ));
+    };
+    if !property.is_blip_id {
+        return Err(Error::invalid(
+            0,
+            "XLS picture BLIP property does not set fBid",
+        ));
+    }
+    Ok((identifier != 0).then_some(identifier))
+}
+
+fn xls_signed_shape_property_or(
+    records: &[OfficeArtRecord],
+    property_id: u16,
+    default: i32,
+) -> i32 {
+    records
+        .iter()
+        .filter_map(|record| match &record.data {
+            OfficeArtRecordData::PropertyTable(table) => Some(table.properties.as_slice()),
+            _ => None,
+        })
+        .flat_map(|properties| properties.iter())
+        .rfind(|property| property.property_id == property_id)
+        .and_then(|property| match property.value {
+            OfficeArtPropertyValue::Simple(value) => Some(i32::from_le_bytes(value.to_le_bytes())),
+            _ => None,
+        })
+        .unwrap_or(default)
+}
+
+fn resolve_xls_picture_image<'a>(
+    entries: &'a [OfficeArtRecord],
+    blip_identifier: u32,
+) -> XlsPictureImageLink<'a> {
+    let Some(index) = blip_identifier
+        .checked_sub(1)
+        .and_then(|value| usize::try_from(value).ok())
+    else {
+        return XlsPictureImageLink::Missing;
+    };
+    let Some(record) = entries.get(index) else {
+        return XlsPictureImageLink::Missing;
+    };
+    match &record.data {
+        OfficeArtRecordData::Fbse(fbse) => {
+            if let Some(image) = fbse
+                .embedded_blip
+                .as_deref()
+                .and_then(OfficeArtRecord::image_ref)
+            {
+                XlsPictureImageLink::Resolved(image)
+            } else if fbse.delay_offset != u32::MAX {
+                XlsPictureImageLink::Delayed {
+                    offset: fbse.delay_offset,
+                }
+            } else {
+                XlsPictureImageLink::Unsupported
+            }
+        }
+        _ => record.image_ref().map_or(
+            XlsPictureImageLink::Unsupported,
+            XlsPictureImageLink::Resolved,
+        ),
+    }
+}
+
 impl<'a> XlsObjectRef<'a> {
     fn new(
         source_record: &'a BiffRecord,
@@ -3490,6 +3742,14 @@ fn decode_formula_string(value: &StringValueRecord) -> Result<String> {
 
 fn decode_biff_unicode_string(value: &BiffUnicodeString) -> Result<String> {
     decode_xl_string_sequence(std::iter::once(&value.characters))
+}
+
+impl TryFrom<&BiffUnicodeString> for String {
+    type Error = Error;
+
+    fn try_from(value: &BiffUnicodeString) -> Result<Self> {
+        decode_biff_unicode_string(value)
+    }
 }
 
 fn decode_sst_string(value: &SstString) -> Result<String> {
@@ -3925,6 +4185,46 @@ impl<'a> XlsWorkbookView<'a> {
                 }),
                 _ => None,
             })
+    }
+
+    /// Joins worksheet picture shapes to the workbook-global OfficeArt BLIP
+    /// store without copying image bytes or rebuilding the OfficeArt tree.
+    pub fn pictures(&self) -> Result<Vec<XlsPictureRef<'a>>> {
+        let mut stores = self
+            .drawing_groups()
+            .filter_map(XlsDrawingGroupRef::office_art)
+            .flat_map(|stream| {
+                let mut stores = Vec::new();
+                collect_office_art_containers(&stream.records, 0xf001, &mut stores);
+                stores
+            });
+        let store = stores.next();
+        if stores.next().is_some() {
+            return Err(Error::invalid(
+                0,
+                "XLS workbook contains multiple OfficeArt BLIP stores",
+            ));
+        }
+        let entries = store.map_or(&[][..], |record| match &record.data {
+            OfficeArtRecordData::Container(children)
+            | OfficeArtRecordData::CompatibilityContainer(children) => children.as_slice(),
+            _ => &[],
+        });
+
+        let mut pictures = Vec::new();
+        for sheet in &self.sheets {
+            let mut drawing_order = 0;
+            for drawing in sheet.drawings().filter_map(XlsDrawingRef::office_art) {
+                collect_xls_pictures(
+                    &drawing.records,
+                    *sheet,
+                    entries,
+                    &mut drawing_order,
+                    &mut pictures,
+                )?;
+            }
+        }
+        Ok(pictures)
     }
 
     pub fn sheets(&self) -> &[XlsSheetRef<'a>] {
@@ -4378,6 +4678,17 @@ impl<'a> XlsWorkbookView<'a> {
         })
     }
 
+    /// Decodes one SST entry to its normal Rust string value.
+    ///
+    /// Callers that construct another shared-string table can invoke this
+    /// once per source index instead of decoding the same SST entry at every
+    /// referring cell.
+    pub fn shared_string_value(&self, index: u32) -> Result<Option<String>> {
+        self.shared_string(index)?
+            .map(decode_sst_string)
+            .transpose()
+    }
+
     pub fn resolve_label_sst(&self, label: &LabelSstRecord) -> Result<&'a SstString> {
         self.resolve_shared_string(label.shared_string_index)
     }
@@ -4415,6 +4726,22 @@ impl<'a> XlsWorkbookView<'a> {
 
     pub fn resolve_cell_xf(&self, cell: &CellHeader) -> Result<&'a XfRecord> {
         self.resolve_xf(cell.format_index)
+    }
+
+    /// Globals XF extension records in specification order.
+    pub fn xf_extensions(&self) -> impl Iterator<Item = &'a XfExtRecord> {
+        self.globals_records()
+            .iter()
+            .filter_map(|record| match &record.data {
+                BiffRecordData::XfExt(value) => Some(value),
+                _ => None,
+            })
+    }
+
+    /// Returns the extension associated with an XF index, if present.
+    pub fn xf_extension(&self, index: u16) -> Option<&'a XfExtRecord> {
+        self.xf_extensions()
+            .find(|extension| extension.xf_index == index)
     }
 
     pub fn fonts(&self) -> impl Iterator<Item = &'a FontRecord> {

@@ -13,13 +13,14 @@ pub use file::{
     XlsFileEntryIssue, XlsFileEntryRef, XlsFileEntryRole, XlsFormulaCachedValue,
     XlsFormulaDefinitionRef, XlsFormulaRef, XlsHyperlinkRef, XlsHyperlinkTarget,
     XlsNumberFormatRef, XlsObjectId, XlsObjectPersistenceRef, XlsObjectRef, XlsObjects,
-    XlsPivotCache, XlsPivotCacheDefinitionId, XlsPivotCacheDefinitionRef, XlsPivotTableCacheLink,
-    XlsPivotTableCacheLinkError, XlsPivotTableLink, XlsPivotTableLinkError, XlsPivotTableRef,
-    XlsPivotTableViewRef, XlsRevisionCellOrFormatRef, XlsRevisionChangeCellRef, XlsRevisionGraph,
-    XlsRevisionGraphLog, XlsRevisionInsertDeleteRef, XlsRevisionLog, XlsRevisionLogRef,
-    XlsRevisionMoveRef, XlsRevisionNode, XlsRevisionRecordRef, XlsRevisionRecordsView,
-    XlsRevisionSheetLink, XlsRevisionStreamView, XlsSheetId, XlsSheetLinkError, XlsSheetRef,
-    XlsSparseCellIndex, XlsSparseRowRef, XlsStoragesAndStreams, XlsStreamName, XlsSupportingLinkId,
+    XlsPictureCrop, XlsPictureImageLink, XlsPictureRef, XlsPivotCache, XlsPivotCacheDefinitionId,
+    XlsPivotCacheDefinitionRef, XlsPivotTableCacheLink, XlsPivotTableCacheLinkError,
+    XlsPivotTableLink, XlsPivotTableLinkError, XlsPivotTableRef, XlsPivotTableViewRef,
+    XlsRevisionCellOrFormatRef, XlsRevisionChangeCellRef, XlsRevisionGraph, XlsRevisionGraphLog,
+    XlsRevisionInsertDeleteRef, XlsRevisionLog, XlsRevisionLogRef, XlsRevisionMoveRef,
+    XlsRevisionNode, XlsRevisionRecordRef, XlsRevisionRecordsView, XlsRevisionSheetLink,
+    XlsRevisionStreamView, XlsSheetId, XlsSheetLinkError, XlsSheetRef, XlsSparseCellIndex,
+    XlsSparseRowRef, XlsStoragesAndStreams, XlsStreamName, XlsSupportingLinkId,
     XlsSupportingLinkRef, XlsUnresolvedSheetRef, XlsUserInfoRef, XlsUserLogView, XlsUserNames,
     XlsUserRevisionLogLink, XlsWorkbookStream, XlsWorkbookView,
 };
@@ -8707,6 +8708,8 @@ bitflags::bitflags! {
         const STRIKEOUT = 0x0008;
         const MAC_OUTLINE = 0x0010;
         const MAC_SHADOW = 0x0020;
+        const CONDENSE = 0x0040;
+        const EXTEND = 0x0080;
     }
 }
 

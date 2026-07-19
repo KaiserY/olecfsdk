@@ -72,6 +72,7 @@ pub const TEXT_BYTES_ATOM: u16 = 0x0fa8;
 pub const C_STRING_ATOM: u16 = 0x0fba;
 pub const SLIDE_PERSIST_ATOM: u16 = 0x03f3;
 pub const COLOR_SCHEME_ATOM: u16 = 0x07f0;
+const PP_DRAWING: u16 = 0x040c;
 pub const EXTERNAL_OBJECT_REF_ATOM: u16 = 0x0bc1;
 pub const PLACEHOLDER_ATOM: u16 = 0x0bc3;
 pub const HEADERS_FOOTERS_ATOM: u16 = 0x0fda;
@@ -2239,6 +2240,8 @@ pub enum IncrementalSaveMetadataKind {
 pub struct PptLivePresentation<'a> {
     pub persist_object_directory: PersistObjectDirectory,
     pub document: PptLivePersistObject<'a>,
+    pub document_atom_record: &'a PptRecord,
+    pub document_atom: &'a DocumentAtom,
     pub notes_master_slide: Option<PptLivePersistObject<'a>>,
     pub handout_master_slide: Option<PptLivePersistObject<'a>>,
     pub master_slides: Vec<PptLivePersistObject<'a>>,
@@ -2249,6 +2252,54 @@ pub struct PptLivePresentation<'a> {
     pub linked_ole_objects: Vec<PptLivePersistObject<'a>>,
     pub vba_project: Option<PptLivePersistObject<'a>>,
     pub top_level_records: Vec<PptTopLevelLiveRecordState>,
+}
+
+/// Borrowed document-wide image store resolved from the live OfficeArt
+/// `BStoreContainer` and the optional PPT `Pictures` stream. Payload bytes
+/// remain owned exactly once by the corresponding typed record tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PptLiveImageStore<'a> {
+    pub entries: Vec<PptLiveImageLink<'a>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PptLiveImageLink<'a> {
+    Resolved(PptLiveImageRef<'a>),
+    Unresolved {
+        blip_identifier: u32,
+        issue: PptImageResolutionIssue,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PptLiveImageRef<'a> {
+    pub blip_identifier: u32,
+    pub source: PptLiveImageSource,
+    pub image: crate::office_art::OfficeArtImageRef<'a>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PptLiveImageSource {
+    Embedded {
+        store_index: usize,
+    },
+    PicturesStream {
+        record_index: usize,
+        offset: u32,
+        compatible_stream: bool,
+    },
+    DirectBlipStoreEntry {
+        store_index: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PptImageResolutionIssue {
+    MissingPicturesStream,
+    PartialPicturesStream,
+    MissingDelayOffset,
+    UnsupportedPayload,
+    UnsupportedBlipStoreEntry,
 }
 
 /// One live persist object joined directly to both the record containing its
@@ -2313,6 +2364,39 @@ pub struct PptLiveShapeRef<'a> {
     pub placeholder: Option<&'a PlaceholderAtom>,
     pub outline_text: Option<PptLiveOutlineTextRef<'a>>,
     pub table_property: Option<&'a crate::office_art::OfficeArtProperty>,
+}
+
+/// One row or column interval in a native PPT table, expressed in master
+/// coordinates and derived from the physical cell anchors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PptLiveTableTrack {
+    pub start: i32,
+    pub end: i32,
+}
+
+/// One native PPT table-cell shape projected onto its exact row/column grid.
+/// The physical shape remains the sole owner of text, formatting and anchor
+/// data; this handle only retains grid identity.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PptLiveTableCellRef<'a> {
+    pub shape: PptLiveShapeRef<'a>,
+    pub row: usize,
+    pub column: usize,
+    pub row_span: usize,
+    pub column_span: usize,
+}
+
+/// Borrowed native table relationship assembled from the table marker and
+/// its actual group children. Border line shapes remain explicit because
+/// they carry formatting that is separate from cell content.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PptLiveTableRef<'a> {
+    pub shape: PptLiveShapeRef<'a>,
+    pub anchor: crate::office_art::OfficeArtRect,
+    pub rows: Vec<PptLiveTableTrack>,
+    pub columns: Vec<PptLiveTableTrack>,
+    pub cells: Vec<PptLiveTableCellRef<'a>>,
+    pub borders: Vec<PptLiveShapeRef<'a>>,
 }
 
 /// Mutable static record group for one list text body. It deliberately does
@@ -2406,6 +2490,24 @@ pub struct PptLiveSlideRef<'view, 'a> {
     pub notes: PptLiveNotesLink<'view, 'a>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PptLiveSlideTransitionRef<'a> {
+    pub source_record: &'a PptRecord,
+    pub value: &'a SlideShowSlideInfoAtom,
+}
+
+/// The active legacy eight-color scheme owned by one live PPT sheet.
+///
+/// MS-PPT permits additional palette atoms before the sheet's PPDrawing. The
+/// active sheet palette is the unique ColorSchemeAtom following that drawing,
+/// matching the relationship used by PowerPoint and Apache POI without
+/// copying its eight RGB values.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PptLiveColorSchemeRef<'a> {
+    pub source_record: &'a PptRecord,
+    pub value: &'a ColorSchemeAtom,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PptSlideId(u32);
 
@@ -2422,6 +2524,57 @@ impl<'view, 'a> PptLiveSlideRef<'view, 'a> {
 
     pub fn shapes(self) -> Result<Vec<PptLiveShapeRef<'a>>> {
         self.object.shapes()
+    }
+
+    /// Returns the slide-show transition atom owned by this slide. A slide
+    /// with duplicate transition atoms is rejected instead of selecting one
+    /// by record order.
+    pub fn transition(self) -> Result<Option<PptLiveSlideTransitionRef<'a>>> {
+        let mut transitions = Vec::new();
+        collect_slide_transitions(self.object.record, &mut transitions);
+        match transitions.as_slice() {
+            [] => Ok(None),
+            [transition] => Ok(Some(*transition)),
+            _ => Err(Error::invalid(
+                self.object.record.offset,
+                "PPT slide contains multiple SlideShowSlideInfoAtom records",
+            )),
+        }
+    }
+}
+
+fn collect_slide_transitions<'a>(
+    record: &'a PptRecord,
+    output: &mut Vec<PptLiveSlideTransitionRef<'a>>,
+) {
+    if let PptRecordData::SlideShowSlideInfo(value) = &record.data {
+        output.push(PptLiveSlideTransitionRef {
+            source_record: record,
+            value,
+        });
+    }
+    match &record.data {
+        PptRecordData::Container(children) => {
+            for child in &children.records {
+                collect_slide_transitions(child, output);
+            }
+        }
+        PptRecordData::BinaryTagData(BinaryTagData::Records(children)) => {
+            for child in &children.records {
+                collect_slide_transitions(child, output);
+            }
+        }
+        PptRecordData::ProgBinaryTag(value) => {
+            for child in &value.records.records {
+                collect_slide_transitions(child, output);
+            }
+        }
+        PptRecordData::ProgTags(children) => {
+            for child in &children.records {
+                collect_slide_transitions(child, output);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2481,11 +2634,65 @@ impl<'a> PptLivePersistObject<'a> {
         self.record
     }
 
+    /// Resolves the active sheet color scheme by structural ownership. A
+    /// duplicate active scheme is rejected instead of depending on record
+    /// order, while pre-drawing palette atoms remain distinct legacy data.
+    pub fn color_scheme(self) -> Result<Option<PptLiveColorSchemeRef<'a>>> {
+        let children = ppt_container_children(self.record, "PPT live persist object")?;
+        let mut after_drawing = false;
+        let mut active = None;
+        for record in &children.records {
+            if record.header.record_type == PP_DRAWING {
+                after_drawing = true;
+                continue;
+            }
+            if !after_drawing {
+                continue;
+            }
+            let PptRecordData::ColorScheme(value) = &record.data else {
+                continue;
+            };
+            if active.is_some() {
+                return Err(Error::invalid(
+                    record.offset,
+                    "PPT sheet contains multiple active ColorSchemeAtom records",
+                ));
+            }
+            active = Some(PptLiveColorSchemeRef {
+                source_record: record,
+                value,
+            });
+        }
+        Ok(active)
+    }
+
     pub const fn slide_persist(self) -> Option<&'a SlidePersistAtom> {
         match &self.source_record.data {
             PptRecordData::SlidePersist(value) => Some(value),
             _ => None,
         }
+    }
+
+    /// Returns the direct `SlideAtom` owned by a live `SlideContainer`.
+    ///
+    /// Presentation slides and title masters use the same wire container. A
+    /// main master has a `MainMasterContainer` instead and therefore returns
+    /// `None`. The pair retains both the record identity and the typed atom so
+    /// relationship diagnostics never need to rediscover an offset.
+    pub fn slide_atom(self) -> Result<Option<(&'a PptRecord, &'a SlideAtom)>> {
+        if self.record.header.record_type != SLIDE_CONTAINER {
+            return Ok(None);
+        }
+        let children = ppt_container_children(self.record, "SlideContainer")?;
+        let record =
+            required_direct_record(children, SLIDE_ATOM, Some(0), "SlideContainer.slideAtom")?;
+        let PptRecordData::Slide(value) = &record.data else {
+            return Err(Error::invalid(
+                record.offset,
+                "SlideContainer.slideAtom is not a conforming SlideAtom",
+            ));
+        };
+        Ok(Some((record, value)))
     }
 
     /// Returns every `TextHeaderAtom` group following this object's
@@ -2771,6 +2978,140 @@ impl<'a> PptLiveShapeRef<'a> {
         self.table_property.is_some()
     }
 
+    /// Returns the nearest owning shape without allocating or rebuilding the
+    /// OfficeArt tree. Direct children of the patriarch return that patriarch;
+    /// children of nested groups return the nested group shape.
+    pub fn parent_shape(self) -> Option<&'a crate::office_art::OfficeArtShape> {
+        let mut parent = None;
+        if let Some(record) = self.parent_shape_record {
+            visit_shape_owned_records(record, &mut |candidate| {
+                if parent.is_none()
+                    && let PptRecordData::OfficeArt(office_art) = &candidate.data
+                    && let OfficeArtRecordData::Shape(value) = &office_art.data
+                {
+                    parent = Some(value);
+                }
+            });
+        }
+        parent
+    }
+
+    /// Whether this shape's anchor is expressed in a nested group's local
+    /// coordinate system rather than the slide/master coordinate system.
+    pub fn is_nested_group_child(self) -> bool {
+        self.parent_shape().is_some_and(|parent| {
+            !parent
+                .flags
+                .contains(crate::office_art::OfficeArtShapeFlags::PATRIARCH)
+        })
+    }
+
+    /// Resolves the primary `pib` (`0x0104`) image-store identifier owned by
+    /// this shape. Fill-pattern BLIPs remain separate properties and are not
+    /// mistaken for the shape's primary picture payload.
+    pub fn primary_blip_identifier(self) -> Result<Option<u32>> {
+        let mut identifier = None;
+        let mut incomplete = false;
+        let mut invalid = false;
+        visit_shape_owned_records(self.source_record, &mut |record| {
+            let PptRecordData::OfficeArt(office_art) = &record.data else {
+                return;
+            };
+            match &office_art.data {
+                OfficeArtRecordData::PropertyTable(table) => {
+                    for property in &table.properties {
+                        if property.property_id != 0x0104 {
+                            continue;
+                        }
+                        let crate::office_art::OfficeArtPropertyValue::Simple(value) =
+                            property.value
+                        else {
+                            invalid = true;
+                            continue;
+                        };
+                        if !property.is_blip_id || value != 0 && identifier.replace(value).is_some()
+                        {
+                            invalid = true;
+                        }
+                    }
+                }
+                OfficeArtRecordData::IncompletePropertyTable(table)
+                    if table
+                        .entries
+                        .iter()
+                        .any(|property| property.property_id == 0x0104) =>
+                {
+                    incomplete = true;
+                }
+                _ => {}
+            }
+        });
+        if incomplete {
+            return Err(Error::invalid(
+                self.source_record.offset,
+                "PPT shape primary BLIP property table is incomplete",
+            ));
+        }
+        if invalid {
+            return Err(Error::invalid(
+                self.source_record.offset,
+                "PPT shape has an invalid or duplicate primary BLIP property",
+            ));
+        }
+        Ok(identifier)
+    }
+
+    /// Resolves the one PowerPoint client/child anchor owned by this shape.
+    /// Group-child coordinates are returned in their native group coordinate
+    /// space; callers can use [`Self::group_record`] to distinguish them.
+    pub fn anchor(self) -> Result<Option<crate::office_art::OfficeArtRect>> {
+        let mut anchor = None;
+        let mut invalid_host_anchor = false;
+        let mut duplicate = false;
+        visit_shape_owned_records(self.source_record, &mut |record| {
+            let PptRecordData::OfficeArt(office_art) = &record.data else {
+                return;
+            };
+            let value = match office_art.data {
+                OfficeArtRecordData::ChildAnchor(value)
+                | OfficeArtRecordData::ClientAnchor(
+                    crate::office_art::OfficeArtClientAnchor::PowerPointRect(value),
+                ) => Some(value),
+                OfficeArtRecordData::ClientAnchor(
+                    crate::office_art::OfficeArtClientAnchor::Words8 { coordinates },
+                ) => Some(crate::office_art::OfficeArtRect {
+                    left: i32::from(coordinates[1]),
+                    top: i32::from(coordinates[0]),
+                    right: i32::from(coordinates[2]),
+                    bottom: i32::from(coordinates[3]),
+                }),
+                OfficeArtRecordData::ClientAnchor(_) => {
+                    invalid_host_anchor = true;
+                    None
+                }
+                _ => None,
+            };
+            if let Some(value) = value
+                && anchor.replace(value).is_some()
+            {
+                duplicate = true;
+            }
+        });
+        if invalid_host_anchor {
+            return Err(Error::invalid(
+                self.source_record.offset,
+                "PPT shape uses a non-PowerPoint OfficeArtClientAnchor",
+            ));
+        }
+        if duplicate {
+            return Err(Error::invalid(
+                self.source_record.offset,
+                "PPT shape owns multiple OfficeArt anchors",
+            ));
+        }
+        Ok(anchor)
+    }
+
     /// Returns directly nested SpContainers in their physical order. For a
     /// table these are its actual child shapes; row/column projection remains
     /// separate because it depends on anchors and merged-cell geometry.
@@ -2791,11 +3132,158 @@ impl<'a> PptLiveShapeRef<'a> {
         shapes
     }
 
+    /// Projects a native PPT table group into rows, columns and spanning
+    /// cells without copying any cell text or OfficeArt record data.
+    pub fn table(self) -> Result<Option<PptLiveTableRef<'a>>> {
+        if !self.is_table() {
+            return Ok(None);
+        }
+        let mut candidates = Vec::new();
+        let mut borders = Vec::new();
+        for child in self.child_shapes() {
+            match child.shape_type() {
+                1 => {
+                    let anchor = child.anchor()?.ok_or_else(|| {
+                        Error::invalid(
+                            child.source_record.offset,
+                            "PPT table cell has no OfficeArt child anchor",
+                        )
+                    })?;
+                    if anchor.right <= anchor.left || anchor.bottom <= anchor.top {
+                        return Err(Error::invalid(
+                            child.source_record.offset,
+                            "PPT table cell has an empty or reversed anchor",
+                        ));
+                    }
+                    candidates.push((child, anchor));
+                }
+                20 => borders.push(child),
+                value => {
+                    return Err(Error::invalid(
+                        child.source_record.offset,
+                        format!("PPT table child has unsupported shape type {value}"),
+                    ));
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return Err(Error::invalid(
+                self.source_record.offset,
+                "PPT table has no cell shapes",
+            ));
+        }
+        let row_starts = candidates
+            .iter()
+            .map(|(_, anchor)| anchor.top)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let column_starts = candidates
+            .iter()
+            .map(|(_, anchor)| anchor.left)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let content_right = candidates
+            .iter()
+            .map(|(_, anchor)| anchor.right)
+            .max()
+            .expect("a PPT table has cell candidates");
+        let content_bottom = candidates
+            .iter()
+            .map(|(_, anchor)| anchor.bottom)
+            .max()
+            .expect("a PPT table has cell candidates");
+        let anchor = self.anchor()?.unwrap_or(crate::office_art::OfficeArtRect {
+            left: column_starts[0],
+            top: row_starts[0],
+            right: content_right,
+            bottom: content_bottom,
+        });
+        let columns = table_tracks(&column_starts, content_right, "column")?;
+        let rows = table_tracks(&row_starts, content_bottom, "row")?;
+        let mut occupied = vec![false; rows.len() * columns.len()];
+        let mut cells = Vec::with_capacity(candidates.len());
+        for (shape, cell_anchor) in candidates {
+            let row = row_starts
+                .binary_search(&cell_anchor.top)
+                .expect("PPT table row start comes from the same set");
+            let column = column_starts
+                .binary_search(&cell_anchor.left)
+                .expect("PPT table column start comes from the same set");
+            let row_span = row_starts[row..]
+                .iter()
+                .take_while(|&&start| start < cell_anchor.bottom)
+                .count();
+            let column_span = column_starts[column..]
+                .iter()
+                .take_while(|&&start| start < cell_anchor.right)
+                .count();
+            if row_span == 0 || column_span == 0 {
+                return Err(Error::invalid(
+                    shape.source_record.offset,
+                    "PPT table cell does not cover its grid origin",
+                ));
+            }
+            for occupied_row in row..row + row_span {
+                for occupied_column in column..column + column_span {
+                    let slot = occupied_row * columns.len() + occupied_column;
+                    if std::mem::replace(&mut occupied[slot], true) {
+                        return Err(Error::invalid(
+                            shape.source_record.offset,
+                            "PPT table cell spans overlap",
+                        ));
+                    }
+                }
+            }
+            cells.push(PptLiveTableCellRef {
+                shape,
+                row,
+                column,
+                row_span,
+                column_span,
+            });
+        }
+        if occupied.contains(&false) {
+            return Err(Error::invalid(
+                self.source_record.offset,
+                "PPT table grid contains a cell hole",
+            ));
+        }
+        cells.sort_by_key(|cell| (cell.row, cell.column));
+        Ok(Some(PptLiveTableRef {
+            shape: self,
+            anchor,
+            rows,
+            columns,
+            cells,
+            borders,
+        }))
+    }
+
     pub fn text_bodies(self) -> Vec<PptLiveTextBodyRef<'a>> {
         let mut bodies = Vec::new();
         collect_record_text_bodies(self.source_record, &mut bodies);
         bodies
     }
+}
+
+fn table_tracks(starts: &[i32], content_end: i32, axis: &str) -> Result<Vec<PptLiveTableTrack>> {
+    starts
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, start)| {
+            let end = starts.get(index + 1).copied().unwrap_or(content_end);
+            if end <= start {
+                return Err(Error::invalid(
+                    u64::try_from(index).unwrap_or(u64::MAX),
+                    format!("PPT table {axis} track is empty or reversed"),
+                ));
+            }
+            Ok(PptLiveTableTrack { start, end })
+        })
+        .collect()
 }
 
 fn collect_live_shapes<'a>(
@@ -3180,6 +3668,122 @@ impl PowerPointDocument {
             drawing_group_incomplete_property_tables,
             drawings,
         )
+    }
+
+    /// Resolves the live document-wide OfficeArt image store without copying
+    /// any image payload. One-based BLIP identifiers remain stable and can be
+    /// joined directly to [`PptLiveShapeRef::primary_blip_identifier`].
+    pub fn live_image_store<'a>(
+        &'a self,
+        current_user: &CurrentUserAtom,
+        pictures: Option<&'a PicturesStream>,
+    ) -> Result<PptLiveImageStore<'a>> {
+        let presentation = self.live_presentation(current_user)?;
+        let mut stores = Vec::new();
+        for state in &presentation.top_level_records {
+            if !matches!(
+                state.status,
+                PptTopLevelLiveRecordStatus::LivePersistObject { .. }
+            ) {
+                continue;
+            }
+            let record = self
+                .records
+                .records
+                .get(state.record_index)
+                .ok_or_else(|| {
+                    Error::invalid(
+                        state.stream_offset,
+                        "PPT live record index is out of bounds",
+                    )
+                })?;
+            collect_ppt_office_art_blip_stores(record, &mut stores);
+        }
+        let store = match stores.as_slice() {
+            [] => {
+                return Ok(PptLiveImageStore {
+                    entries: Vec::new(),
+                });
+            }
+            [store] => *store,
+            _ => {
+                return Err(Error::invalid(
+                    0,
+                    format!(
+                        "PPT live presentation contains {} OfficeArtBStoreContainer records, expected at most 1",
+                        stores.len()
+                    ),
+                ));
+            }
+        };
+        let mut entries = Vec::with_capacity(store.len());
+        for (index, entry) in store.iter().enumerate() {
+            let blip_identifier = u32::try_from(index + 1)
+                .map_err(|_| Error::Limit("PPT BLIP store index exceeds u32".into()))?;
+            let PptRecordData::OfficeArt(office_art) = &entry.data else {
+                entries.push(PptLiveImageLink::Unresolved {
+                    blip_identifier,
+                    issue: PptImageResolutionIssue::UnsupportedBlipStoreEntry,
+                });
+                continue;
+            };
+            let resolved = match &office_art.data {
+                OfficeArtRecordData::Fbse(fbse) => {
+                    if let Some(blip) = fbse.embedded_blip.as_deref() {
+                        blip.image_ref().map(|image| PptLiveImageRef {
+                            blip_identifier,
+                            source: PptLiveImageSource::Embedded { store_index: index },
+                            image,
+                        })
+                    } else {
+                        resolve_delay_image(pictures, fbse.delay_offset, blip_identifier)?.map(
+                            |(record_index, image, compatible_stream)| PptLiveImageRef {
+                                blip_identifier,
+                                source: PptLiveImageSource::PicturesStream {
+                                    record_index,
+                                    offset: fbse.delay_offset,
+                                    compatible_stream,
+                                },
+                                image,
+                            },
+                        )
+                    }
+                }
+                _ => office_art.image_ref().map(|image| PptLiveImageRef {
+                    blip_identifier,
+                    source: PptLiveImageSource::DirectBlipStoreEntry { store_index: index },
+                    image,
+                }),
+            };
+            if let Some(value) = resolved {
+                entries.push(PptLiveImageLink::Resolved(value));
+                continue;
+            }
+            let issue = match &office_art.data {
+                OfficeArtRecordData::Fbse(fbse) if fbse.embedded_blip.is_none() => match pictures {
+                    None => PptImageResolutionIssue::MissingPicturesStream,
+                    Some(PicturesStream::Partial(_)) => {
+                        PptImageResolutionIssue::PartialPicturesStream
+                    }
+                    Some(PicturesStream::Complete(_) | PicturesStream::Compatibility { .. }) => {
+                        PptImageResolutionIssue::MissingDelayOffset
+                    }
+                },
+                OfficeArtRecordData::Fbse(fbse) if fbse.embedded_blip.is_some() => {
+                    PptImageResolutionIssue::UnsupportedPayload
+                }
+                OfficeArtRecordData::Fbse(_) => unreachable!("FBSE cases are exhaustive"),
+                _ if office_art.image_ref().is_none() => {
+                    PptImageResolutionIssue::UnsupportedBlipStoreEntry
+                }
+                _ => PptImageResolutionIssue::UnsupportedPayload,
+            };
+            entries.push(PptLiveImageLink::Unresolved {
+                blip_identifier,
+                issue,
+            });
+        }
+        Ok(PptLiveImageStore { entries })
     }
 
     /// Rebuilds record lengths and offsets, then relocates the complete
@@ -4219,6 +4823,8 @@ impl PowerPointDocument {
         Ok(PptLivePresentation {
             persist_object_directory,
             document,
+            document_atom_record,
+            document_atom,
             notes_master_slide,
             handout_master_slide,
             master_slides,
@@ -5730,6 +6336,51 @@ fn collect_ppt_office_art_drawing_components(
         )?;
     }
     Ok(())
+}
+
+fn collect_ppt_office_art_blip_stores<'a>(
+    record: &'a PptRecord,
+    stores: &mut Vec<&'a [PptRecord]>,
+) {
+    let Some(children) = ppt_record_children(record) else {
+        return;
+    };
+    if record.header.record_type == 0xf001 {
+        stores.push(&children.records);
+        return;
+    }
+    for child in &children.records {
+        collect_ppt_office_art_blip_stores(child, stores);
+    }
+}
+
+fn resolve_delay_image<'a>(
+    pictures: Option<&'a PicturesStream>,
+    delay_offset: u32,
+    blip_identifier: u32,
+) -> Result<Option<(usize, crate::office_art::OfficeArtImageRef<'a>, bool)>> {
+    let (records, compatible_stream) = match pictures {
+        Some(PicturesStream::Complete(stream)) => (stream.records.as_slice(), false),
+        Some(PicturesStream::Compatibility { stream, .. }) => (stream.records.as_slice(), true),
+        Some(PicturesStream::Partial(_)) | None => return Ok(None),
+    };
+    let mut offset = 0u32;
+    for (record_index, record) in records.iter().enumerate() {
+        if offset == delay_offset {
+            return Ok(record
+                .image_ref()
+                .map(|image| (record_index, image, compatible_stream)));
+        }
+        offset = offset
+            .checked_add(HEADER_LEN as u32)
+            .and_then(|value| value.checked_add(record.header.declared_length))
+            .ok_or_else(|| {
+                Error::Limit(format!(
+                    "PPT Pictures offset overflow while resolving BLIP {blip_identifier}"
+                ))
+            })?;
+    }
+    Ok(None)
 }
 
 impl PptTopLevelRecordKind {

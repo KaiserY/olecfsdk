@@ -14,7 +14,9 @@ pub use file::{
     DocDirectParagraphFormatting, DocDirectTableState, DocDocumentPartRef,
     DocEmbeddedObjectStorage, DocFc, DocFcRange, DocFieldRef, DocFile, DocFkpPage, DocLocated,
     DocLocatedBookmarks, DocNoteKind, DocNoteRef, DocNotes, DocObjectPoolStorage,
-    DocOfficeArtShapeRef, DocOutlineLevel, DocPapxRun, DocParagraphKind, DocParagraphRef,
+    DocOfficeArtColor, DocOfficeArtFill, DocOfficeArtLine, DocOfficeArtPictureCrop,
+    DocOfficeArtShapeRef, DocOfficeArtTextInsets, DocOfficeArtWrapDistances,
+    DocOfficeArtWrapPolygonRef, DocOutlineLevel, DocPapxRun, DocParagraphKind, DocParagraphRef,
     DocParagraphStyleRef, DocRelationshipDiagnostic, DocSectionProperties, DocSectionRef,
     DocSections, DocShapeAnchorRef, DocSpecialContentLink, DocSpecialContentRef,
     DocStyleProperties, DocTableCellRef, DocTableCells, DocTableDiagnostic, DocTableRef,
@@ -38,9 +40,9 @@ use crate::{
     io::{Reader, SdkRead, SdkWrite, Writer},
     limits::Limits,
     office_art::{
-        OfficeArtDrawingGraph, OfficeArtIncompleteRecordData, OfficeArtPartialRecord,
-        OfficeArtPartialSequence, OfficeArtPartialStream, OfficeArtRecord, OfficeArtRecordData,
-        OfficeArtStream, OfficeArtWordClientTextbox,
+        OfficeArtDrawingGraph, OfficeArtImageRef, OfficeArtIncompleteRecordData,
+        OfficeArtPartialRecord, OfficeArtPartialSequence, OfficeArtPartialStream, OfficeArtRecord,
+        OfficeArtRecordData, OfficeArtStream, OfficeArtWordClientTextbox,
     },
     shared::NumberingFormat,
 };
@@ -1156,6 +1158,14 @@ pub struct ShapeAnchorRectangle {
 pub struct DocOfficeArtContent {
     pub drawing_group: DocOfficeArtRecordTree,
     pub drawings: Vec<OfficeArtWordDrawing>,
+}
+
+/// Zero-copy resolution of one document-wide OfficeArt BLIP-store entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocOfficeArtImageLink<'a> {
+    Resolved(OfficeArtImageRef<'a>),
+    Delayed { word_document_offset: u32 },
+    Unsupported,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4990,7 +5000,45 @@ pub enum Prm {
     Complex { property_run_index: u16 },
 }
 
+/// A zero-allocation view of the property modification selected by a Pcd.Prm.
+///
+/// Prm0 encodes one closed-table SPRM and its byte operand inline. Prm1
+/// borrows the referenced CLX Prc property array from its single owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrmPropertiesRef<'a> {
+    Empty,
+    Simple { sprm: KnownSprm, value: u8 },
+    Complex(&'a GrpPrl),
+}
+
 impl Prm {
+    /// Resolves this modifier without cloning a CLX property array or
+    /// allocating a one-property `GrpPrl` for an inline Prm0.
+    pub fn property_modifications_ref<'a>(self, clx: &'a Clx) -> Result<PrmPropertiesRef<'a>> {
+        match self {
+            Self::Simple { isprm: 0, value: 0 } => Ok(PrmPropertiesRef::Empty),
+            Self::Simple { isprm, value } => {
+                let sprm = simple_prm_sprm(isprm).ok_or_else(|| {
+                    Error::invalid(
+                        u64::from(isprm),
+                        format!("Prm0 isprm 0x{isprm:02x} is not defined by MS-DOC"),
+                    )
+                })?;
+                Ok(PrmPropertiesRef::Simple { sprm, value })
+            }
+            Self::Complex { property_run_index } => clx
+                .property_runs
+                .get(usize::from(property_run_index))
+                .map(|run| PrmPropertiesRef::Complex(&run.properties))
+                .ok_or_else(|| {
+                    Error::invalid(
+                        u64::from(property_run_index),
+                        "Prm1 property-run index exceeds the CLX Prc array",
+                    )
+                }),
+        }
+    }
+
     /// Resolves the property modifications selected by this `Prm`.
     ///
     /// MS-DOC 2.9.215 defines `Prm0.isprm` as a closed, non-arithmetic
@@ -4999,30 +5047,15 @@ impl Prm {
     /// specification order and can subsequently be filtered by `SprmGroup`
     /// for direct paragraph or direct character formatting.
     pub fn property_modifications(self, clx: &Clx) -> Result<GrpPrl> {
-        match self {
-            Self::Simple { isprm: 0, value: 0 } => Ok(GrpPrl {
+        match self.property_modifications_ref(clx)? {
+            PrmPropertiesRef::Empty => Ok(GrpPrl {
                 properties: Vec::new(),
             }),
-            Self::Simple { isprm, value } => {
-                let known = simple_prm_sprm(isprm).ok_or_else(|| {
-                    Error::invalid(
-                        u64::from(isprm),
-                        format!("Prm0 isprm 0x{isprm:02x} is not defined by MS-DOC"),
-                    )
-                })?;
-                let opcode = known.opcode();
+            PrmPropertiesRef::Simple { sprm, value } => {
+                let opcode = sprm.opcode();
                 GrpPrl::from_bytes(&[opcode.to_le_bytes()[0], opcode.to_le_bytes()[1], value])
             }
-            Self::Complex { property_run_index } => clx
-                .property_runs
-                .get(usize::from(property_run_index))
-                .map(|run| run.properties.clone())
-                .ok_or_else(|| {
-                    Error::invalid(
-                        u64::from(property_run_index),
-                        "Prm1 property-run index exceeds the CLX Prc array",
-                    )
-                }),
+            PrmPropertiesRef::Complex(properties) => Ok(properties.clone()),
         }
     }
 }
@@ -6374,6 +6407,58 @@ impl DocOfficeArtContent {
         OfficeArtDrawingGraph::from_streams(drawing_group, &drawings)
     }
 
+    /// Resolves a one-based OfficeArt BLIP identifier without copying its
+    /// payload. Delayed entries remain explicit because their `foDelay`
+    /// offset belongs to the host's WordDocument stream rather than the
+    /// record tree.
+    pub fn image_link(&self, blip_identifier: u32) -> Result<Option<DocOfficeArtImageLink<'_>>> {
+        if blip_identifier == 0 {
+            return Ok(None);
+        }
+        if self.drawing_group.is_partial() {
+            return Err(Error::invalid(
+                0,
+                "OfficeArt image resolution requires a complete DggContainer",
+            ));
+        }
+        let mut store = None;
+        let mut duplicate = false;
+        let DocOfficeArtRecordTree::Complete(drawing_group) = &self.drawing_group else {
+            unreachable!("partial drawing group was rejected above")
+        };
+        find_doc_blip_store(&drawing_group.records, &mut store, &mut duplicate);
+        if duplicate {
+            return Err(Error::invalid(
+                0,
+                "OfficeArt drawing group contains multiple BLIP stores",
+            ));
+        }
+        let Some(store) = store else {
+            return Ok(None);
+        };
+        let index = usize::try_from(blip_identifier - 1)
+            .map_err(|_| Error::Limit("OfficeArt BLIP identifier exceeds usize".into()))?;
+        let Some(entry) = store.get(index) else {
+            return Ok(None);
+        };
+        let link = match &entry.data {
+            OfficeArtRecordData::Fbse(fbse) => match fbse.embedded_blip.as_deref() {
+                Some(blip) => blip.image_ref().map_or(
+                    DocOfficeArtImageLink::Unsupported,
+                    DocOfficeArtImageLink::Resolved,
+                ),
+                None => DocOfficeArtImageLink::Delayed {
+                    word_document_offset: fbse.delay_offset,
+                },
+            },
+            _ => entry.image_ref().map_or(
+                DocOfficeArtImageLink::Unsupported,
+                DocOfficeArtImageLink::Resolved,
+            ),
+        };
+        Ok(Some(link))
+    }
+
     fn require_single_container(
         tree: &DocOfficeArtRecordTree,
         record_type: u16,
@@ -6394,6 +6479,29 @@ impl DocOfficeArtContent {
             return Err(Error::invalid(0, format!("{name} is not a container")));
         }
         Ok(())
+    }
+}
+
+fn find_doc_blip_store<'a>(
+    records: &'a [OfficeArtRecord],
+    store: &mut Option<&'a [OfficeArtRecord]>,
+    duplicate: &mut bool,
+) {
+    for record in records {
+        let children = match &record.data {
+            OfficeArtRecordData::Container(children)
+            | OfficeArtRecordData::CompatibilityContainer(children) => Some(children.as_slice()),
+            _ => None,
+        };
+        if record.header.record_type == 0xf001
+            && let Some(children) = children
+            && store.replace(children).is_some()
+        {
+            *duplicate = true;
+        }
+        if let Some(children) = children {
+            find_doc_blip_store(children, store, duplicate);
+        }
     }
 }
 
@@ -20725,6 +20833,12 @@ mod tests {
             .property_modifications(&clx)
             .unwrap();
         assert!(no_effect.properties.is_empty());
+        assert_eq!(
+            Prm::Simple { isprm: 0, value: 0 }
+                .property_modifications_ref(&clx)
+                .unwrap(),
+            PrmPropertiesRef::Empty
+        );
 
         let simple = Prm::Simple {
             isprm: 0x75,
@@ -20738,6 +20852,18 @@ mod tests {
             SprmKind::Known(KnownSprm::CFSpec)
         );
         assert_eq!(simple.properties[0].operand, SprmOperand::Toggle(1));
+        assert_eq!(
+            Prm::Simple {
+                isprm: 0x75,
+                value: 1,
+            }
+            .property_modifications_ref(&clx)
+            .unwrap(),
+            PrmPropertiesRef::Simple {
+                sprm: KnownSprm::CFSpec,
+                value: 1,
+            }
+        );
 
         let line_break = Prm::Simple { isprm: 0, value: 2 }
             .property_modifications(&clx)
@@ -20754,6 +20880,14 @@ mod tests {
         .property_modifications(&clx)
         .unwrap();
         assert_eq!(complex, clx.property_runs[0].properties);
+        assert_eq!(
+            Prm::Complex {
+                property_run_index: 0,
+            }
+            .property_modifications_ref(&clx)
+            .unwrap(),
+            PrmPropertiesRef::Complex(&clx.property_runs[0].properties)
+        );
         assert!(
             Prm::Simple {
                 isprm: 0x01,

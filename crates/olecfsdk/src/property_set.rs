@@ -4,6 +4,7 @@ use std::io::{Cursor, Write};
 
 use crate::{
     Error, Result, SdkObject,
+    common::CodePage,
     io::{BinaryFormat, IoContext, Reader, SdkRead, SdkWrite, Writer},
     limits::Limits,
 };
@@ -355,6 +356,84 @@ impl Property {
             ));
         }
         Dictionary::from_bytes(&self.raw, code_page)
+    }
+
+    /// Decodes a scalar OLEPS string directly from this property's persisted
+    /// packet without first allocating a second `TypedPropertyValue` payload.
+    ///
+    /// `VT_LPSTR` and `VT_BSTR` require the containing property's code page;
+    /// `VT_LPWSTR` is decoded as UTF-16LE. The format-defined terminal NUL is
+    /// excluded from the returned Rust `String`.
+    pub fn string_value(&self, code_page: Option<u16>) -> Result<Option<String>> {
+        let header = self.raw.get(..8).ok_or_else(|| {
+            Error::invalid(
+                self.offset as u64,
+                "OLEPS string property packet is shorter than its header",
+            )
+        })?;
+        let property_type = PropertyType(u16::from_le_bytes([header[0], header[1]]));
+        if !matches!(
+            property_type,
+            PropertyType::LPSTR | PropertyType::BSTR | PropertyType::LPWSTR
+        ) {
+            return Ok(None);
+        }
+        let count = usize::try_from(u32::from_le_bytes([
+            header[4], header[5], header[6], header[7],
+        ]))
+        .map_err(|_| Error::Limit("OLEPS string length does not fit usize".into()))?;
+        let payload = &self.raw[8..];
+        match property_type {
+            PropertyType::LPSTR | PropertyType::BSTR => {
+                let bytes = payload.get(..count).ok_or_else(|| {
+                    Error::invalid(
+                        self.offset as u64,
+                        "OLEPS code-page string exceeds its property packet",
+                    )
+                })?;
+                let bytes = bytes.strip_suffix(&[0]).unwrap_or(bytes);
+                let code_page = code_page.ok_or_else(|| {
+                    Error::invalid(
+                        self.offset as u64,
+                        "OLEPS code-page string has no CodePage property",
+                    )
+                })?;
+                CodePage(code_page).decode(bytes).map(Some)
+            }
+            PropertyType::LPWSTR => {
+                let byte_count = count.checked_mul(2).ok_or_else(|| {
+                    Error::Limit("OLEPS Unicode string byte length overflow".into())
+                })?;
+                let bytes = payload.get(..byte_count).ok_or_else(|| {
+                    Error::invalid(
+                        self.offset as u64,
+                        "OLEPS Unicode string exceeds its property packet",
+                    )
+                })?;
+                let has_terminal_nul = bytes
+                    .get(byte_count.saturating_sub(2)..byte_count)
+                    .is_some_and(|unit| unit == [0, 0]);
+                let value_bytes = if has_terminal_nul {
+                    &bytes[..byte_count - 2]
+                } else {
+                    bytes
+                };
+                char::decode_utf16(
+                    value_bytes
+                        .chunks_exact(2)
+                        .map(|unit| u16::from_le_bytes([unit[0], unit[1]])),
+                )
+                .collect::<std::result::Result<String, _>>()
+                .map(Some)
+                .map_err(|_| {
+                    Error::invalid(
+                        self.offset as u64,
+                        "OLEPS Unicode string contains an unpaired surrogate",
+                    )
+                })
+            }
+            _ => unreachable!("non-string property type returned above"),
+        }
     }
 }
 
@@ -2372,5 +2451,55 @@ mod tests {
             let bytes = value.to_bytes().unwrap();
             assert_eq!(Dictionary::from_bytes(&bytes, code_page).unwrap(), value);
         }
+    }
+
+    #[test]
+    fn scalar_string_value_decodes_without_retaining_wire_terminators() {
+        let code_page = Property {
+            identifier: 2,
+            offset: 32,
+            raw: TypedPropertyValue::CodePageString {
+                property_type: PropertyType::LPSTR,
+                reserved: 0,
+                bytes: b"caf\xe9\0".to_vec(),
+                padding: vec![0, 0],
+            }
+            .to_bytes()
+            .unwrap(),
+        };
+        assert_eq!(
+            code_page.string_value(Some(1252)).unwrap().as_deref(),
+            Some("caf\u{e9}")
+        );
+
+        let unicode = Property {
+            identifier: 3,
+            offset: 64,
+            raw: TypedPropertyValue::UnicodeString {
+                reserved: 0,
+                code_units: "\u{6587}\u{6863}\0".encode_utf16().collect(),
+                padding: vec![0, 0],
+            }
+            .to_bytes()
+            .unwrap(),
+        };
+        assert_eq!(
+            unicode.string_value(None).unwrap().as_deref(),
+            Some("\u{6587}\u{6863}")
+        );
+
+        let scalar = Property {
+            identifier: 4,
+            offset: 96,
+            raw: TypedPropertyValue::I32 {
+                property_type: PropertyType::I4,
+                reserved: 0,
+                value: 7,
+                trailing: Vec::new(),
+            }
+            .to_bytes()
+            .unwrap(),
+        };
+        assert_eq!(scalar.string_value(None).unwrap(), None);
     }
 }

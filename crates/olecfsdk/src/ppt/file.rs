@@ -32,8 +32,9 @@ use crate::{
 use super::{
     BinaryTagData, CURRENT_USER_STREAM_PATH, CurrentUserData, CurrentUserStream,
     ExternalStorageAtom, PICTURES_STREAM_PATH, POWERPOINT_DOCUMENT_STREAM_PATH,
-    PersistObjectDirectory, PicturesStream, PowerPointDocument, PptLivePresentation,
-    PptLiveTextBodyMut, PptRecord, PptRecordData, PptRecordSequence, PptSlideId,
+    PersistObjectDirectory, PicturesStream, PowerPointDocument, PptLiveImageStore,
+    PptLivePresentation, PptLiveTextBodyMut, PptRecord, PptRecordData, PptRecordSequence,
+    PptSlideId,
 };
 
 /// Complete typed root for a PowerPoint binary file.
@@ -403,6 +404,19 @@ impl PptFile {
             ));
         };
         self.document.live_drawing_graph(current_user)
+    }
+
+    /// Resolves the live OfficeArt BLIP store to borrowed image payloads in
+    /// the document tree or Pictures stream.
+    pub fn live_image_store(&self) -> Result<PptLiveImageStore<'_>> {
+        let CurrentUserData::Parsed(current_user) = &self.current_user.data else {
+            return Err(Error::invalid(
+                0,
+                "PPT image store requires a conforming CurrentUserAtom",
+            ));
+        };
+        self.document
+            .live_image_store(current_user, self.pictures.as_deref())
     }
 
     pub fn live_presentation_compatible(&self) -> Result<ParseOutcome<PptLivePresentation<'_>>> {

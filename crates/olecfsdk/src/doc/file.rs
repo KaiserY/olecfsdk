@@ -24,8 +24,9 @@ use crate::{
     io::BinaryFormat,
     limits::Limits,
     office_art::{
-        OfficeArtProperty, OfficeArtPropertyValue, OfficeArtRecord, OfficeArtRecordData,
-        OfficeArtShape, OfficeArtWordClientTextbox,
+        OfficeArtArrayData, OfficeArtPoint16, OfficeArtPoint32, OfficeArtProperty,
+        OfficeArtPropertyValue, OfficeArtRecord, OfficeArtRecordData, OfficeArtShape,
+        OfficeArtWordClientTextbox, image_ref_from_record_bytes,
     },
     parse::{
         ParseDiagnostic, ParseDiagnosticCode, ParseOptions, ParseOutcome, SpecificationReference,
@@ -43,23 +44,23 @@ use super::{
     AnnotationPost10, AnnotationReference, AnnotationReferenceTable, AssociatedStrings,
     AutoCaptionDefinitions, AutoSummaryRangeTable, BookmarkStart, Bookmarks, CaptionDefinitions,
     ChpxFkp, ChpxFkpRun, Clx, CommandCustomizations, CpOnlyTable, DATA_STREAM_PATH,
-    DocOfficeArtContent, DocumentProperties, EmbeddedFontTable, ExternalFileNameTable, Fib,
-    FibBaseFlags, FibFcLcb, FieldDocumentPart, FieldTable, FkpPageNumber, FontTable,
-    FormatConsistencyBookmarks, FrameAndListRecords, GrammarCheckerCookieTable, GrammarCookieStore,
-    GrammarOptionSets, GrammarStateTable, GrpPrl, HeaderTextTable, KnownSprm,
-    LanguageDetectionStateTable, LegacyGrammarCheckerCookieTable, LegacyGrammarOptionSets,
-    ListDefinitions, ListNamesTable, ListOverrides, ListStyleTemplates, MailMergeState,
-    NilPicfAndBinData, NilPicfFieldType, NoteReferenceTable, OBJECT_INFO_STREAM_NAME,
-    OBJECT_POOL_STORAGE_PATH, OfficeDataSource, OleControlInfos, OleObjectDescriptor, PapxFkp,
-    PapxFkpRun, ParagraphGroupProperties, Pcd, PicfAndOfficeArtData, PlcBte, PlcfSed, PrcData,
-    PrinterDriverInfo, PrivateFieldType, Prm, RangeProtection, RepairBookmarks, RevisionAuthors,
-    RevisionMessageThreading, RevisionSaveIdTable, SaveHistory, SelectionState, Sepx, ShapeAnchor,
-    ShapeAnchorTable, SmartTagBookmarks, SmartTagData, SmartTagRecognizerStateTable,
-    SpellingStateTable, SprmGroup, SprmKind, SprmOperand, StructuredTagBookmarks,
-    StructuredTagType, StyleFormatting, StyleSheet, SubdocumentTable, TABLE0_STREAM_PATH,
-    TABLE1_STREAM_PATH, TableCharacterCacheTable, TextPiece, TextPieceCharacters,
-    TextPieceEncoding, TextboxBreak, TextboxBreakTable, TextboxDocumentPart, TextboxStory,
-    TextboxStoryChain, TextboxStoryTable, UserInputMethods, UserVariables,
+    DocOfficeArtContent, DocOfficeArtImageLink, DocumentProperties, EmbeddedFontTable,
+    ExternalFileNameTable, Fib, FibBaseFlags, FibFcLcb, FieldDocumentPart, FieldTable,
+    FkpPageNumber, FontTable, FormatConsistencyBookmarks, FrameAndListRecords,
+    GrammarCheckerCookieTable, GrammarCookieStore, GrammarOptionSets, GrammarStateTable, GrpPrl,
+    HeaderTextTable, KnownSprm, LanguageDetectionStateTable, LegacyGrammarCheckerCookieTable,
+    LegacyGrammarOptionSets, ListDefinitions, ListNamesTable, ListOverrides, ListStyleTemplates,
+    MailMergeState, NilPicfAndBinData, NilPicfFieldType, NoteReferenceTable,
+    OBJECT_INFO_STREAM_NAME, OBJECT_POOL_STORAGE_PATH, OfficeDataSource, OleControlInfos,
+    OleObjectDescriptor, PapxFkp, PapxFkpRun, ParagraphGroupProperties, Pcd, PicfAndOfficeArtData,
+    PlcBte, PlcfSed, PrcData, PrinterDriverInfo, PrivateFieldType, Prm, PrmPropertiesRef,
+    RangeProtection, RepairBookmarks, RevisionAuthors, RevisionMessageThreading,
+    RevisionSaveIdTable, SaveHistory, SelectionState, Sepx, ShapeAnchor, ShapeAnchorTable,
+    SmartTagBookmarks, SmartTagData, SmartTagRecognizerStateTable, SpellingStateTable, SprmGroup,
+    SprmKind, SprmOperand, StructuredTagBookmarks, StructuredTagType, StyleFormatting, StyleSheet,
+    SubdocumentTable, TABLE0_STREAM_PATH, TABLE1_STREAM_PATH, TableCharacterCacheTable, TextPiece,
+    TextPieceCharacters, TextPieceEncoding, TextboxBreak, TextboxBreakTable, TextboxDocumentPart,
+    TextboxStory, TextboxStoryChain, TextboxStoryTable, UserInputMethods, UserVariables,
     WORD_DOCUMENT_STREAM_PATH, XmlSchemaReferences, XmlTransformPath,
 };
 
@@ -215,11 +216,82 @@ pub struct DocComments<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct DocOfficeArtShapeRef<'a> {
     document_part: TextboxDocumentPart,
+    z_order: usize,
     container: &'a OfficeArtRecord,
+    properties: &'a [OfficeArtRecord],
+    shape_type: u16,
     shape: &'a OfficeArtShape,
     text_id_property: Option<&'a OfficeArtProperty>,
     next_shape_id_property: Option<&'a OfficeArtProperty>,
     client_textbox: Option<&'a OfficeArtWordClientTextbox>,
+}
+
+/// Effective OfficeArt text insets in English Metric Units (EMUs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DocOfficeArtTextInsets {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+/// Effective OfficeArt distances between a floating shape and surrounding text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DocOfficeArtWrapDistances {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+/// OfficeArt picture crop fractions in signed 16.16 fixed-point units.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DocOfficeArtPictureCrop {
+    top: i32,
+    bottom: i32,
+    left: i32,
+    right: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DocOfficeArtWrapPolygonRef<'a> {
+    points: DocOfficeArtWrapPoints<'a>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DocOfficeArtWrapPoints<'a> {
+    I16(&'a [OfficeArtPoint16]),
+    I32(&'a [OfficeArtPoint32]),
+}
+
+/// A host-independent OfficeArt color. Direct RGB values are decoded without
+/// allocation; indexed, scheme, system, and transformed colors retain the
+/// original MSO_CLR value for an explicit conversion decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocOfficeArtColor {
+    Rgb { red: u8, green: u8, blue: u8 },
+    Other(u32),
+}
+
+/// Effective OfficeArt fill after applying the Boolean use/value bits and
+/// OfficeArt defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocOfficeArtFill {
+    None,
+    Solid(DocOfficeArtColor),
+    Other { fill_type: u32 },
+}
+
+/// Effective OfficeArt outline after applying the Boolean use/value bits and
+/// OfficeArt defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocOfficeArtLine {
+    None,
+    Solid {
+        color: DocOfficeArtColor,
+        width_emu: i32,
+    },
+    Other,
 }
 
 /// The host-defined MS-DOC interpretation of an OfficeArt text identifier.
@@ -322,6 +394,14 @@ pub struct DocParagraphStyleRef<'a> {
     document_part: DocDocumentPartRef<'a>,
     style_index: u16,
     source: &'a super::StyleDefinition,
+}
+
+/// Paragraph style identity and normative outline level resolved from one
+/// expansion of the paragraph's direct SPRM layer.
+#[derive(Clone, Copy, Debug)]
+pub struct DocParagraphStyleStateRef<'a> {
+    style: DocParagraphStyleRef<'a>,
+    outline_level: DocOutlineLevel,
 }
 
 /// MS-DOC paragraph outline level. Values zero through eight are the nine
@@ -448,6 +528,7 @@ pub struct DocTableRef<'a> {
 /// The table relationship index for one document part.
 #[derive(Clone, Debug)]
 pub struct DocTables<'a> {
+    document_part: DocDocumentPartRef<'a>,
     tables: Vec<DocTableRef<'a>>,
     diagnostics: Vec<DocTableDiagnostic>,
 }
@@ -459,6 +540,16 @@ pub struct DocCharacterRunRef<'a> {
     source: &'a DocChpxRun,
     global_cp_range: DocCpRange,
     local_cp_range: DocCpRange,
+}
+
+/// One text slice bounded by both a PlcPcd piece and a CHPX run.
+///
+/// The slice and formatting owner stay borrowed; the handle only carries the
+/// intersected CP/FC bounds needed by a streaming consumer.
+#[derive(Clone, Copy, Debug)]
+pub struct DocFormattedTextRef<'a> {
+    text: DocTextPieceRef<'a>,
+    character_run: DocCharacterRunRef<'a>,
 }
 
 /// A zero-copy join of one CP to its physical Pcd, PAPX and CHPX owners.
@@ -1198,6 +1289,49 @@ impl<'a> DocTextRangeRef<'a> {
             .retain(|table| cp_ranges_overlap(table.local_cp_range, self.local_cp_range));
         Ok(tables)
     }
+
+    /// Combines the range's ordinary paragraphs and completed outer tables in
+    /// document order. Table member paragraphs are not duplicated.
+    pub fn blocks(self) -> Result<DocBlocks<'a>> {
+        let tables = self.tables()?;
+        self.blocks_with_tables(&tables)
+    }
+
+    /// Builds document-order blocks from a caller-retained table index for
+    /// the same document part.
+    pub fn blocks_with_tables(self, tables: &DocTables<'a>) -> Result<DocBlocks<'a>> {
+        validate_table_index_owner(self.document_part, tables)?;
+        let outer_tables = tables
+            .tables
+            .iter()
+            .filter(|candidate| {
+                cp_ranges_overlap(candidate.local_cp_range, self.local_cp_range)
+                    && !tables.tables.iter().any(|container| {
+                        container.table_depth < candidate.table_depth
+                            && container.global_cp_range.start.0
+                                <= candidate.global_cp_range.start.0
+                            && candidate.global_cp_range.end.0 <= container.global_cp_range.end.0
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut blocks = self
+            .paragraphs()
+            .filter(|paragraph| {
+                !outer_tables.iter().any(|table| {
+                    table.global_cp_range.start.0 <= paragraph.global_cp_range.start.0
+                        && paragraph.global_cp_range.end.0 <= table.global_cp_range.end.0
+                })
+            })
+            .map(DocBlockRef::Paragraph)
+            .collect::<Vec<_>>();
+        blocks.extend(outer_tables.into_iter().map(DocBlockRef::Table));
+        blocks.sort_by_key(DocBlockRef::global_cp_start);
+        Ok(DocBlocks {
+            blocks,
+            diagnostics: tables.diagnostics.clone(),
+        })
+    }
 }
 
 impl<'a> DocBookmarks<'a> {
@@ -1437,8 +1571,19 @@ impl<'a> DocOfficeArtShapeRef<'a> {
         self.document_part
     }
 
+    /// Zero-based OfficeArt shape-container order within this drawing. The
+    /// order is the host's relative z-order input for floating objects.
+    pub const fn z_order(self) -> usize {
+        self.z_order
+    }
+
     pub const fn container(self) -> &'a OfficeArtRecord {
         self.container
+    }
+
+    /// The OfficeArt `shapeType` stored in the shape record header.
+    pub const fn shape_type(self) -> u16 {
+        self.shape_type
     }
 
     pub const fn shape(self) -> &'a OfficeArtShape {
@@ -1469,6 +1614,246 @@ impl<'a> DocOfficeArtShapeRef<'a> {
 
     pub fn next_shape_id(self) -> Option<u32> {
         simple_office_art_property(self.next_shape_id_property)
+    }
+
+    /// Resolves the shape-owned `pib` property to its one-based OfficeArt
+    /// BLIP-store identifier. A malformed property is rejected instead of
+    /// being mistaken for an image index.
+    pub fn primary_blip_identifier(self) -> Result<Option<u32>> {
+        let Some(property) = self.property(0x0104) else {
+            return Ok(None);
+        };
+        let OfficeArtPropertyValue::Simple(identifier) = &property.value else {
+            return Err(Error::invalid(
+                0,
+                "DOC shape primary BLIP property is not a simple value",
+            ));
+        };
+        if !property.is_blip_id {
+            return Err(Error::invalid(
+                0,
+                "DOC shape primary BLIP property does not set fBid",
+            ));
+        }
+        Ok((*identifier != 0).then_some(*identifier))
+    }
+
+    /// Returns effective text insets. Missing values use the [MS-ODRAW]
+    /// defaults: 0.1 inch horizontally and 0.05 inch vertically.
+    pub fn text_insets(self) -> DocOfficeArtTextInsets {
+        DocOfficeArtTextInsets {
+            left: self.signed_property_or(0x0081, 91_440),
+            top: self.signed_property_or(0x0082, 45_720),
+            right: self.signed_property_or(0x0083, 91_440),
+            bottom: self.signed_property_or(0x0084, 45_720),
+        }
+    }
+
+    pub fn wrap_distances(self) -> DocOfficeArtWrapDistances {
+        DocOfficeArtWrapDistances {
+            left: self.signed_property_or(0x0384, 0),
+            top: self.signed_property_or(0x0385, 0),
+            right: self.signed_property_or(0x0386, 0),
+            bottom: self.signed_property_or(0x0387, 0),
+        }
+    }
+
+    pub fn picture_crop(self) -> DocOfficeArtPictureCrop {
+        DocOfficeArtPictureCrop {
+            top: self.signed_property_or(0x0100, 0),
+            bottom: self.signed_property_or(0x0101, 0),
+            left: self.signed_property_or(0x0102, 0),
+            right: self.signed_property_or(0x0103, 0),
+        }
+    }
+
+    /// Borrows the custom wrapping polygon in its OfficeArt 21600-based shape
+    /// coordinate space. An encoded non-point array is rejected explicitly.
+    pub fn wrap_polygon(self) -> Result<Option<DocOfficeArtWrapPolygonRef<'a>>> {
+        let Some(property) = self.property(0x0383) else {
+            return Ok(None);
+        };
+        let OfficeArtPropertyValue::Array { value, .. } = &property.value else {
+            return Err(Error::invalid(
+                0,
+                "DOC shape wrapping polygon property is not an OfficeArt array",
+            ));
+        };
+        let points = match &value.data {
+            OfficeArtArrayData::Points16(points) => DocOfficeArtWrapPoints::I16(points.as_slice()),
+            OfficeArtArrayData::Points32(points) => DocOfficeArtWrapPoints::I32(points.as_slice()),
+            _ => {
+                return Err(Error::invalid(
+                    0,
+                    "DOC shape wrapping polygon array does not contain points",
+                ));
+            }
+        };
+        Ok(Some(DocOfficeArtWrapPolygonRef { points }))
+    }
+
+    pub fn fill(self) -> DocOfficeArtFill {
+        if !self.boolean_property_or(0x01bb, true) {
+            return DocOfficeArtFill::None;
+        }
+        let fill_type = self.simple_property(0x0180).unwrap_or(0);
+        if fill_type != 0 {
+            return DocOfficeArtFill::Other { fill_type };
+        }
+        DocOfficeArtFill::Solid(office_art_color(
+            self.simple_property(0x0181).unwrap_or(0x00ff_ffff),
+        ))
+    }
+
+    pub fn line(self) -> DocOfficeArtLine {
+        if !self.boolean_property_or(0x01fc, true) {
+            return DocOfficeArtLine::None;
+        }
+        if self.simple_property(0x01c4).is_some_and(|value| value != 0)
+            || self.simple_property(0x01cd).is_some_and(|value| value != 0)
+            || self.simple_property(0x01ce).is_some_and(|value| value != 0)
+            || self.simple_property(0x01cf).is_some()
+        {
+            return DocOfficeArtLine::Other;
+        }
+        DocOfficeArtLine::Solid {
+            color: office_art_color(self.simple_property(0x01c0).unwrap_or(0)),
+            width_emu: self.signed_property_or(0x01cb, 9_525),
+        }
+    }
+
+    /// Whether the floating object participates in its containing table cell.
+    /// [MS-ODRAW] defines the default as true when the use bit is absent.
+    pub fn layout_in_cell(self) -> bool {
+        self.boolean_property_or(0x03b0, true)
+    }
+
+    /// Whether the object can overlap another object. [MS-ODRAW] defines the
+    /// default as true when the use bit is absent.
+    pub fn allow_overlap(self) -> bool {
+        self.boolean_property_or(0x03b6, true)
+    }
+
+    pub fn hidden(self) -> bool {
+        self.boolean_property_or(0x03be, false)
+    }
+
+    fn property(self, property_id: u16) -> Option<&'a OfficeArtProperty> {
+        last_office_art_property(self.properties, property_id)
+    }
+
+    fn simple_property(self, property_id: u16) -> Option<u32> {
+        simple_office_art_property(self.property(property_id))
+    }
+
+    fn signed_property_or(self, property_id: u16, default: i32) -> i32 {
+        self.simple_property(property_id)
+            .map(|value| i32::from_le_bytes(value.to_le_bytes()))
+            .unwrap_or(default)
+    }
+
+    fn boolean_property_or(self, property_id: u16, default: bool) -> bool {
+        let base_id = property_id | 0x000f;
+        let Some(value) = self.simple_property(base_id) else {
+            return default;
+        };
+        let value_bit = u32::from(base_id - property_id);
+        let use_bit = value_bit + 16;
+        if value & (1 << use_bit) == 0 {
+            default
+        } else {
+            value & (1 << value_bit) != 0
+        }
+    }
+}
+
+impl DocOfficeArtTextInsets {
+    pub const fn left(self) -> i32 {
+        self.left
+    }
+
+    pub const fn top(self) -> i32 {
+        self.top
+    }
+
+    pub const fn right(self) -> i32 {
+        self.right
+    }
+
+    pub const fn bottom(self) -> i32 {
+        self.bottom
+    }
+}
+
+impl DocOfficeArtWrapDistances {
+    pub const fn left(self) -> i32 {
+        self.left
+    }
+
+    pub const fn top(self) -> i32 {
+        self.top
+    }
+
+    pub const fn right(self) -> i32 {
+        self.right
+    }
+
+    pub const fn bottom(self) -> i32 {
+        self.bottom
+    }
+}
+
+impl DocOfficeArtPictureCrop {
+    pub const fn top(self) -> i32 {
+        self.top
+    }
+
+    pub const fn bottom(self) -> i32 {
+        self.bottom
+    }
+
+    pub const fn left(self) -> i32 {
+        self.left
+    }
+
+    pub const fn right(self) -> i32 {
+        self.right
+    }
+}
+
+impl DocOfficeArtWrapPolygonRef<'_> {
+    pub fn len(self) -> usize {
+        match self.points {
+            DocOfficeArtWrapPoints::I16(points) => points.len(),
+            DocOfficeArtWrapPoints::I32(points) => points.len(),
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn point(self, index: usize) -> Option<(i64, i64)> {
+        match self.points {
+            DocOfficeArtWrapPoints::I16(points) => points
+                .get(index)
+                .map(|point| (i64::from(point.x), i64::from(point.y))),
+            DocOfficeArtWrapPoints::I32(points) => points
+                .get(index)
+                .map(|point| (i64::from(point.x), i64::from(point.y))),
+        }
+    }
+}
+
+const fn office_art_color(value: u32) -> DocOfficeArtColor {
+    if value & 0xff00_0000 == 0 {
+        DocOfficeArtColor::Rgb {
+            red: value as u8,
+            green: (value >> 8) as u8,
+            blue: (value >> 16) as u8,
+        }
+    } else {
+        DocOfficeArtColor::Other(value)
     }
 }
 
@@ -1714,6 +2099,16 @@ impl<'a> DocDocumentPartRef<'a> {
     /// order. Table member paragraphs are not duplicated as sibling blocks.
     pub fn blocks(self) -> Result<DocBlocks<'a>> {
         let tables = self.tables()?;
+        self.blocks_with_tables(&tables)
+    }
+
+    /// Builds document-order blocks from an already resolved table index.
+    ///
+    /// A converter or editor that recursively walks table cells can retain
+    /// one [`DocTables`] value for the whole document part instead of
+    /// rebuilding every row/table relationship for every cell.
+    pub fn blocks_with_tables(self, tables: &DocTables<'a>) -> Result<DocBlocks<'a>> {
+        validate_table_index_owner(self, tables)?;
         let outer_tables = tables
             .tables
             .iter()
@@ -1740,7 +2135,7 @@ impl<'a> DocDocumentPartRef<'a> {
         blocks.sort_by_key(DocBlockRef::global_cp_start);
         Ok(DocBlocks {
             blocks,
-            diagnostics: tables.diagnostics,
+            diagnostics: tables.diagnostics.clone(),
         })
     }
 
@@ -2054,6 +2449,7 @@ impl<'a> DocDocumentPartRef<'a> {
         }
         tables.sort_by_key(|table| (table.global_cp_range.start.0, table.table_depth));
         Ok(DocTables {
+            document_part: self,
             tables,
             diagnostics,
         })
@@ -2175,6 +2571,34 @@ impl<'a> DocDocumentPartRef<'a> {
     /// objects from their special character and direct-character-formatting
     /// relationship. Every returned target remains borrowed from Data or
     /// ObjectPool; external image/OLE payload internals are not re-parsed.
+    pub fn special_content_at(self, local_cp: DocCp) -> Result<Option<DocSpecialContentRef<'a>>> {
+        let character = self.character_at(local_cp).ok_or_else(|| {
+            Error::invalid(
+                u64::from(local_cp.0),
+                "special-content CP exceeds its MS-DOC document part",
+            )
+        })?;
+        if !matches!(character, 0x0001 | 0x0014) {
+            return Ok(None);
+        }
+        match self.resolve_special_content_at(local_cp, character)? {
+            Some(DocSpecialContentLink::Resolved(value)) => Ok(Some(value)),
+            Some(DocSpecialContentLink::CompatibilityOleObject { character, .. }) => {
+                Err(Error::invalid(
+                    u64::from(character.0),
+                    "ObjectPool storage has no valid ObjInfo/ODT",
+                ))
+            }
+            Some(DocSpecialContentLink::Unresolved { character, reason }) => {
+                Err(Error::invalid(u64::from(character.0), reason))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Resolves all strict special-content relationships in this document
+    /// part. Use [`Self::special_content_at`] when a streaming consumer already
+    /// knows the CP of a special character and wants to avoid the result Vec.
     pub fn special_contents(self) -> Result<Vec<DocSpecialContentRef<'a>>> {
         self.special_contents_compatible()?
             .into_iter()
@@ -2253,8 +2677,7 @@ impl<'a> DocDocumentPartRef<'a> {
             ));
         };
         let location = u32::from_le_bytes(raw_location);
-        let formatting = formatting_ref.materialize()?;
-        if !effective_character_toggle_from_formatting(self.file, &formatting, KnownSprm::CFSpec)? {
+        if !effective_character_toggle_from_ref(self.file, formatting_ref, KnownSprm::CFSpec)? {
             return Err(Error::invalid(
                 u64::from(local_cp.0),
                 "sprmCPicLocation character does not have effective sprmCFSpec",
@@ -2262,9 +2685,9 @@ impl<'a> DocDocumentPartRef<'a> {
         }
         match character {
             0x0001 => {
-                let binary = effective_character_toggle_from_formatting(
+                let binary = effective_character_toggle_from_ref(
                     self.file,
-                    &formatting,
+                    formatting_ref,
                     KnownSprm::CFData,
                 )?;
                 let data_node = self
@@ -2305,17 +2728,17 @@ impl<'a> DocDocumentPartRef<'a> {
                 })))
             }
             0x0014 => {
-                let ole2 = effective_character_toggle_from_formatting(
+                let ole2 = effective_character_toggle_from_ref(
                     self.file,
-                    &formatting,
+                    formatting_ref,
                     KnownSprm::CFOle2,
                 )?;
                 if !ole2 {
                     return Ok(None);
                 }
-                if !effective_character_toggle_from_formatting(
+                if !effective_character_toggle_from_ref(
                     self.file,
-                    &formatting,
+                    formatting_ref,
                     KnownSprm::CFObj,
                 )? {
                     return Err(Error::invalid(
@@ -2475,6 +2898,14 @@ impl<'a> DocTextPieceRef<'a> {
         self.descriptor
     }
 
+    /// Resolves the containing Pcd.Prm as a borrowed/inline property view.
+    pub fn property_modifications(self) -> Result<PrmPropertiesRef<'a>> {
+        self.descriptor
+            .ok_or_else(|| Error::invalid(0, "text piece has no Pcd descriptor"))?
+            .property_modifier
+            .property_modifications_ref(&self.document_part.file.table.clx.value)
+    }
+
     pub const fn global_cp_range(self) -> DocCpRange {
         self.global_cp_range
     }
@@ -2485,6 +2916,67 @@ impl<'a> DocTextPieceRef<'a> {
 
     pub const fn fc_range(self) -> DocFcRange {
         self.fc_range
+    }
+
+    /// Returns the zero-copy intersection with one part-local CP range.
+    ///
+    /// The returned handle still borrows the same PlcPcd owner and decoded
+    /// string. Only its CP/FC bounds and string-range indexes are narrowed, so
+    /// consumers do not need to reimplement UTF-16 code-unit accounting when
+    /// a paragraph, field, table cell, or other logical range cuts through a
+    /// physical text piece.
+    pub fn intersection(self, local_cp_range: DocCpRange) -> Option<Self> {
+        let start = self.local_cp_range.start.0.max(local_cp_range.start.0);
+        let end = self.local_cp_range.end.0.min(local_cp_range.end.0);
+        if start >= end {
+            return None;
+        }
+
+        let start_delta = start.checked_sub(self.local_cp_range.start.0)?;
+        let end_delta = end.checked_sub(self.local_cp_range.start.0)?;
+        let character_start = self
+            .character_start
+            .checked_add(usize::try_from(start_delta).ok()?)?;
+        let character_end = self
+            .character_start
+            .checked_add(usize::try_from(end_delta).ok()?)?;
+        let byte_width = match self.source.value.characters.encoding() {
+            TextPieceEncoding::Compressed => 1,
+            TextPieceEncoding::Utf16 => 2,
+        };
+        let fc_start = self
+            .fc_range
+            .start
+            .0
+            .checked_add(start_delta.checked_mul(byte_width)?)?;
+        let fc_end = self
+            .fc_range
+            .start
+            .0
+            .checked_add(end_delta.checked_mul(byte_width)?)?;
+        let global_part_start = self
+            .global_cp_range
+            .start
+            .0
+            .checked_sub(self.local_cp_range.start.0)?;
+
+        Some(Self {
+            global_cp_range: DocCpRange {
+                start: DocCp(global_part_start.checked_add(start)?),
+                end: DocCp(global_part_start.checked_add(end)?),
+            },
+            local_cp_range: DocCpRange {
+                start: DocCp(start),
+                end: DocCp(end),
+            },
+            fc_range: DocFcRange {
+                start: DocFc(fc_start),
+                end: DocFc(fc_end),
+            },
+            character_start,
+            character_end,
+            ..self
+        })
     }
 
     /// Returns the conforming Rust string slice for this CP intersection, or
@@ -2544,10 +3036,98 @@ impl<'a> DocParagraphRef<'a> {
         })
     }
 
+    /// Returns physical text-piece handles clipped to this paragraph's exact
+    /// part-local CP range without allocating or copying decoded text.
+    pub fn text_segments(self) -> impl Iterator<Item = DocTextPieceRef<'a>> {
+        self.document_part
+            .text_pieces()
+            .filter_map(move |piece| piece.intersection(self.local_cp_range))
+    }
+
     pub fn character_runs(self) -> impl Iterator<Item = DocCharacterRunRef<'a>> {
         self.document_part.character_runs().filter(move |run| {
             run.global_cp_range.start.0 < self.global_cp_range.end.0
                 && self.global_cp_range.start.0 < run.global_cp_range.end.0
+        })
+    }
+
+    /// Intersects text pieces and CHPX runs in one forward pass.
+    ///
+    /// Each yielded slice has one physical text owner and one physical
+    /// character-formatting owner. No text, property array, or index is
+    /// allocated. A malformed coverage gap is returned as an error instead of
+    /// silently dropping the uncovered characters.
+    pub fn formatted_text_segments(self) -> impl Iterator<Item = Result<DocFormattedTextRef<'a>>> {
+        let mut pieces = self.text_segments().peekable();
+        let mut runs = self.character_runs().peekable();
+        let mut cursor = self.local_cp_range.start.0;
+        let end = self.local_cp_range.end.0;
+        std::iter::from_fn(move || {
+            if cursor >= end {
+                return None;
+            }
+            while pieces
+                .peek()
+                .is_some_and(|piece| piece.local_cp_range.end.0 <= cursor)
+            {
+                pieces.next();
+            }
+            while runs
+                .peek()
+                .is_some_and(|run| run.local_cp_range.end.0 <= cursor)
+            {
+                runs.next();
+            }
+            let Some(piece) = pieces.peek().copied() else {
+                let missing_cp = cursor;
+                cursor = end;
+                return Some(Err(Error::invalid(
+                    u64::from(missing_cp),
+                    "paragraph CP has no containing PlcPcd text piece",
+                )));
+            };
+            let Some(character_run) = runs.peek().copied() else {
+                let missing_cp = cursor;
+                cursor = end;
+                return Some(Err(Error::invalid(
+                    u64::from(missing_cp),
+                    "paragraph CP has no containing CHPX run",
+                )));
+            };
+            if piece.local_cp_range.start.0 > cursor {
+                let missing_cp = cursor;
+                cursor = end;
+                return Some(Err(Error::invalid(
+                    u64::from(missing_cp),
+                    "paragraph text-piece coverage has a CP gap",
+                )));
+            }
+            if character_run.local_cp_range.start.0 > cursor {
+                let missing_cp = cursor;
+                cursor = end;
+                return Some(Err(Error::invalid(
+                    u64::from(missing_cp),
+                    "paragraph CHPX coverage has a CP gap",
+                )));
+            }
+            let segment_end = piece
+                .local_cp_range
+                .end
+                .0
+                .min(character_run.local_cp_range.end.0)
+                .min(end);
+            let range = DocCpRange {
+                start: DocCp(cursor),
+                end: DocCp(segment_end),
+            };
+            let text = piece
+                .intersection(range)
+                .expect("the cursor is inside the current text piece");
+            cursor = segment_end;
+            Some(Ok(DocFormattedTextRef {
+                text,
+                character_run,
+            }))
         })
     }
 
@@ -2558,7 +3138,14 @@ impl<'a> DocParagraphRef<'a> {
             self.document_part.part,
             self.local_cp_range.start.0,
         )?;
-        let style_index = effective_paragraph_style_index(&direct)?;
+        self.style_from_direct(&direct)
+    }
+
+    fn style_from_direct(
+        self,
+        direct: &DocDirectParagraphFormatting,
+    ) -> Result<DocParagraphStyleRef<'a>> {
+        let style_index = effective_paragraph_style_index(direct)?;
         let source = self
             .document_part
             .file
@@ -2583,6 +3170,24 @@ impl<'a> DocParagraphRef<'a> {
             document_part: self.document_part,
             style_index,
             source,
+        })
+    }
+
+    /// Resolves style identity and outline semantics while expanding the
+    /// direct paragraph SPRM layer only once.
+    pub fn style_state(self) -> Result<DocParagraphStyleStateRef<'a>> {
+        let direct = self.document_part.file.direct_paragraph_formatting_at_cp(
+            self.document_part.part,
+            self.local_cp_range.start.0,
+        )?;
+        let style = self.style_from_direct(&direct)?;
+        let properties = style.properties()?;
+        let mut level = 9;
+        apply_outline_properties(&properties.paragraph_properties, &mut level)?;
+        apply_outline_properties(&direct.applied_properties, &mut level)?;
+        Ok(DocParagraphStyleStateRef {
+            style,
+            outline_level: DocOutlineLevel::from_raw(level)?,
         })
     }
 
@@ -2689,6 +3294,16 @@ impl<'a> DocParagraphStyleRef<'a> {
 
     pub fn properties(self) -> Result<DocStyleProperties> {
         self.document_part.file.style_properties(self.style_index)
+    }
+}
+
+impl<'a> DocParagraphStyleStateRef<'a> {
+    pub const fn style(self) -> DocParagraphStyleRef<'a> {
+        self.style
+    }
+
+    pub const fn outline_level(self) -> DocOutlineLevel {
+        self.outline_level
     }
 }
 
@@ -2910,32 +3525,92 @@ impl<'a> DocTableCellRef<'a> {
     }
 
     pub fn nested_tables(self) -> Result<DocTables<'a>> {
+        let index = self.row.document_part.tables()?;
+        self.nested_tables_with_index(&index)
+    }
+
+    /// Selects directly nested tables from a caller-retained document-part
+    /// table index without rescanning and rematerializing the full PAPX table
+    /// graph.
+    pub fn nested_tables_with_index(self, index: &DocTables<'a>) -> Result<DocTables<'a>> {
+        validate_table_index_owner(self.row.document_part, index)?;
         let expected_depth = self
             .row
             .table_depth
             .checked_add(1)
             .ok_or_else(|| Error::Limit("DOC nested table depth overflow".into()))?;
-        let index = self.row.document_part.tables()?;
         Ok(DocTables {
+            document_part: index.document_part,
             tables: index
                 .tables
-                .into_iter()
+                .iter()
                 .filter(|table| {
                     table.table_depth == expected_depth
                         && self.global_cp_range.start.0 <= table.global_cp_range.start.0
                         && table.global_cp_range.end.0 <= self.global_cp_range.end.0
                 })
+                .cloned()
                 .collect(),
             diagnostics: index
                 .diagnostics
-                .into_iter()
+                .iter()
                 .filter(|diagnostic| {
                     diagnostic.global_cp_range.start.0 < self.global_cp_range.end.0
                         && self.global_cp_range.start.0 < diagnostic.global_cp_range.end.0
                 })
+                .cloned()
                 .collect(),
         })
     }
+
+    /// Combines this cell's direct paragraphs and directly nested tables in
+    /// document order. Paragraphs owned by a nested table are reachable from
+    /// that table instead of being duplicated beside it.
+    pub fn blocks(self) -> Result<DocBlocks<'a>> {
+        let nested_tables = self.nested_tables()?;
+        self.blocks_with_nested_tables(nested_tables)
+    }
+
+    /// Combines this cell's paragraphs with nested tables selected from a
+    /// caller-retained document-part index.
+    pub fn blocks_with_tables(self, tables: &DocTables<'a>) -> Result<DocBlocks<'a>> {
+        let nested_tables = self.nested_tables_with_index(tables)?;
+        self.blocks_with_nested_tables(nested_tables)
+    }
+
+    fn blocks_with_nested_tables(self, nested_tables: DocTables<'a>) -> Result<DocBlocks<'a>> {
+        let mut blocks = self
+            .paragraphs()
+            .filter(|paragraph| {
+                !nested_tables.tables.iter().any(|table| {
+                    table.global_cp_range.start.0 <= paragraph.global_cp_range.start.0
+                        && paragraph.global_cp_range.end.0 <= table.global_cp_range.end.0
+                })
+            })
+            .map(DocBlockRef::Paragraph)
+            .collect::<Vec<_>>();
+        blocks.extend(nested_tables.tables.into_iter().map(DocBlockRef::Table));
+        blocks.sort_by_key(DocBlockRef::global_cp_start);
+        Ok(DocBlocks {
+            blocks,
+            diagnostics: nested_tables.diagnostics,
+        })
+    }
+}
+
+fn validate_table_index_owner(
+    document_part: DocDocumentPartRef<'_>,
+    tables: &DocTables<'_>,
+) -> Result<()> {
+    if tables.document_part.part != document_part.part
+        || !std::ptr::eq(tables.document_part.file, document_part.file)
+    {
+        return Err(Error::invalid(
+            0,
+            "DOC table index belongs to a different document part",
+        ));
+    }
+    Ok(())
 }
 
 impl<'a> DocTables<'a> {
@@ -3420,6 +4095,24 @@ impl<'a> DocCharacterRunRef<'a> {
             piece.global_cp_range.start.0 < self.global_cp_range.end.0
                 && self.global_cp_range.start.0 < piece.global_cp_range.end.0
         })
+    }
+}
+
+impl<'a> DocFormattedTextRef<'a> {
+    pub const fn text(self) -> DocTextPieceRef<'a> {
+        self.text
+    }
+
+    pub const fn character_run(self) -> DocCharacterRunRef<'a> {
+        self.character_run
+    }
+
+    pub const fn local_cp_range(self) -> DocCpRange {
+        self.text.local_cp_range
+    }
+
+    pub const fn global_cp_range(self) -> DocCpRange {
+        self.text.global_cp_range
     }
 }
 
@@ -4102,17 +4795,21 @@ fn collect_office_art_shapes<'a>(
             && let Some(children) = children
         {
             let shape = children.iter().find_map(|child| match &child.data {
-                OfficeArtRecordData::Shape(shape) => Some(shape),
+                OfficeArtRecordData::Shape(shape) => Some((child.header.instance, shape)),
                 _ => None,
             });
             let client_textbox = children.iter().find_map(|child| match &child.data {
                 OfficeArtRecordData::WordClientTextbox(value) => Some(value),
                 _ => None,
             });
-            if let Some(shape) = shape {
+            if let Some((shape_type, shape)) = shape {
+                let z_order = shapes.len();
                 shapes.push(DocOfficeArtShapeRef {
                     document_part,
+                    z_order,
                     container: record,
+                    properties: children,
+                    shape_type,
                     shape,
                     text_id_property: last_office_art_property(children, 0x0080),
                     next_shape_id_property: last_office_art_property(children, 0x008a),
@@ -4181,6 +4878,11 @@ fn build_textboxes<'a>(
 
     if let Some(breaks) = file.table.textbox_breaks.get(&document_part) {
         for (index, source) in breaks.value.breaks.iter().enumerate() {
+            // MS-DOC PlcfTxbxBkd/PlcfTxbxHdrBkd define the final Tbkd as a
+            // sentinel which is not associated with any FTXBXS object.
+            if index + 1 == breaks.value.breaks.len() {
+                continue;
+            }
             let text = match make_text_range(
                 text_part,
                 breaks.value.positions[index],
@@ -4199,21 +4901,16 @@ fn build_textboxes<'a>(
                     continue;
                 }
             };
-            let is_final = index + 1 == breaks.value.breaks.len();
-            let story_index = if is_final {
-                None
-            } else {
-                match usize::try_from(source.story_index) {
-                    Ok(index) => Some(index),
-                    Err(_) => {
-                        relationship_problem(
-                            preserve_compatibility,
-                            &mut result.diagnostics,
-                            Some(index),
-                            format!("{document_part:?} Tbkd.itxbxs is negative"),
-                        )?;
-                        None
-                    }
+            let story_index = match usize::try_from(source.story_index) {
+                Ok(index) => Some(index),
+                Err(_) => {
+                    relationship_problem(
+                        preserve_compatibility,
+                        &mut result.diagnostics,
+                        Some(index),
+                        format!("{document_part:?} Tbkd.itxbxs is negative"),
+                    )?;
+                    None
                 }
             };
             result.breaks.push(DocTextboxBreakRef {
@@ -4237,6 +4934,13 @@ fn build_textboxes<'a>(
     if let Some(stories) = stories {
         let story_count = stories.value.stories.len();
         for (index, source) in stories.value.stories.iter().enumerate() {
+            let reusable = index + 1 == story_count || source.reusable_flags != 0;
+            // Reusable FTXBXS entries are allocation placeholders, not live
+            // textboxes. The final entry is always reusable and its text is
+            // explicitly ignored by MS-DOC.
+            if reusable {
+                continue;
+            }
             let text = match make_text_range(
                 text_part,
                 stories.value.positions[index],
@@ -4255,16 +4959,7 @@ fn build_textboxes<'a>(
                     continue;
                 }
             };
-            let reusable = index + 1 == story_count || source.reusable_flags != 0;
-            if reusable && text.local_cp_range.len() != 1 {
-                relationship_problem(
-                    preserve_compatibility,
-                    &mut result.diagnostics,
-                    Some(index),
-                    format!("{document_part:?} reusable FTXBXS range is not one character"),
-                )?;
-            }
-            if !reusable && text.local_cp_range.len() <= 1 {
+            if text.local_cp_range.len() <= 1 {
                 relationship_problem(
                     preserve_compatibility,
                     &mut result.diagnostics,
@@ -4272,8 +4967,7 @@ fn build_textboxes<'a>(
                     format!("{document_part:?} live FTXBXS range has no content"),
                 )?;
             }
-            if !reusable && text.character_at(DocCp(text.local_cp_range.len() - 1)) != Some(0x000d)
-            {
+            if text.character_at(DocCp(text.local_cp_range.len() - 1)) != Some(0x000d) {
                 relationship_problem(
                     preserve_compatibility,
                     &mut result.diagnostics,
@@ -4298,61 +4992,51 @@ fn build_textboxes<'a>(
                     .textbox_link()
                     .map_or(u16::MAX, |link| link.chain_index())
             });
-            if !reusable {
-                if linked_shapes.first().map(|shape| shape.shape.shape_id) != Some(source.shape_id)
-                {
-                    relationship_problem(
-                        preserve_compatibility,
-                        &mut result.diagnostics,
-                        Some(index),
-                        format!("{document_part:?} FTXBXS.lid does not select chain index zero"),
-                    )?;
-                }
-                if let TextboxStoryChain::NonReusable { textbox_count, .. } = source.chain
-                    && usize::try_from(textbox_count).ok() != Some(linked_shapes.len())
-                {
-                    relationship_problem(
-                        preserve_compatibility,
-                        &mut result.diagnostics,
-                        Some(index),
-                        format!("{document_part:?} FTXBXS cTxbx does not match shape chain"),
-                    )?;
-                }
-                for (chain_index, shape) in linked_shapes.iter().enumerate() {
-                    if shape
-                        .textbox_link()
-                        .is_none_or(|link| usize::from(link.chain_index()) != chain_index)
-                    {
-                        relationship_problem(
-                            preserve_compatibility,
-                            &mut result.diagnostics,
-                            Some(index),
-                            format!(
-                                "{document_part:?} OfficeArt textbox chain indexes are not contiguous"
-                            ),
-                        )?;
-                        break;
-                    }
-                    let declared_next = shape.next_shape_id().filter(|value| *value != 0);
-                    let actual_next = linked_shapes
-                        .get(chain_index + 1)
-                        .map(|next| next.shape.shape_id);
-                    if declared_next.is_some() && declared_next != actual_next {
-                        relationship_problem(
-                            preserve_compatibility,
-                            &mut result.diagnostics,
-                            Some(index),
-                            format!("{document_part:?} OfficeArt hspNext leaves its textbox chain"),
-                        )?;
-                    }
-                }
-            } else if source.shape_id != 0 {
+            if linked_shapes.first().map(|shape| shape.shape.shape_id) != Some(source.shape_id) {
                 relationship_problem(
                     preserve_compatibility,
                     &mut result.diagnostics,
                     Some(index),
-                    format!("{document_part:?} reusable FTXBXS.lid is not zero"),
+                    format!("{document_part:?} FTXBXS.lid does not select chain index zero"),
                 )?;
+            }
+            if let TextboxStoryChain::NonReusable { textbox_count, .. } = source.chain
+                && usize::try_from(textbox_count).ok() != Some(linked_shapes.len())
+            {
+                relationship_problem(
+                    preserve_compatibility,
+                    &mut result.diagnostics,
+                    Some(index),
+                    format!("{document_part:?} FTXBXS cTxbx does not match shape chain"),
+                )?;
+            }
+            for (chain_index, shape) in linked_shapes.iter().enumerate() {
+                if shape
+                    .textbox_link()
+                    .is_none_or(|link| usize::from(link.chain_index()) != chain_index)
+                {
+                    relationship_problem(
+                        preserve_compatibility,
+                        &mut result.diagnostics,
+                        Some(index),
+                        format!(
+                            "{document_part:?} OfficeArt textbox chain indexes are not contiguous"
+                        ),
+                    )?;
+                    break;
+                }
+                let declared_next = shape.next_shape_id().filter(|value| *value != 0);
+                let actual_next = linked_shapes
+                    .get(chain_index + 1)
+                    .map(|next| next.shape.shape_id);
+                if declared_next.is_some() && declared_next != actual_next {
+                    relationship_problem(
+                        preserve_compatibility,
+                        &mut result.diagnostics,
+                        Some(index),
+                        format!("{document_part:?} OfficeArt hspNext leaves its textbox chain"),
+                    )?;
+                }
             }
 
             let mut linked_breaks = result
@@ -4379,7 +5063,7 @@ fn build_textboxes<'a>(
                 index,
                 source,
                 text,
-                reusable,
+                reusable: false,
                 shapes: linked_shapes,
                 breaks: linked_breaks,
             });
@@ -4471,6 +5155,36 @@ impl DocFile {
     /// reachable from `DocWordDocumentStream`.
     pub fn content_tree_compatible(&self) -> Result<DocContentTree<'_>> {
         self.content_tree_with_policy(true)
+    }
+
+    /// Resolves a one-based OfficeArt BLIP identifier across both embedded
+    /// BStore payloads and host-delayed BLIPs in the WordDocument stream.
+    /// Raster and uncompressed metafile payloads remain borrowed end to end.
+    pub fn office_art_image_link(
+        &self,
+        blip_identifier: u32,
+    ) -> Result<Option<DocOfficeArtImageLink<'_>>> {
+        let Some(office_art) = self.table.office_art.as_ref() else {
+            return Ok(None);
+        };
+        let Some(link) = office_art.value.image_link(blip_identifier)? else {
+            return Ok(None);
+        };
+        let DocOfficeArtImageLink::Delayed {
+            word_document_offset,
+        } = link
+        else {
+            return Ok(Some(link));
+        };
+        let offset = usize::try_from(word_document_offset)
+            .map_err(|_| Error::Limit("OfficeArt delayed BLIP offset exceeds usize".into()))?;
+        let Some(bytes) = self.word_document.physical_bytes.as_slice().get(offset..) else {
+            return Ok(Some(DocOfficeArtImageLink::Unsupported));
+        };
+        Ok(Some(image_ref_from_record_bytes(bytes)?.map_or(
+            DocOfficeArtImageLink::Unsupported,
+            DocOfficeArtImageLink::Resolved,
+        )))
     }
 
     fn content_tree_with_policy(&self, preserve_compatibility: bool) -> Result<DocContentTree<'_>> {
@@ -8125,12 +8839,91 @@ fn apply_character_toggles(
     Ok(value)
 }
 
-fn effective_character_toggle_from_formatting(
+fn effective_character_toggle_from_ref(
     file: &DocFile,
-    formatting: &DocDirectFormatting,
+    formatting: DocDirectFormattingRef<'_>,
     target: KnownSprm,
 ) -> Result<bool> {
-    let style_index = effective_paragraph_style_index(&formatting.paragraph)?;
+    let direct = direct_character_toggle_operand(formatting, target)?;
+    if matches!(direct, Some(0x00 | 0x01)) {
+        return Ok(direct == Some(0x01));
+    }
+    let style_value = style_character_toggle(file, formatting, target)?;
+    match direct {
+        None | Some(0x80) => Ok(style_value),
+        Some(0x81) => Ok(!style_value),
+        Some(value) => Err(Error::invalid(
+            u64::from(value),
+            format!("{target:?} has an invalid ToggleOperand"),
+        )),
+    }
+}
+
+fn direct_character_toggle_operand(
+    formatting: DocDirectFormattingRef<'_>,
+    target: KnownSprm,
+) -> Result<Option<u8>> {
+    let chpx_operand = formatting
+        .character_run
+        .properties
+        .as_deref()
+        .map(|properties| last_toggle_operand(properties, target, "CHPX character properties"))
+        .transpose()?
+        .flatten();
+    let piece = formatting
+        .descriptor()
+        .property_modifier
+        .property_modifications_ref(&formatting.document_part.file.table.clx.value)?;
+    let piece_operand = match piece {
+        PrmPropertiesRef::Empty => None,
+        PrmPropertiesRef::Simple { sprm, value } if sprm == target => {
+            validate_toggle_operand(value, target, "Pcd.Prm character properties")?;
+            Some(value)
+        }
+        PrmPropertiesRef::Simple { .. } => None,
+        PrmPropertiesRef::Complex(properties) => {
+            last_toggle_operand(properties, target, "Pcd.Prm character properties")?
+        }
+    };
+    Ok(piece_operand.or(chpx_operand))
+}
+
+fn last_toggle_operand(properties: &GrpPrl, target: KnownSprm, source: &str) -> Result<Option<u8>> {
+    let mut last = None;
+    for property in &properties.properties {
+        if property.sprm.kind() != SprmKind::Known(target) {
+            continue;
+        }
+        let SprmOperand::Toggle(value) = property.operand else {
+            return Err(Error::invalid(
+                0,
+                format!("{target:?} in {source} does not have a ToggleOperand"),
+            ));
+        };
+        validate_toggle_operand(value, target, source)?;
+        last = Some(value);
+    }
+    Ok(last)
+}
+
+fn validate_toggle_operand(value: u8, target: KnownSprm, source: &str) -> Result<()> {
+    if matches!(value, 0x00 | 0x01 | 0x80 | 0x81) {
+        Ok(())
+    } else {
+        Err(Error::invalid(
+            u64::from(value),
+            format!("{target:?} in {source} has an invalid ToggleOperand"),
+        ))
+    }
+}
+
+fn style_character_toggle(
+    file: &DocFile,
+    formatting: DocDirectFormattingRef<'_>,
+    target: KnownSprm,
+) -> Result<bool> {
+    let paragraph = formatting.materialize_paragraph()?;
+    let style_index = effective_paragraph_style_index(&paragraph)?;
     let style = file.style_properties(style_index)?;
     if style.style_kind != super::StyleKind::Paragraph {
         return Err(Error::invalid(
@@ -8138,26 +8931,12 @@ fn effective_character_toggle_from_formatting(
             "paragraph formatting references a non-paragraph style",
         ));
     }
-    let style_value = apply_character_toggles(
+    apply_character_toggles(
         &style.character_properties,
         target,
         false,
         false,
         "style character properties",
-    )?;
-    let value = apply_character_toggles(
-        &formatting.character.chpx_properties,
-        target,
-        style_value,
-        style_value,
-        "CHPX character properties",
-    )?;
-    apply_character_toggles(
-        &formatting.character.piece_properties,
-        target,
-        value,
-        style_value,
-        "Pcd.Prm character properties",
     )
 }
 

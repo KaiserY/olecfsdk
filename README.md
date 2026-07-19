@@ -68,6 +68,51 @@ cargo run -p olecfsdk --example edit_xls -- input.xls output.xls
 cargo run -p olecfsdk --example edit_ppt -- input.ppt output.ppt
 ```
 
+## Direct OOXML conversion
+
+The companion `olecfsdk-ooxml` crate converts each typed legacy file root
+directly into the corresponding `ooxmlsdk` package. It does not create a
+format-neutral IR, text projection, DOM, or temporary XML tree.
+
+```toml
+[dependencies]
+olecfsdk = "0.1.0"
+olecfsdk-ooxml = "0.1.0"
+```
+
+```rust,no_run
+use std::{fs::File, io::BufWriter};
+use olecfsdk::doc::DocFile;
+use olecfsdk_ooxml::{
+    ConversionOptions, LossPolicy, convert_doc_with_options,
+};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let source = DocFile::open("input.doc")?;
+    let converted = convert_doc_with_options(
+        &source,
+        ConversionOptions { unsupported: LossPolicy::Report },
+    )?;
+    for issue in converted.report.issues() {
+        eprintln!("{:?} at {:?}", issue.code, issue.source);
+    }
+    let mut target = BufWriter::new(File::create("output.docx")?);
+    converted.document.save(&mut target)?;
+    Ok(())
+}
+```
+
+`convert_doc`, `convert_xls`, and `convert_ppt` use the default strict policy
+and stop at the first known semantic loss. The `*_with_options` variants only
+continue when the caller explicitly selects `LossPolicy::Report`; every such
+loss remains a typed source-located issue in the returned report.
+
+The DOC lane currently maps paragraph/run/style/section/table structure,
+complex fields, inline images, standard bookmarks, footnotes, endnotes, and
+comments directly into typed WordprocessingML nodes and parts. Bookmark and
+comment ranges retain paired identities and exact CP boundaries without a
+text-projection or DOM intermediate.
+
 ## Strict and compatible operation
 
 Ordinary open and save methods are strict. A producer deviation must be opened
@@ -117,6 +162,7 @@ with `into_owned` is the explicit full-feature fallback.
 | DOC | Word 97-2003 typed file root, document parts, text/formatting, paragraphs, sections, tables, fields, drawings and managed-stream rebuild |
 | XLS | BIFF8 typed workbook roots, sheets, cells, formulas/cached values, formatting, comments, hyperlinks, drawings and pointer relayout |
 | PPT | PowerPoint 97-2003 typed history/live views, slides, masters, notes, shapes, placeholders, text, pictures and persist relayout |
+| OOXML conversion | Direct typed DOC→DOCX (fields, bookmarks, notes/comments, textboxes, floating shapes/pictures), XLS→XLSX (comments and worksheet pictures), and PPT→PPTX (master/layout/notes, tables/media, legacy palette themes and slide transitions); shared OLEPS core properties, explicit loss policy, and source-located diagnostics |
 | Shared | OLE property sets, VBA, OfficeArt, Forms/ActiveX and host relationships |
 | Compatibility | Explicit diagnostics and preserving save policy; no silent downgrade of known structures |
 
