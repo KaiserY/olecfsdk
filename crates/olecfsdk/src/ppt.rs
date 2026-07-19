@@ -3112,6 +3112,14 @@ impl PowerPointDocument {
         self.records.to_bytes()
     }
 
+    pub(crate) fn serialized_len(&self) -> Result<usize> {
+        self.records.serialized_len_from_layout()
+    }
+
+    pub(crate) fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+        self.records.write_to(writer)
+    }
+
     /// Aggregates the OfficeArt Dgg/Dg atoms reachable from the current PPT
     /// live presentation into one document-level drawing graph.
     pub fn live_drawing_graph(
@@ -3498,7 +3506,7 @@ impl PowerPointDocument {
         Ok(appended_ids)
     }
 
-    fn relayout_in_place(
+    pub(crate) fn relayout_in_place(
         &mut self,
         current_user: &mut CurrentUserAtom,
         preserve_compatibility: bool,
@@ -4897,6 +4905,22 @@ impl PicturesStream {
         }
     }
 
+    pub(crate) fn serialized_len(&self) -> Result<usize> {
+        match self {
+            Self::Complete(stream) => stream.serialized_len(),
+            Self::Compatibility { stream, .. } => stream.serialized_len(),
+            Self::Partial(stream) => Ok(stream.available_len()),
+        }
+    }
+
+    pub(crate) fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+        match self {
+            Self::Complete(stream) => stream.write_to(writer),
+            Self::Compatibility { stream, .. } => stream.write_to(writer),
+            Self::Partial(stream) => writer.write_all(&stream.to_bytes()?).map_err(Error::from),
+        }
+    }
+
     pub fn relayout(&mut self) -> Result<OfficeArtBStoreDelayLayout> {
         match self {
             Self::Complete(stream) => stream.relayout(),
@@ -5513,12 +5537,29 @@ impl PptRecordSequence {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        for record in &self.records {
-            record.write(&mut bytes)?;
-        }
-        bytes.extend_from_slice(&self.trailing_header_bytes);
+        let mut bytes = Vec::with_capacity(self.serialized_len_from_layout()?);
+        self.write_to(&mut bytes)?;
         Ok(bytes)
+    }
+
+    fn write_to<W: Write + ?Sized>(&self, writer: &mut W) -> Result<()> {
+        for record in &self.records {
+            record.write_to(writer)?;
+        }
+        writer.write_all(&self.trailing_header_bytes)?;
+        Ok(())
+    }
+
+    pub(crate) fn serialized_len_from_layout(&self) -> Result<usize> {
+        let mut length = self.trailing_header_bytes.len();
+        for record in &self.records {
+            let body_len = record.body_len_from_layout()?;
+            length = length
+                .checked_add(HEADER_LEN)
+                .and_then(|length| length.checked_add(body_len))
+                .ok_or_else(|| Error::Limit("PPT record sequence length overflow".into()))?;
+        }
+        Ok(length)
     }
 
     fn relayout(
@@ -5531,9 +5572,9 @@ impl PptRecordSequence {
         for record in &mut self.records {
             let old_offset = record.offset;
             record.relayout_children(offset, preserve_compatibility)?;
-            let body = record.body_bytes()?;
+            let body_len = record.body_len_for_relayout()?;
             if !matches!(record.data, PptRecordData::Truncated(_)) {
-                record.header.declared_length = u32::try_from(body.len())
+                record.header.declared_length = u32::try_from(body_len)
                     .map_err(|_| Error::Limit("PPT record body exceeds u32".into()))?;
             }
             record.offset = offset;
@@ -5548,7 +5589,7 @@ impl PptRecordSequence {
             }
             offset = offset
                 .checked_add(HEADER_LEN as u64)
-                .and_then(|value| value.checked_add(body.len() as u64))
+                .and_then(|value| value.checked_add(body_len as u64))
                 .ok_or_else(|| Error::Limit("PPT record sequence length overflow".into()))?;
         }
         offset
@@ -5709,19 +5750,88 @@ impl PptRecordHeader {
     }
 
     fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
-        bytes.extend_from_slice(&write_fixed(&PptRecordHeaderWire {
-            version_instance: PptRecordVersionInstance {
-                version: self.version,
-                instance: self.instance,
-            },
-            record_type: self.record_type,
-            declared_length: self.declared_length,
-        })?);
+        self.write_to(bytes)
+    }
+
+    fn write_to<W: Write + ?Sized>(&self, writer: &mut W) -> Result<()> {
+        if self.version > 0x0f {
+            return Err(Error::invalid(0, "PPT record version exceeds four bits"));
+        }
+        if self.instance > 0x0fff {
+            return Err(Error::invalid(0, "PPT record instance exceeds twelve bits"));
+        }
+        let version_instance = u16::from(self.version) | (self.instance << 4);
+        writer.write_all(&version_instance.to_le_bytes())?;
+        writer.write_all(&self.record_type.to_le_bytes())?;
+        writer.write_all(&self.declared_length.to_le_bytes())?;
         Ok(())
     }
 }
 
 impl PptRecord {
+    fn direct_body_sequence(&self) -> Result<Option<&PptRecordSequence>> {
+        match &self.data {
+            PptRecordData::Container(children) => {
+                if self.header.version != 0x0f {
+                    return Err(Error::invalid(0, "PPT container lacks recVer 0xF"));
+                }
+                Ok(Some(children))
+            }
+            PptRecordData::ProgBinaryTag(value) => {
+                if self.header.record_type != PROG_BINARY_TAG || self.header.version != 0x0f {
+                    return Err(Error::invalid(0, "ProgBinaryTag header changed"));
+                }
+                Ok(Some(&value.records))
+            }
+            PptRecordData::ProgTags(children) => {
+                if self.header.record_type != PROG_TAGS {
+                    return Err(Error::invalid(0, "ProgTags header changed"));
+                }
+                Ok(Some(children))
+            }
+            PptRecordData::BinaryTagData(BinaryTagData::Records(children)) => {
+                if self.header.record_type != BINARY_TAG_DATA_BLOB || self.header.version == 0x0f {
+                    return Err(Error::invalid(0, "BinaryTagDataBlob header changed"));
+                }
+                Ok(Some(children))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn body_len_from_layout(&self) -> Result<usize> {
+        if let Some(children) = self.direct_body_sequence()? {
+            children.serialized_len_from_layout()
+        } else if let PptRecordData::Truncated(bytes) = &self.data {
+            Ok(bytes.len())
+        } else {
+            usize::try_from(self.header.declared_length)
+                .map_err(|_| Error::Limit("PPT record length exceeds usize".into()))
+        }
+    }
+
+    fn body_len_for_relayout(&self) -> Result<usize> {
+        if let Some(children) = self.direct_body_sequence()? {
+            children.serialized_len_from_layout()
+        } else {
+            Ok(self.body_bytes()?.len())
+        }
+    }
+
+    fn validate_body_len(&self, body_len: usize) -> Result<()> {
+        let declared = usize::try_from(self.header.declared_length)
+            .map_err(|_| Error::Limit("PPT record length exceeds usize".into()))?;
+        match self.data {
+            PptRecordData::Truncated(_) if body_len >= declared => Err(Error::invalid(
+                0,
+                "truncated PPT record is no longer shorter than declared",
+            )),
+            PptRecordData::Truncated(_) => Ok(()),
+            _ if body_len != declared => Err(Error::invalid(0, "PPT record body length mismatch")),
+            _ => Ok(()),
+        }
+    }
+
     fn relayout_children(&mut self, body_offset: u64, preserve_compatibility: bool) -> Result<()> {
         let body_offset = body_offset
             .checked_add(HEADER_LEN as u64)
@@ -5782,6 +5892,127 @@ impl PptRecord {
             _ => {}
         }
         Ok(())
+    }
+
+    fn borrowed_body_bytes(&self) -> Result<Option<&[u8]>> {
+        macro_rules! checked {
+            ($condition:expr, $message:literal, $bytes:expr) => {{
+                if !$condition {
+                    return Err(Error::invalid(0, $message));
+                }
+                Some($bytes)
+            }};
+        }
+        Ok(match &self.data {
+            PptRecordData::BinaryTagData(BinaryTagData::Opaque(bytes)) => checked!(
+                self.header.record_type == BINARY_TAG_DATA_BLOB && self.header.version != 0x0f,
+                "BinaryTagDataBlob header changed",
+                bytes.as_slice()
+            ),
+            PptRecordData::MalformedStyleTextProp(value) => checked!(
+                self.header.record_type == STYLE_TEXT_PROP_ATOM,
+                "malformed StyleTextPropAtom header changed",
+                value.body.as_slice()
+            ),
+            PptRecordData::UnresolvedStyleTextProp(bytes) => checked!(
+                self.header.record_type == STYLE_TEXT_PROP_ATOM,
+                "unresolved StyleTextPropAtom header changed",
+                bytes.as_slice()
+            ),
+            PptRecordData::MalformedTextMasterStyle(bytes) => checked!(
+                self.header.record_type == TEXT_MASTER_STYLE_ATOM,
+                "malformed TextMasterStyleAtom header changed",
+                bytes.as_slice()
+            ),
+            PptRecordData::MalformedTextRuler(bytes) => checked!(
+                matches!(
+                    self.header.record_type,
+                    TEXT_RULER_ATOM | DEFAULT_RULER_ATOM
+                ),
+                "malformed TextRulerAtom header changed",
+                bytes.as_slice()
+            ),
+            PptRecordData::MalformedTextSpecialInfo(bytes) => checked!(
+                self.header.record_type == TEXT_SPECIAL_INFO_ATOM,
+                "malformed TextSpecialInfoAtom header changed",
+                bytes.as_slice()
+            ),
+            PptRecordData::MalformedStyleTextProp9(bytes) => checked!(
+                self.header.record_type == STYLE_TEXT_PROP9_ATOM,
+                "malformed StyleTextProp9Atom header changed",
+                bytes.as_slice()
+            ),
+            PptRecordData::FontEmbedDataBlob(bytes) => checked!(
+                self.header.record_type == FONT_EMBED_DATA_BLOB,
+                "FontEmbedDataBlob header changed",
+                bytes.as_slice()
+            ),
+            PptRecordData::EnvelopeData9(bytes) => checked!(
+                self.header.record_type == ENVELOPE_DATA9_ATOM,
+                "EnvelopeData9Atom header changed",
+                bytes.as_slice()
+            ),
+            PptRecordData::MalformedTimeVariant(bytes) => checked!(
+                self.header.record_type == TIME_VARIANT_ATOM,
+                "malformed TimeVariant header changed",
+                bytes.as_slice()
+            ),
+            PptRecordData::MalformedBlipEntity9 { body, .. } => checked!(
+                self.header.record_type == BLIP_ENTITY9_ATOM,
+                "malformed BlipEntity9Atom header changed",
+                body.as_slice()
+            ),
+            PptRecordData::RoundTripAnimation12(value) => checked!(
+                self.header.record_type == ROUND_TRIP_ANIMATION_12_ATOM,
+                "RoundTripAnimationAtom header changed",
+                value.package.physical_bytes.as_slice()
+            ),
+            PptRecordData::SoundDataBlob(bytes) => checked!(
+                self.header.record_type == SOUND_DATA_BLOB,
+                "SoundDataBlob header changed",
+                bytes.as_slice()
+            ),
+            PptRecordData::RoundTripContentMasterInfo12(value) => checked!(
+                self.header.record_type == ROUND_TRIP_CONTENT_MASTER_INFO_12_ATOM
+                    && self.header.instance == value.layout_index,
+                "RoundTripContentMasterInfo12Atom header changed",
+                value.package.physical_bytes.as_slice()
+            ),
+            PptRecordData::RoundTripColorMapping12(value) => checked!(
+                self.header.record_type == ROUND_TRIP_COLOR_MAPPING_12_ATOM,
+                "RoundTripColorMapping12Atom header changed",
+                value.physical_xml.as_slice()
+            ),
+            PptRecordData::RoundTripTheme12(value) => checked!(
+                self.header.record_type == ROUND_TRIP_THEME_12_ATOM && self.header.instance == 0,
+                "RoundTripTheme12Atom header changed",
+                value.package.physical_bytes.as_slice()
+            ),
+            PptRecordData::RoundTripStyle12(value) => checked!(
+                self.header.record_type == value.record_type
+                    && matches!(
+                        value.record_type,
+                        ROUND_TRIP_OART_TEXT_STYLES_12_ATOM
+                            | ROUND_TRIP_NOTES_MASTER_TEXT_STYLES_12_ATOM
+                            | ROUND_TRIP_CUSTOM_TABLE_STYLES_12_ATOM
+                    ),
+                "RoundTripStyle12Atom header changed",
+                value.package.physical_bytes.as_slice()
+            ),
+            PptRecordData::Unknown(value) => checked!(
+                self.header.record_type == value.record_type,
+                "unknown record header changed",
+                value.body.as_slice()
+            ),
+            PptRecordData::MalformedSpecRecord(value) => checked!(
+                self.header.record_type == value.record_type
+                    && is_ms_ppt_record_type(value.record_type),
+                "malformed MS-PPT record header changed",
+                value.body.as_slice()
+            ),
+            PptRecordData::Truncated(bytes) => Some(bytes.as_slice()),
+            _ => None,
+        })
     }
 
     fn body_bytes(&self) -> Result<Vec<u8>> {
@@ -6735,11 +6966,7 @@ impl PptRecord {
                         "embedded OfficeArt record header changed",
                     ));
                 }
-                let encoded = OfficeArtStream {
-                    records: vec![(**value).clone()],
-                }
-                .to_bytes()?;
-                encoded[HEADER_LEN..].to_vec()
+                value.payload_bytes()?
             }
             PptRecordData::PersistDirectory(value) => {
                 if !matches!(
@@ -6773,25 +7000,182 @@ impl PptRecord {
         Ok(body)
     }
 
-    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
-        let body = self.body_bytes()?;
-        let declared = usize::try_from(self.header.declared_length)
-            .map_err(|_| Error::Limit("PPT record length exceeds usize".into()))?;
-        match self.data {
-            PptRecordData::Truncated(_) if body.len() >= declared => {
-                return Err(Error::invalid(
-                    0,
-                    "truncated PPT record is no longer shorter than declared",
-                ));
+    fn write_to<W: Write + ?Sized>(&self, writer: &mut W) -> Result<()> {
+        if let Some(children) = self.direct_body_sequence()? {
+            let body_len = children.serialized_len_from_layout()?;
+            self.validate_body_len(body_len)?;
+            self.header.write_to(writer)?;
+            return children.write_to(writer);
+        }
+        if let Some(body) = self.borrowed_body_bytes()? {
+            self.validate_body_len(body.len())?;
+            self.header.write_to(writer)?;
+            writer.write_all(body)?;
+            return Ok(());
+        }
+        macro_rules! write_fixed_body {
+            ($condition:expr, $message:literal, $value:expr) => {{
+                if !$condition {
+                    return Err(Error::invalid(0, $message));
+                }
+                let body_len = usize::try_from($value.sdk_size())
+                    .map_err(|_| Error::Limit("PPT fixed body length exceeds usize".into()))?;
+                self.validate_body_len(body_len)?;
+                self.header.write_to(writer)?;
+                let mut sdk_writer = Writer::new(&mut *writer);
+                $value.write_to(&mut sdk_writer)?;
+                return Ok(());
+            }};
+        }
+        match &self.data {
+            PptRecordData::UserEdit(value) => write_fixed_body!(
+                self.header.record_type == USER_EDIT_ATOM && self.header.version != 0x0f,
+                "UserEditAtom record header changed",
+                value
+            ),
+            PptRecordData::Document(value) => write_fixed_body!(
+                self.header.record_type == DOCUMENT_ATOM && self.header.version != 0x0f,
+                "DocumentAtom record header changed",
+                value
+            ),
+            PptRecordData::Slide(value) => write_fixed_body!(
+                self.header.record_type == SLIDE_ATOM && self.header.version != 0x0f,
+                "SlideAtom record header changed",
+                value
+            ),
+            PptRecordData::Notes(value) => write_fixed_body!(
+                self.header.record_type == NOTES_ATOM && self.header.version != 0x0f,
+                "NotesAtom record header changed",
+                value
+            ),
+            PptRecordData::OutlineTextRef(value) => write_fixed_body!(
+                self.header.record_type == OUTLINE_TEXT_REF_ATOM,
+                "OutlineTextRefAtom header changed",
+                value
+            ),
+            PptRecordData::TextHeader(value) => write_fixed_body!(
+                self.header.record_type == TEXT_HEADER_ATOM,
+                "TextHeaderAtom header changed",
+                value
+            ),
+            PptRecordData::SlidePersist(value) => write_fixed_body!(
+                self.header.record_type == SLIDE_PERSIST_ATOM,
+                "SlidePersistAtom header changed",
+                value
+            ),
+            PptRecordData::ColorScheme(value) => write_fixed_body!(
+                self.header.record_type == COLOR_SCHEME_ATOM,
+                "ColorSchemeAtom header changed",
+                value
+            ),
+            PptRecordData::ExternalObjectRef(value) => write_fixed_body!(
+                self.header.record_type == EXTERNAL_OBJECT_REF_ATOM,
+                "ExternalObjectRefAtom header changed",
+                value
+            ),
+            PptRecordData::Placeholder(value) => write_fixed_body!(
+                self.header.record_type == PLACEHOLDER_ATOM,
+                "PlaceholderAtom header changed",
+                value
+            ),
+            PptRecordData::HeadersFooters(value) => write_fixed_body!(
+                self.header.record_type == HEADERS_FOOTERS_ATOM,
+                "HeadersFootersAtom header changed",
+                value
+            ),
+            PptRecordData::TextChars(value) | PptRecordData::CString(value) => {
+                let expected_type = if matches!(self.data, PptRecordData::TextChars(_)) {
+                    TEXT_CHARS_ATOM
+                } else {
+                    C_STRING_ATOM
+                };
+                if self.header.record_type != expected_type {
+                    return Err(Error::invalid(0, "UTF-16 PPT string header changed"));
+                }
+                let body_len = value
+                    .encode_utf16()
+                    .count()
+                    .checked_mul(2)
+                    .ok_or_else(|| Error::Limit("PPT UTF-16 string length overflow".into()))?;
+                self.validate_body_len(body_len)?;
+                self.header.write_to(writer)?;
+                for code_unit in value.encode_utf16() {
+                    writer.write_all(&code_unit.to_le_bytes())?;
+                }
+                return Ok(());
             }
-            PptRecordData::Truncated(_) => {}
-            _ if body.len() != declared => {
-                return Err(Error::invalid(0, "PPT record body length mismatch"));
+            PptRecordData::CompatibilityTextChars(values)
+            | PptRecordData::CompatibilityCString(values) => {
+                let expected_type = if matches!(self.data, PptRecordData::CompatibilityTextChars(_))
+                {
+                    TEXT_CHARS_ATOM
+                } else {
+                    C_STRING_ATOM
+                };
+                if self.header.record_type != expected_type {
+                    return Err(Error::invalid(
+                        0,
+                        "compatible UTF-16 PPT string header changed",
+                    ));
+                }
+                let body_len = values
+                    .len()
+                    .checked_mul(2)
+                    .ok_or_else(|| Error::Limit("PPT UTF-16 string length overflow".into()))?;
+                self.validate_body_len(body_len)?;
+                self.header.write_to(writer)?;
+                for code_unit in values {
+                    writer.write_all(&code_unit.to_le_bytes())?;
+                }
+                return Ok(());
+            }
+            PptRecordData::TextBytes(value) => {
+                if self.header.record_type != TEXT_BYTES_ATOM {
+                    return Err(Error::invalid(0, "TextBytesAtom header changed"));
+                }
+                let body_len = value.chars().count();
+                self.validate_body_len(body_len)?;
+                self.header.write_to(writer)?;
+                for character in value.chars() {
+                    let byte = u8::try_from(u32::from(character)).map_err(|_| {
+                        Error::invalid(
+                            u64::from(u32::from(character)),
+                            "TextBytesAtom String contains a character above U+00FF",
+                        )
+                    })?;
+                    writer.write_all(&[byte])?;
+                }
+                return Ok(());
+            }
+            PptRecordData::NamedShowSlides(values) => {
+                if self.header.record_type != NAMED_SHOW_SLIDES_ATOM {
+                    return Err(Error::invalid(0, "NamedShowSlidesAtom header changed"));
+                }
+                let body_len = values
+                    .len()
+                    .checked_mul(4)
+                    .ok_or_else(|| Error::Limit("PPT slide identifier array overflow".into()))?;
+                self.validate_body_len(body_len)?;
+                self.header.write_to(writer)?;
+                for value in values {
+                    writer.write_all(&value.to_le_bytes())?;
+                }
+                return Ok(());
+            }
+            PptRecordData::EndDocument => {
+                if self.header.record_type != END_DOCUMENT_ATOM {
+                    return Err(Error::invalid(0, "EndDocumentAtom header changed"));
+                }
+                self.validate_body_len(0)?;
+                self.header.write_to(writer)?;
+                return Ok(());
             }
             _ => {}
         }
-        self.header.write(bytes)?;
-        bytes.extend_from_slice(&body);
+        let body = self.body_bytes()?;
+        self.validate_body_len(body.len())?;
+        self.header.write_to(writer)?;
+        writer.write_all(&body)?;
         Ok(())
     }
 }

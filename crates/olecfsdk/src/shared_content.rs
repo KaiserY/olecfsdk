@@ -4,7 +4,10 @@
 //! and PPT trees. Each located node retains its CFB identity, while its
 //! payload is the sole write authority for that managed stream.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use crate::{
     Error, ParseDiagnostic, ParseDiagnosticCode, ParseOptions, ParseOutcome, Result, SaveOptions,
@@ -126,8 +129,8 @@ pub struct OfficeFormsMutation {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OfficeSharedContent {
-    property_set_streams: Vec<LocatedPropertySetStream>,
-    vba_project: Option<OfficeVbaProject>,
+    property_set_streams: Arc<Vec<LocatedPropertySetStream>>,
+    vba_project: Option<Arc<OfficeVbaProject>>,
 }
 
 impl OfficeSharedContent {
@@ -204,8 +207,8 @@ impl OfficeSharedContent {
         let vba_project = parse_host_vba_project(compound, options, host, &mut diagnostics)?;
         Ok(ParseOutcome::new(
             Self {
-                property_set_streams,
-                vba_project,
+                property_set_streams: Arc::new(property_set_streams),
+                vba_project: vba_project.map(Arc::new),
             },
             diagnostics,
         ))
@@ -216,7 +219,7 @@ impl OfficeSharedContent {
     }
 
     pub fn vba_project(&self) -> Option<&OfficeVbaProject> {
-        self.vba_project.as_ref()
+        self.vba_project.as_deref()
     }
 
     /// Replaces a host VBA module source and invalidates every derived cache
@@ -230,6 +233,7 @@ impl OfficeSharedContent {
         let project = candidate
             .vba_project
             .as_mut()
+            .map(Arc::make_mut)
             .ok_or_else(|| Error::invalid(0, "Office file has no host-owned VBA project"))?;
         let OfficeVbaProject::Parsed(project) = project else {
             return Err(Error::invalid(
@@ -258,6 +262,7 @@ impl OfficeSharedContent {
         let project = candidate
             .vba_project
             .as_mut()
+            .map(Arc::make_mut)
             .ok_or_else(|| Error::invalid(0, "Office file has no host-owned VBA project"))?;
         let OfficeVbaProject::Parsed(project) = project else {
             return Err(Error::invalid(
@@ -287,8 +292,7 @@ impl OfficeSharedContent {
         kind: OfficePropertySetKind,
         edit: impl FnOnce(&mut PropertySetStream) -> Result<T>,
     ) -> Result<T> {
-        let node = self
-            .property_set_streams
+        let node = Arc::make_mut(&mut self.property_set_streams)
             .iter_mut()
             .find(|node| node.kind == kind)
             .ok_or_else(|| Error::invalid(0, format!("{kind:?} property-set stream is missing")))?;
@@ -312,8 +316,8 @@ impl OfficeSharedContent {
         value: PropertySetStream,
     ) -> Result<Option<PropertySetStream>> {
         let validated = PropertySetStream::from_bytes(&value.to_bytes()?)?;
-        if let Some(node) = self
-            .property_set_streams
+        let property_set_streams = Arc::make_mut(&mut self.property_set_streams);
+        if let Some(node) = property_set_streams
             .iter_mut()
             .find(|node| node.kind == kind)
         {
@@ -324,7 +328,7 @@ impl OfficeSharedContent {
                 OfficePropertySetData::Compatibility { .. } => Ok(None),
             };
         }
-        self.property_set_streams.push(LocatedPropertySetStream {
+        property_set_streams.push(LocatedPropertySetStream {
             path: PathBuf::from(kind.canonical_path()),
             kind,
             data: OfficePropertySetData::Parsed(validated),
@@ -340,7 +344,7 @@ impl OfficeSharedContent {
             .property_set_streams
             .iter()
             .position(|node| node.kind == kind)?;
-        Some(self.property_set_streams.remove(index))
+        Some(Arc::make_mut(&mut self.property_set_streams).remove(index))
     }
 
     /// Replaces all root OLEPS streams from this tree as one transaction.
@@ -373,7 +377,7 @@ impl OfficeSharedContent {
                 candidate.remove_stream(path)?;
             }
         }
-        for node in &self.property_set_streams {
+        for node in self.property_set_streams.iter() {
             let bytes = match &node.data {
                 OfficePropertySetData::Parsed(value) => value.to_bytes()?,
                 OfficePropertySetData::Compatibility { .. }
@@ -391,7 +395,7 @@ impl OfficeSharedContent {
             };
             candidate.upsert_stream(&node.path, bytes)?;
         }
-        match &self.vba_project {
+        match self.vba_project.as_deref() {
             Some(OfficeVbaProject::Parsed(project)) => {
                 project.write_if_modified(&mut candidate)?;
             }
@@ -437,8 +441,7 @@ impl OfficeSharedContent {
     }
 
     fn remove_oleps_vba_signatures(&mut self) -> Result<usize> {
-        let Some(node) = self
-            .property_set_streams
+        let Some(node) = Arc::make_mut(&mut self.property_set_streams)
             .iter_mut()
             .find(|node| node.kind == OfficePropertySetKind::DocumentSummaryInformation)
         else {
@@ -579,12 +582,28 @@ mod tests {
             shared.property_set_streams()[0].path(),
             Path::new(SUMMARY_INFORMATION_STREAM)
         );
+        let original = shared.clone();
+        assert!(Arc::ptr_eq(
+            &shared.property_set_streams,
+            &original.property_set_streams,
+        ));
         shared
             .edit_property_set(OfficePropertySetKind::SummaryInformation, |stream| {
                 stream.system_identifier = 7;
                 Ok(())
             })
             .unwrap();
+        assert!(!Arc::ptr_eq(
+            &shared.property_set_streams,
+            &original.property_set_streams,
+        ));
+        assert_ne!(
+            original
+                .property_set(OfficePropertySetKind::SummaryInformation)
+                .unwrap()
+                .system_identifier,
+            7,
+        );
         shared
             .write_to_compound_file(&mut compound, SaveOptions::default())
             .unwrap();

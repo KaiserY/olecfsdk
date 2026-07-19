@@ -25,13 +25,15 @@ pub use file::{
 };
 
 pub use formula::{
-    BiffConstant, FormulaArray, FormulaMemExtra, FormulaOperator, FormulaRange, FormulaToken,
+    BiffConstant, FormulaArray, FormulaElfExtra, FormulaElfExtraLocation, FormulaElfLocation,
+    FormulaMemExtra, FormulaNaturalLanguageToken, FormulaOperator, FormulaRange, FormulaToken,
     FormulaTokenData, FormulaTokenStream,
 };
 
 pub use crate::shared::{FactoidType, PbString, PbStringCharacters, PropertyBagStore};
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     io::{Cursor, Read, Seek, Write},
 };
@@ -24859,14 +24861,115 @@ struct BiffStreamLayout {
     physical_record_offsets: BTreeMap<u32, Option<(u32, u16)>>,
 }
 
+struct BiffWriteRecord<'a> {
+    old_offset: u32,
+    new_offset: u32,
+    data: Cow<'a, BiffRecordData>,
+}
+
+struct BiffWritePlan<'a> {
+    records: Vec<BiffWriteRecord<'a>>,
+}
+
+enum BiffStreamWriteRecords<'a> {
+    Current(&'a BiffStream),
+    Overlay(BiffWritePlan<'a>),
+}
+
+pub(crate) struct BiffStreamWritePlan<'a> {
+    records: BiffStreamWriteRecords<'a>,
+    trailing_padding: &'a [u8],
+}
+
+struct BiffOutput<'a, W: Write + ?Sized> {
+    writer: &'a mut W,
+    len: usize,
+}
+
+impl<'a, W: Write + ?Sized> BiffOutput<'a, W> {
+    fn new(writer: &'a mut W) -> Self {
+        Self { writer, len: 0 }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn extend_from_slice(&mut self, bytes: &[u8]) -> Result<()> {
+        self.writer.write_all(bytes)?;
+        self.len = self
+            .len
+            .checked_add(bytes.len())
+            .ok_or_else(|| Error::Limit("BIFF output length overflow".into()))?;
+        Ok(())
+    }
+}
+
+trait BiffRecordSource {
+    fn record_count(&self) -> usize;
+    fn record(&self, index: usize) -> (u32, &BiffRecordData);
+}
+
+impl BiffRecordSource for BiffStream {
+    fn record_count(&self) -> usize {
+        self.records.len()
+    }
+
+    fn record(&self, index: usize) -> (u32, &BiffRecordData) {
+        let record = &self.records[index];
+        (record.offset, &record.data)
+    }
+}
+
+impl BiffRecordSource for BiffWritePlan<'_> {
+    fn record_count(&self) -> usize {
+        self.records.len()
+    }
+
+    fn record(&self, index: usize) -> (u32, &BiffRecordData) {
+        let record = &self.records[index];
+        (record.new_offset, record.data.as_ref())
+    }
+}
+
+impl BiffRecordSource for BiffStreamWritePlan<'_> {
+    fn record_count(&self) -> usize {
+        match &self.records {
+            BiffStreamWriteRecords::Current(stream) => stream.record_count(),
+            BiffStreamWriteRecords::Overlay(plan) => plan.record_count(),
+        }
+    }
+
+    fn record(&self, index: usize) -> (u32, &BiffRecordData) {
+        match &self.records {
+            BiffStreamWriteRecords::Current(stream) => stream.record(index),
+            BiffStreamWriteRecords::Overlay(plan) => plan.record(index),
+        }
+    }
+}
+
 impl BiffStreamLayout {
     fn new(records: &[BiffRecord]) -> Result<Self> {
+        Self::from_record_data(records.iter().map(|record| (record.offset, &record.data)))
+    }
+
+    fn from_write_plan(records: &[BiffWriteRecord<'_>]) -> Result<Self> {
+        Self::from_record_data(
+            records
+                .iter()
+                .map(|record| (record.old_offset, record.data.as_ref())),
+        )
+    }
+
+    fn from_record_data<'a>(
+        records: impl ExactSizeIterator<Item = (u32, &'a BiffRecordData)>,
+    ) -> Result<Self> {
         let mut entries = Vec::with_capacity(records.len());
         let mut record_offsets = BTreeMap::new();
         let mut physical_record_offsets = BTreeMap::new();
         let mut new_offset = 0u32;
-        for record in records {
-            let encoded = record.data.encode_physical()?;
+        for (record_offset, data) in records {
+            let encoded = data.encode_physical()?;
             let mut relative_offset = 0u32;
             for physical in &encoded {
                 if physical.payload.len() > MAX_BIFF_RECORD_DATA {
@@ -24875,8 +24978,7 @@ impl BiffStreamLayout {
                         "BIFF record data exceeds 8224 bytes",
                     ));
                 }
-                let old_physical_offset = record
-                    .offset
+                let old_physical_offset = record_offset
                     .checked_add(relative_offset)
                     .ok_or_else(|| Error::Limit("BIFF physical record offset overflow".into()))?;
                 let new_physical_offset = new_offset
@@ -24895,10 +24997,10 @@ impl BiffStreamLayout {
                     .checked_add(physical_size)
                     .ok_or_else(|| Error::Limit("BIFF logical record size overflow".into()))?;
             }
-            let kind = BiffLayoutRecordKind::from_data(&record.data);
-            insert_unique_offset(&mut record_offsets, record.offset, (new_offset, kind));
+            let kind = BiffLayoutRecordKind::from_data(data);
+            insert_unique_offset(&mut record_offsets, record_offset, (new_offset, kind));
             entries.push(BiffRecordLayout {
-                old_offset: record.offset,
+                old_offset: record_offset,
                 new_offset,
                 encoded_size: relative_offset,
                 kind,
@@ -24958,6 +25060,269 @@ impl BiffStreamLayout {
             ));
         }
         Ok(entry)
+    }
+}
+
+impl<'a> BiffWritePlan<'a> {
+    fn new(stream: &'a BiffStream, preserve_invalid_references: bool) -> Result<Self> {
+        let mut records = stream
+            .records
+            .iter()
+            .map(|record| BiffWriteRecord {
+                old_offset: record.offset,
+                new_offset: record.offset,
+                data: Cow::Borrowed(&record.data),
+            })
+            .collect::<Vec<_>>();
+
+        for record in &mut records {
+            let drawing_needs_relayout = match record.data.as_ref() {
+                BiffRecordData::MsoDrawingGroup(value) | BiffRecordData::MsoDrawing(value) => {
+                    matches!(&value.data, MsoDrawingData::Complete(value) if value.to_bytes().is_err())
+                }
+                _ => false,
+            };
+            if drawing_needs_relayout {
+                match record.data.to_mut() {
+                    BiffRecordData::MsoDrawingGroup(value) | BiffRecordData::MsoDrawing(value) => {
+                        let MsoDrawingData::Complete(stream) = &mut value.data else {
+                            unreachable!("drawing relayout was selected from a complete stream")
+                        };
+                        stream.relayout()?;
+                    }
+                    _ => unreachable!("drawing relayout was selected from a drawing record"),
+                }
+            }
+
+            let requires_normalization = matches!(
+                record.data.as_ref(),
+                BiffRecordData::SxTh(_)
+                    | BiffRecordData::SxvdTEx(_)
+                    | BiffRecordData::BigName(_)
+                    | BiffRecordData::RrdChgCell(_)
+            );
+            if requires_normalization {
+                match record.data.to_mut() {
+                    BiffRecordData::SxTh(value) => value.normalize_for_write()?,
+                    BiffRecordData::SxvdTEx(value) => value.normalize_for_write()?,
+                    BiffRecordData::BigName(value) => value.normalize_for_write()?,
+                    BiffRecordData::RrdChgCell(value) => value.normalize_for_write()?,
+                    _ => unreachable!("normalization was selected from a normalizable record"),
+                }
+            }
+        }
+
+        let sst_requiring_canonical_layout = records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| match record.data.as_ref() {
+                BiffRecordData::Sst(value) if !value.preserves_physical_layout() => Some(index),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if sst_requiring_canonical_layout.len() > 1 {
+            return Err(Error::invalid(
+                0,
+                "multiple edited SST records cannot share one ExtSST index",
+            ));
+        }
+        let canonical_sst = if let Some(&sst_index) = sst_requiring_canonical_layout.first() {
+            let label_sst_count = records
+                .iter()
+                .filter(|record| matches!(record.data.as_ref(), BiffRecordData::LabelSst(_)))
+                .count();
+            let ext_sst_indices = records
+                .iter()
+                .enumerate()
+                .filter_map(|(index, record)| {
+                    matches!(record.data.as_ref(), BiffRecordData::ExtSst(_)).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            if ext_sst_indices.len() > 1 {
+                return Err(Error::invalid(
+                    0,
+                    "multiple ExtSST records cannot index one edited SST",
+                ));
+            }
+            let ext_sst_index = ext_sst_indices.first().copied();
+            let (unique_count_changed, unique_count) = match records[sst_index].data.as_ref() {
+                BiffRecordData::Sst(value) => (
+                    usize::try_from(value.unique_string_count).ok() != Some(value.strings.len()),
+                    value.strings.len(),
+                ),
+                _ => unreachable!("SST index was selected from the typed record"),
+            };
+            let total_string_count = unique_count_changed
+                .then(|| {
+                    u32::try_from(label_sst_count.max(unique_count))
+                        .map_err(|_| Error::Limit("SST total string count exceeds u32".into()))
+                })
+                .transpose()?;
+            let encoded = match records[sst_index].data.to_mut() {
+                BiffRecordData::Sst(value) => value.normalize_for_write(total_string_count)?,
+                _ => unreachable!("SST index was selected from the typed record"),
+            };
+
+            if let Some(ext_sst_index) = ext_sst_index {
+                let strings_per_bucket_u32 = (u32::try_from(unique_count)
+                    .map_err(|_| Error::Limit("SST unique string count exceeds u32".into()))?
+                    / 128
+                    + 1)
+                .max(8);
+                let strings_per_bucket = u16::try_from(strings_per_bucket_u32)
+                    .map_err(|_| Error::Limit("ExtSST strings-per-bucket exceeds u16".into()))?;
+                let bucket_count = unique_count.div_ceil(usize::from(strings_per_bucket));
+                let BiffRecordData::ExtSst(value) = records[ext_sst_index].data.to_mut() else {
+                    unreachable!("ExtSST index was selected from the typed record")
+                };
+                value.strings_per_bucket = strings_per_bucket;
+                value.buckets = vec![
+                    IsstInf {
+                        stream_offset: 0,
+                        record_offset: 0,
+                        reserved: 0,
+                    };
+                    bucket_count
+                ];
+            }
+            Some((sst_index, ext_sst_index, encoded))
+        } else {
+            None
+        };
+
+        let layout = BiffStreamLayout::from_write_plan(&records)?;
+        let positions_changed = layout.positions_changed();
+        if let Some((sst_index, Some(ext_sst_index), encoded)) = &canonical_sst {
+            let mut physical_record_offsets = Vec::with_capacity(encoded.records.len());
+            let mut relative_offset = 0u32;
+            for record in &encoded.records {
+                physical_record_offsets.push(relative_offset);
+                relative_offset = relative_offset
+                    .checked_add(
+                        u32::try_from(record.payload.len())
+                            .map_err(|_| Error::Limit("SST segment size exceeds u32".into()))?
+                            .checked_add(4)
+                            .ok_or_else(|| Error::Limit("SST segment size overflow".into()))?,
+                    )
+                    .ok_or_else(|| Error::Limit("SST physical layout size overflow".into()))?;
+            }
+            let sst_stream_offset = layout.entries[*sst_index].new_offset;
+            let BiffRecordData::ExtSst(value) = records[*ext_sst_index].data.to_mut() else {
+                unreachable!("ExtSST index was selected from the typed record")
+            };
+            for (bucket_index, bucket) in value.buckets.iter_mut().enumerate() {
+                let string_index = bucket_index
+                    .checked_mul(usize::from(value.strings_per_bucket))
+                    .ok_or_else(|| Error::Limit("ExtSST string index overflow".into()))?;
+                let &(segment_index, payload_offset) =
+                    encoded
+                        .string_locations
+                        .get(string_index)
+                        .ok_or_else(|| Error::invalid(0, "ExtSST bucket exceeds SST strings"))?;
+                let record_offset = payload_offset
+                    .checked_add(4)
+                    .ok_or_else(|| Error::Limit("ExtSST record offset overflow".into()))?;
+                let physical_header = sst_stream_offset
+                    .checked_add(*physical_record_offsets.get(segment_index).ok_or_else(|| {
+                        Error::invalid(0, "ExtSST string references a missing SST segment")
+                    })?)
+                    .ok_or_else(|| Error::Limit("ExtSST stream offset overflow".into()))?;
+                bucket.stream_offset = physical_header
+                    .checked_add(u32::from(record_offset))
+                    .ok_or_else(|| Error::Limit("ExtSST stream offset overflow".into()))?;
+                bucket.record_offset = record_offset;
+                bucket.reserved = 0;
+            }
+        }
+
+        for (index, record) in records.iter_mut().enumerate() {
+            if !positions_changed {
+                record.new_offset = layout.entries[index].new_offset;
+                continue;
+            }
+            let old_record_offset = layout.entries[index].old_offset;
+            let relocation = (|| -> Result<Option<BiffRecordData>> {
+                let is_canonical_ext_sst = canonical_sst
+                    .as_ref()
+                    .and_then(|(_, ext_sst_index, _)| *ext_sst_index)
+                    == Some(index);
+                if is_canonical_ext_sst {
+                    return Ok(None);
+                }
+                let mut patched = match record.data.as_ref() {
+                    BiffRecordData::BoundSheet8(_)
+                    | BiffRecordData::BoundSheet8Compatibility { .. }
+                    | BiffRecordData::Index(_)
+                    | BiffRecordData::ExtSst(_)
+                    | BiffRecordData::DbCell(_) => record.data.as_ref().clone(),
+                    _ => return Ok(None),
+                };
+                match &mut patched {
+                    BiffRecordData::BoundSheet8(value)
+                    | BiffRecordData::BoundSheet8Compatibility { value, .. } => {
+                        value.sheet_bof_offset = layout.relocate_record(
+                            value.sheet_bof_offset,
+                            BiffLayoutRecordKind::Bof,
+                            "BoundSheet8.lbPlyPos does not reference a BOF record",
+                        )?;
+                    }
+                    BiffRecordData::Index(value) => {
+                        value.def_col_width_offset = layout.relocate_record(
+                            value.def_col_width_offset,
+                            BiffLayoutRecordKind::DefColWidth,
+                            "Index.ibXF does not reference a BIFF record",
+                        )?;
+                        for offset in &mut value.dbcell_offsets {
+                            *offset = layout.relocate_record(
+                                *offset,
+                                BiffLayoutRecordKind::DbCell,
+                                "Index.rgibRw does not reference a BIFF record",
+                            )?;
+                        }
+                    }
+                    BiffRecordData::ExtSst(value) => {
+                        for bucket in &mut value.buckets {
+                            let old_header = bucket
+                                .stream_offset
+                                .checked_sub(u32::from(bucket.record_offset))
+                                .ok_or_else(|| {
+                                    Error::invalid(
+                                        u64::from(old_record_offset),
+                                        "ExtSST cbOffset exceeds ib",
+                                    )
+                                })?;
+                            let new_header = layout.relocate_physical_record(
+                                old_header,
+                                "ExtSST bucket does not reference SST/Continue record framing",
+                            )?;
+                            bucket.stream_offset = new_header
+                                .checked_add(u32::from(bucket.record_offset))
+                                .ok_or_else(|| {
+                                    Error::Limit("ExtSST bucket offset overflow".into())
+                                })?;
+                        }
+                    }
+                    BiffRecordData::DbCell(value) => {
+                        value.relayout(old_record_offset, &layout)?;
+                    }
+                    _ => unreachable!("relocation patch was selected from a pointer record"),
+                }
+                Ok(Some(patched))
+            })();
+            match relocation {
+                Ok(Some(patched)) if patched.ne(record.data.as_ref()) => {
+                    record.data = Cow::Owned(patched);
+                }
+                Ok(_) => {}
+                Err(error)
+                    if preserve_invalid_references
+                        && matches!(error, Error::InvalidData { .. }) => {}
+                Err(error) => return Err(error),
+            }
+            record.new_offset = layout.entries[index].new_offset;
+        }
+
+        Ok(Self { records })
     }
 }
 
@@ -25360,7 +25725,7 @@ impl BiffStream {
         Ok(())
     }
 
-    fn relayout_in_place(&mut self, preserve_invalid_references: bool) -> Result<()> {
+    pub(crate) fn relayout_in_place(&mut self, preserve_invalid_references: bool) -> Result<()> {
         for record in &mut self.records {
             match &mut record.data {
                 BiffRecordData::MsoDrawingGroup(value) | BiffRecordData::MsoDrawing(value) => {
@@ -25589,96 +25954,165 @@ impl BiffStream {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let mut stream = self.clone();
-        stream.relayout_in_place(false)?;
-        stream.to_bytes_with_current_layout()
+        self.write_plan(false)?.to_bytes()
     }
 
     pub fn to_bytes_preserving_compatibility(&self) -> Result<Vec<u8>> {
-        let mut stream = self.clone();
-        stream.relayout_in_place(true)?;
-        stream.to_bytes_with_current_layout()
+        self.write_plan(true)?.to_bytes()
     }
 
-    fn to_bytes_with_current_layout(&self) -> Result<Vec<u8>> {
+    pub(crate) fn write_plan(
+        &self,
+        preserve_invalid_references: bool,
+    ) -> Result<BiffStreamWritePlan<'_>> {
         validate_pivot_view_extensions(&self.records)?;
         validate_function_groups_and_table_styles(&self.records)?;
         validate_remaining_static_record_context(&self.records)?;
+        let records = if self.current_layout_is_writable()? {
+            BiffStreamWriteRecords::Current(self)
+        } else {
+            BiffStreamWriteRecords::Overlay(BiffWritePlan::new(self, preserve_invalid_references)?)
+        };
+        Ok(BiffStreamWritePlan {
+            records,
+            trailing_padding: &self.trailing_padding,
+        })
+    }
+
+    /// Returns true when serialization can borrow the current record tree
+    /// without a transactional relayout clone. Records whose canonical write
+    /// form can change independently of their encoded size remain on the
+    /// relayout path until the immutable layout overlay owns their patches.
+    fn current_layout_is_writable(&self) -> Result<bool> {
+        let mut expected_offset = 0u32;
+        for record in &self.records {
+            let requires_normalization = match &record.data {
+                BiffRecordData::MsoDrawingGroup(_)
+                | BiffRecordData::MsoDrawing(_)
+                | BiffRecordData::SxTh(_)
+                | BiffRecordData::SxvdTEx(_)
+                | BiffRecordData::BigName(_)
+                | BiffRecordData::RrdChgCell(_) => true,
+                BiffRecordData::Sst(value) => !value.preserves_physical_layout(),
+                _ => false,
+            };
+            if record.offset != expected_offset || requires_normalization {
+                return Ok(false);
+            }
+            for physical in record.data.encode_physical()? {
+                if physical.payload.len() > MAX_BIFF_RECORD_DATA {
+                    return Err(Error::invalid(
+                        u64::from(record.offset),
+                        "BIFF record data exceeds 8224 bytes",
+                    ));
+                }
+                expected_offset = expected_offset
+                    .checked_add(4)
+                    .and_then(|offset| offset.checked_add(physical.payload.len() as u32))
+                    .ok_or_else(|| Error::Limit("BIFF stream layout exceeds u32".into()))?;
+            }
+        }
+        Ok(true)
+    }
+
+    fn encode_record_source(
+        source: &impl BiffRecordSource,
+        trailing_padding: &[u8],
+    ) -> Result<Vec<u8>> {
+        let capacity = Self::record_source_len(source, trailing_padding)?;
+        let mut bytes = Vec::with_capacity(capacity);
+        let written = Self::write_record_source(source, trailing_padding, &mut bytes)?;
+        debug_assert_eq!(written, capacity);
+        debug_assert_eq!(bytes.len(), capacity);
+        Ok(bytes)
+    }
+
+    fn record_source_len(source: &impl BiffRecordSource, trailing_padding: &[u8]) -> Result<usize> {
         // Relayout has already assigned the last record's starting offset.
         // Encode only that final record to derive the exact stream length and
         // avoid both repeated growth for large workbooks and over-allocation
         // for the usual four-byte EOF record in small workbooks.
-        let capacity =
-            self.records
-                .last()
-                .map_or(Ok(self.trailing_padding.len()), |record| {
-                    let final_record_len = record.data.encode_physical()?.iter().try_fold(
-                        0usize,
-                        |size, encoded| {
-                            size.checked_add(4)
-                                .and_then(|size| size.checked_add(encoded.payload.len()))
-                                .ok_or_else(|| {
-                                    Error::Limit("BIFF final record byte length overflow".into())
-                                })
-                        },
-                    )?;
-                    usize::try_from(record.offset)
-                        .ok()
-                        .and_then(|offset| offset.checked_add(final_record_len))
-                        .and_then(|size| size.checked_add(self.trailing_padding.len()))
-                        .ok_or_else(|| Error::Limit("BIFF output capacity overflow".into()))
-                })?;
-        let mut bytes = Vec::with_capacity(capacity);
+        let length = if source.record_count() == 0 {
+            trailing_padding.len()
+        } else {
+            let (record_offset, record_data) = source.record(source.record_count() - 1);
+            let final_record_len =
+                record_data
+                    .encode_physical()?
+                    .iter()
+                    .try_fold(0usize, |size, encoded| {
+                        size.checked_add(4)
+                            .and_then(|size| size.checked_add(encoded.payload.len()))
+                            .ok_or_else(|| {
+                                Error::Limit("BIFF final record byte length overflow".into())
+                            })
+                    })?;
+            usize::try_from(record_offset)
+                .ok()
+                .and_then(|offset| offset.checked_add(final_record_len))
+                .and_then(|size| size.checked_add(trailing_padding.len()))
+                .ok_or_else(|| Error::Limit("BIFF output capacity overflow".into()))?
+        };
+        Ok(length)
+    }
+
+    fn write_record_source<W: Write + ?Sized>(
+        source: &impl BiffRecordSource,
+        trailing_padding: &[u8],
+        writer: &mut W,
+    ) -> Result<usize> {
+        let mut bytes = BiffOutput::new(writer);
         let mut sx_dbb_context: Option<SxDbbContext> = None;
         let mut rrd_rst_etxp_context: Option<RrdRstEtxpContext> = None;
         let mut rrd_info_version = None;
         let mut mdx_string_count = 0i32;
         let mut last_saved_version = None;
-        for record in &self.records {
-            if usize::try_from(record.offset).ok() != Some(bytes.len()) {
+        for index in 0..source.record_count() {
+            let (record_offset, record_data) = source.record(index);
+            if usize::try_from(record_offset).ok() != Some(bytes.len()) {
                 return Err(Error::invalid(
                     bytes.len() as u64,
                     "BIFF record offset changed",
                 ));
             }
-            if matches!(&record.data, BiffRecordData::Bof(_)) {
+            if matches!(record_data, BiffRecordData::Bof(_)) {
                 sx_dbb_context = None;
                 rrd_info_version = None;
                 last_saved_version = None;
             }
             if rrd_rst_etxp_context.is_some()
-                && !matches!(&record.data, BiffRecordData::RrdRstEtxp(_))
+                && !matches!(record_data, BiffRecordData::RrdRstEtxp(_))
             {
                 return Err(Error::invalid(
-                    record.offset as u64,
+                    record_offset as u64,
                     "RRDChgCell RRDRstEtxp records are not contiguous",
                 ));
             }
-            if matches!(&record.data, BiffRecordData::RrdRstEtxp(_))
+            if matches!(record_data, BiffRecordData::RrdRstEtxp(_))
                 && rrd_rst_etxp_context.is_none()
             {
                 return Err(Error::invalid(
-                    record.offset as u64,
+                    record_offset as u64,
                     "RRDRstEtxp has no preceding RRDChgCell",
                 ));
             }
-            if let BiffRecordData::SxDbb(value) = &record.data {
+            if let BiffRecordData::SxDbb(value) = record_data {
                 sx_dbb_context
                     .as_ref()
-                    .ok_or_else(|| Error::invalid(record.offset as u64, "SXDBB has no SXDB"))?
+                    .ok_or_else(|| Error::invalid(record_offset as u64, "SXDBB has no SXDB"))?
                     .validate_record(value)?;
             }
-            if let BiffRecordData::RrdTqsif(value) = &record.data
+            if let BiffRecordData::RrdTqsif(value) = record_data
                 && !value.matches_revision_version(rrd_info_version)
             {
                 return Err(Error::invalid(
-                    record.offset as u64,
+                    record_offset as u64,
                     "RRDTQSIF range does not match RRDInfo wXLVer",
                 ));
             }
-            if let BiffRecordData::Qsir(value) = &record.data {
+            if let BiffRecordData::Qsir(value) = record_data {
                 let version = last_saved_version.ok_or_else(|| {
-                    Error::invalid(record.offset.into(), "Qsir has no preceding BOF version")
+                    Error::invalid(record_offset.into(), "Qsir has no preceding BOF version")
                 })?;
                 if value.list_id.is_some() != (version >= 3)
                     || value
@@ -25687,26 +26121,24 @@ impl BiffStream {
                         .any(|field| field.list_id.is_some() != (version >= 4))
                 {
                     return Err(Error::invalid(
-                        record.offset.into(),
+                        record_offset.into(),
                         "Qsir/Qsif optional list IDs do not match verLastXLSaved",
                     ));
                 }
             }
-            record
-                .data
-                .validate_mdx_string_references(mdx_string_count, record.offset as u64)?;
-            for encoded in record.data.encode_physical()? {
+            record_data.validate_mdx_string_references(mdx_string_count, record_offset as u64)?;
+            for encoded in record_data.encode_physical()? {
                 if encoded.payload.len() > MAX_BIFF_RECORD_DATA {
                     return Err(Error::invalid(
                         bytes.len() as u64,
                         "BIFF record data exceeds 8224 bytes",
                     ));
                 }
-                bytes.extend_from_slice(&encoded.record_type.to_le_bytes());
-                bytes.extend_from_slice(&(encoded.payload.len() as u16).to_le_bytes());
-                bytes.extend_from_slice(&encoded.payload);
+                bytes.extend_from_slice(&encoded.record_type.to_le_bytes())?;
+                bytes.extend_from_slice(&(encoded.payload.len() as u16).to_le_bytes())?;
+                bytes.extend_from_slice(&encoded.payload)?;
             }
-            match &record.data {
+            match record_data {
                 BiffRecordData::SxDb(value) => {
                     sx_dbb_context = Some(SxDbbContext::from_db(value)?);
                 }
@@ -25722,7 +26154,7 @@ impl BiffStream {
                     let complete = rrd_rst_etxp_context
                         .as_mut()
                         .expect("RRDRstEtxp context was checked above")
-                        .observe(value, record.offset as u64)?;
+                        .observe(value, record_offset as u64)?;
                     if complete {
                         rrd_rst_etxp_context = None;
                     }
@@ -25747,9 +26179,8 @@ impl BiffStream {
                 "RRDChgCell lacks its declared RRDRstEtxp records",
             ));
         }
-        bytes.extend_from_slice(&self.trailing_padding);
-        debug_assert_eq!(bytes.len(), capacity);
-        Ok(bytes)
+        bytes.extend_from_slice(trailing_padding)?;
+        Ok(bytes.len())
     }
 
     pub fn is_biff8(&self) -> bool {
@@ -25770,6 +26201,28 @@ impl BiffStream {
                 _ => None,
             })
             .collect()
+    }
+}
+
+impl BiffStreamWritePlan<'_> {
+    pub(crate) fn encoded_len(&self) -> Result<usize> {
+        BiffStream::record_source_len(self, self.trailing_padding)
+    }
+
+    pub(crate) fn write_to<W: Write + ?Sized>(&self, writer: &mut W) -> Result<()> {
+        let expected = self.encoded_len()?;
+        let written = BiffStream::write_record_source(self, self.trailing_padding, writer)?;
+        if written != expected {
+            return Err(Error::invalid(
+                written as u64,
+                "BIFF write plan emitted an unexpected byte length",
+            ));
+        }
+        Ok(())
+    }
+
+    fn to_bytes(&self) -> Result<Vec<u8>> {
+        BiffStream::encode_record_source(self, self.trailing_padding)
     }
 }
 
@@ -34045,6 +34498,43 @@ mod tests {
                 cell_offsets,
             }) if cell_offsets == &[6]
         ));
+    }
+
+    #[test]
+    fn biff_write_plan_borrows_unchanged_payloads_during_relayout() {
+        let payload = vec![0x5a; MAX_BIFF_RECORD_DATA];
+        let stream = BiffStream {
+            records: vec![
+                BiffRecord {
+                    offset: 0,
+                    data: BiffRecordData::Unknown {
+                        record_type: 0x1234,
+                        payload,
+                    },
+                },
+                BiffRecord {
+                    offset: 999_999,
+                    data: BiffRecordData::Eof,
+                },
+            ],
+            trailing_padding: Vec::new(),
+        };
+
+        let plan = BiffWritePlan::new(&stream, false).unwrap();
+        assert!(matches!(&plan.records[0].data, Cow::Borrowed(_)));
+        assert!(matches!(&plan.records[1].data, Cow::Borrowed(_)));
+        assert_eq!(
+            plan.records[1].new_offset,
+            (MAX_BIFF_RECORD_DATA + 4) as u32
+        );
+
+        let bytes = stream.to_bytes().unwrap();
+        let reopened = BiffStream::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            reopened.records[1].offset,
+            (MAX_BIFF_RECORD_DATA + 4) as u32
+        );
+        assert_eq!(stream.records[1].offset, 999_999);
     }
 
     #[test]

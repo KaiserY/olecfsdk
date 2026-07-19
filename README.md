@@ -1,33 +1,66 @@
 # olecfsdk
 
-Typed Rust SDK for Microsoft Office compound binary file formats.
+[![crates.io](https://img.shields.io/crates/v/olecfsdk.svg)](https://crates.io/crates/olecfsdk)
+[![docs.rs](https://docs.rs/olecfsdk/badge.svg)](https://docs.rs/olecfsdk)
 
-The initial workspace contains:
+`olecfsdk` is a pure-Rust SDK for reading, inspecting, editing, and writing
+Microsoft Office 97-2003 compound binary files. It exposes the actual CFB,
+DOC, XLS, PPT, OLE property-set, VBA, OfficeArt, and Forms structures as typed
+Rust trees and relationship views. It is not a plain-text extraction facade.
 
-- `crates/olecfsdk`: runtime, CFB container, and Office binary format models.
-- `crates/olecfsdk-derive`: derive macros for symmetric binary read/write code.
+The minimum supported Rust version is 1.88; the workspace uses Rust 2024.
 
-The project is developed round-trip first: unknown bounded payloads are preserved while corpus-driven work replaces them with static Rust types.
+## Supported file roots
 
-## Typed file roots
+- CFB/OLE Structured Storage v3 and v4
+- Word 97-2003 `.doc` and `.dot`
+- Excel BIFF8 `.xls` and `.xlt`
+- PowerPoint 97-2003 `.ppt`, `.pps`, and `.pot`
+- OLE property sets, VBA projects, OfficeArt, Forms/ActiveX, and the shared
+  persistent structures used by those hosts
 
-`doc::DocFile`, `ppt::PptFile`, and `xls::XlsFile` open a compound file into
-owned Rust structure trees and rebuild their managed streams from those trees.
-They deliberately preserve physical and semantic hierarchy: DOC text pieces
-retain CP/FC and encoding, PPT remains a recursive record/container tree, and
-XLS retains BIFF records plus nested BOF/EOF substreams (including files that
-contain both `/Workbook` and `/Book`). The SDK does not substitute lossy
-plain-text, slide-summary, or cell-string projections for these trees.
+DOC, XLS, and PPT roots preserve physical identities and expose borrowed
+relationships to native content objects: document parts, paragraphs, styles,
+tables and cells; workbook streams, sheets, sparse cells, formulas and cached
+results; presentations, slides, notes, shapes, placeholders and text bodies.
+Normal decoded scalars use ordinary Rust `String`, numbers, `bool`, enums,
+`Option<T>`, and `Vec<T>` while source encoding and offset metadata remain
+available for correct round trips.
 
-The parse-time CFB is an immutable preservation snapshot. Typed edits update
-the Rust tree; `to_compound_file`, `to_bytes`, and `save` rebuild every managed
-stream from that tree while carrying unrelated CFB entries forward. Default
-open/save operations are strict. Producer deviations must be opened through a
-`*_compatible` entry point, inspected through its structured diagnostics, and
-saved with `SaveOptions::preserving_compatibility()` only when retaining those
-explicit compatibility nodes is intentional.
+## Quick start
 
-Runnable examples perform a semantic edit and strict reopen of the result:
+```toml
+[dependencies]
+olecfsdk = "0.1.0"
+```
+
+```rust,no_run
+use olecfsdk::{Result, xls::XlsFile};
+
+fn main() -> Result<()> {
+    let workbook = XlsFile::open("input.xls")?;
+    for stream in workbook.workbooks.iter() {
+        let view = stream.relationships()?;
+        for sheet in view.sheets() {
+            println!("{}", sheet.metadata().name.value);
+            for cell in sheet.cells() {
+                let cell = cell?;
+                let position = cell.cell();
+                println!(
+                    "R{}C{}: {:?}",
+                    position.row,
+                    position.column,
+                    cell.value()
+                );
+            }
+        }
+    }
+    workbook.save("round-tripped.xls")?;
+    Ok(())
+}
+```
+
+Runnable semantic-edit examples cover every file root:
 
 ```sh
 cargo run -p olecfsdk --example edit_doc -- input.doc output.doc
@@ -35,29 +68,96 @@ cargo run -p olecfsdk --example edit_xls -- input.xls output.xls
 cargo run -p olecfsdk --example edit_ppt -- input.ppt output.ppt
 ```
 
-PPT's ordinary save preserves and relocates its existing physical incremental
-history. Call the separate `PptHistoryStrategy` APIs only when an append or a
-normalized live-state rebuild is explicitly required; history policy is not a
-parse or compatibility option.
+## Strict and compatible operation
 
-## CFB baseline
+Ordinary open and save methods are strict. A producer deviation must be opened
+through a `*_compatible` entry point, inspected through structured diagnostics,
+and saved with `SaveOptions::preserving_compatibility()` only when retaining
+that exact compatibility state is intentional.
 
-- CFB v3/v4 containers open into an owned logical storage/stream model and are
-  rebuilt deterministically.
-- Stream bytes, storage metadata, CLSIDs, state bits, and timestamps participate
-  in logical round-trip comparison.
-- Bounded readers, writers, allocation limits, and `SdkObject`/`SdkEnum`/`SdkBitfield` derives
-  provide the base for typed DOC/XLS/PPT records.
-- CFB reading and deterministic writing use SDK-owned static header,
-  DIFAT/FAT, MiniFAT, directory, and regular/mini-stream types. Strict reopen,
-  name ordering, allocation validation, stream/storage editing, and corpus
-  assertions are all provided by `olecfsdk`; neither this workspace nor the
-  external test suite depends on the sibling `rust-cfb` crate.
+The parse-time CFB is a private preservation snapshot. Typed edits update the
+Rust tree; `to_compound_file`, `to_bytes`, `write_to`, and `save` rebuild every
+managed stream while retaining unrelated CFB entries. Saves do not return the
+source file as a shortcut. PPT incremental-history policy is independently
+controlled by `PptHistoryStrategy`.
 
-The external corpus workspace contains 1,533 generated legacy Office CFB tests:
+Owned `from_vec` entry points avoid copying the complete input archive.
+File-root clones share immutable archive and typed-tree backing; mutation uses
+copy-on-write. Prefer `write_to` or `save` when a final in-memory file image is
+not needed.
+
+For CFB-level access to large files, `CompoundFileReader<File>` keeps stream
+payloads file-backed and returns fallible positional stream cursors. It does
+not hide I/O behind the infallible borrowed-slice API used by an owned
+`CompoundFile`:
+
+```rust,no_run
+use std::io::Read;
+use olecfsdk::{Result, cfb::CompoundFileReader};
+
+fn read_prefix(path: &str) -> Result<[u8; 32]> {
+    let compound = CompoundFileReader::open(path)?;
+    let mut stream = compound.open_stream("/WordDocument")?;
+    let mut prefix = [0; 32];
+    stream.read_exact(&mut prefix)?;
+    Ok(prefix)
+}
+```
+
+DOC, XLS, and PPT typed roots currently own a shared parsed archive. Use
+`from_vec` when transferring an existing input buffer, or the file-backed CFB
+reader when only selected streams are needed. Converting a file-backed reader
+with `into_owned` is the explicit full-feature fallback.
+
+## 0.1.0 support matrix
+
+| Area | 0.1.0 contract |
+| --- | --- |
+| CFB | v3/v4 tree and stream read/write, mini/regular streams, file-backed cursors, deterministic owned rebuild |
+| DOC | Word 97-2003 typed file root, document parts, text/formatting, paragraphs, sections, tables, fields, drawings and managed-stream rebuild |
+| XLS | BIFF8 typed workbook roots, sheets, cells, formulas/cached values, formatting, comments, hyperlinks, drawings and pointer relayout |
+| PPT | PowerPoint 97-2003 typed history/live views, slides, masters, notes, shapes, placeholders, text, pictures and persist relayout |
+| Shared | OLE property sets, VBA, OfficeArt, Forms/ActiveX and host relationships |
+| Compatibility | Explicit diagnostics and preserving save policy; no silent downgrade of known structures |
+
+The SDK models stored structure and relationships; it is not an Office layout
+or formula-calculation engine. Rendering, pagination fidelity, formula
+evaluation, password-based encryption, and legacy pre-97 formats are outside
+this release claim.
+
+## Safety and limits
+
+Parsing uses checked offsets, bounded readers, configurable `Limits`, explicit
+strict/compatible diagnostics, and no native Office or COM dependency. Unknown
+bounded extensions and specification-defined opaque payloads retain their
+identity and exact bytes; known structures do not silently degrade to generic
+raw payloads.
+
+Encrypted documents are recognized but password-based decryption and
+re-encryption are intentionally outside 0.1.0. Word 1/2/6/95, BIFF2-5, and
+PowerPoint 4/95 are separate legacy work and do not share the Office 97-2003
+support claim.
+
+## Validation
+
+The SDK is developed whole-file and round-trip first. Supported corpus files
+are opened through typed roots, traversed, rebuilt, reopened, compared for
+logical stability, and saved a second time. Focused tests cover transaction
+rollback, damaged input, resource limits, relationship integrity, and real
+semantic edits. Corpus-scale coverage lives in the adjacent
+[`ooxmlsdk-test-suite`](https://github.com/KaiserY/ooxmlsdk-test-suite), in
+`crates/olecfsdk-test`.
 
 ```sh
-cd ../ooxmlsdk-test-suite
-cargo test -p olecfsdk-roundtrip-tests --test apache_poi_cfb_roundtrip -- --ignored --quiet
-cargo test -p olecfsdk-roundtrip-tests --test libreoffice_cfb_roundtrip -- --ignored --quiet
+cargo fmt --all -- --check
+cargo test --workspace --all-targets
+cargo test --workspace --doc
+cargo clippy --workspace --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
+
+## License
+
+MIT OR Apache-2.0. See
+[LICENSE-MIT](https://github.com/KaiserY/olecfsdk/blob/main/LICENSE-MIT) and
+[LICENSE-APACHE](https://github.com/KaiserY/olecfsdk/blob/main/LICENSE-APACHE).

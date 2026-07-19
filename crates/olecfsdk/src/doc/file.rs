@@ -11,13 +11,15 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::Write,
     ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use crate::{
     Error, Result,
-    cfb::CompoundFile,
+    cfb::{CfbStreamData, CfbStreamOverride, CfbStreamWriter, CompoundFile},
     forms::ParentControlStorageModel,
     io::BinaryFormat,
     limits::Limits,
@@ -27,7 +29,7 @@ use crate::{
     },
     parse::{
         ParseDiagnostic, ParseDiagnosticCode, ParseOptions, ParseOutcome, SpecificationReference,
-        compound_from_bytes, compound_from_path, compound_outcome,
+        compound_from_bytes, compound_from_path, compound_from_vec, compound_outcome,
     },
     save::SaveOptions,
     shared::MsoEnvelope,
@@ -48,15 +50,15 @@ use super::{
     LegacyGrammarCheckerCookieTable, LegacyGrammarOptionSets, ListDefinitions, ListNamesTable,
     ListOverrides, ListStyleTemplates, MailMergeState, NilPicfAndBinData, NilPicfFieldType,
     NoteReferenceTable, OfficeDataSource, OleControlInfos, OleObjectDescriptor, PapxFkp,
-    PapxFkpRun, ParagraphGroupProperties, Pcd, Picf, PicfAndOfficeArtData, PlcBte, PlcfSed,
-    PrcData, PrinterDriverInfo, PrivateFieldType, Prm, RangeProtection, RepairBookmarks,
-    RevisionAuthors, RevisionMessageThreading, RevisionSaveIdTable, SaveHistory, SelectionState,
-    Sepx, ShapeAnchor, ShapeAnchorTable, SmartTagBookmarks, SmartTagData,
-    SmartTagRecognizerStateTable, SpellingStateTable, SprmGroup, SprmKind, SprmOperand,
-    StructuredTagBookmarks, StructuredTagType, StyleFormatting, StyleSheet, SubdocumentTable,
-    TableCharacterCacheTable, TextPiece, TextPieceCharacters, TextPieceEncoding, TextboxBreak,
-    TextboxBreakTable, TextboxDocumentPart, TextboxStory, TextboxStoryChain, TextboxStoryTable,
-    UserInputMethods, UserVariables, XmlSchemaReferences, XmlTransformPath,
+    PapxFkpRun, ParagraphGroupProperties, Pcd, PicfAndOfficeArtData, PlcBte, PlcfSed, PrcData,
+    PrinterDriverInfo, PrivateFieldType, Prm, RangeProtection, RepairBookmarks, RevisionAuthors,
+    RevisionMessageThreading, RevisionSaveIdTable, SaveHistory, SelectionState, Sepx, ShapeAnchor,
+    ShapeAnchorTable, SmartTagBookmarks, SmartTagData, SmartTagRecognizerStateTable,
+    SpellingStateTable, SprmGroup, SprmKind, SprmOperand, StructuredTagBookmarks,
+    StructuredTagType, StyleFormatting, StyleSheet, SubdocumentTable, TableCharacterCacheTable,
+    TextPiece, TextPieceCharacters, TextPieceEncoding, TextboxBreak, TextboxBreakTable,
+    TextboxDocumentPart, TextboxStory, TextboxStoryChain, TextboxStoryTable, UserInputMethods,
+    UserVariables, XmlSchemaReferences, XmlTransformPath,
 };
 
 const WORD_DOCUMENT_STREAM: &str = "/WordDocument";
@@ -525,7 +527,8 @@ pub enum DocSpecialContentLink<'a> {
 pub struct DocChpxRun {
     pub cp_start: u32,
     pub cp_end: u32,
-    pub properties: Option<GrpPrl>,
+    /// Clone-shared direct formatting; use [`Arc::make_mut`] for field edits.
+    pub properties: Option<Arc<GrpPrl>>,
 }
 
 /// A PAPX FKP paragraph, table-row, or table-cell run mapped from its physical
@@ -535,7 +538,8 @@ pub struct DocPapxRun {
     pub cp_start: u32,
     pub cp_end: u32,
     pub paragraph_height_info: [u8; 12],
-    pub properties: Option<super::PapxInFkp>,
+    /// Clone-shared paragraph formatting; use [`Arc::make_mut`] for field edits.
+    pub properties: Option<Arc<super::PapxInFkp>>,
 }
 
 /// The two normative direct-formatting layers at one MS-DOC character
@@ -715,7 +719,7 @@ pub struct DocWordDocumentStream {
     character_format_pages: Vec<DocFkpPage<ChpxFkp>>,
     paragraph_format_pages: Vec<DocFkpPage<PapxFkp>>,
     pub section_properties: Vec<DocSectionProperties>,
-    physical_bytes: Vec<u8>,
+    physical_bytes: CfbStreamData,
     source_fib_len: usize,
     // Maps each current PlcPcd piece to its immutable index in the source CLX.
     // Current indices stay contiguous when an edit removes an entire piece.
@@ -820,7 +824,7 @@ pub struct DocTableStream {
     pub deprecated_numbering_field_cache: Option<DocDeprecatedNumberingFieldCache>,
     /// Nonconforming FIB-referenced payloads retained only in compatible mode.
     pub compatibility_tables: Vec<DocCompatibilityTable>,
-    physical_bytes: Vec<u8>,
+    physical_bytes: CfbStreamData,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -914,7 +918,7 @@ pub struct DocDeprecatedNumberingFieldCache {
 /// node rather than being mislabeled as arbitrary content.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DocDataStream {
-    pub physical_bytes: Vec<u8>,
+    pub physical_bytes: CfbStreamData,
     pub nodes: Vec<DocDataNode>,
 }
 
@@ -932,8 +936,8 @@ pub enum DocDataNodeValue {
     ParagraphProperties(PrcData),
 }
 
-struct RebuiltDataStream {
-    bytes: Option<Vec<u8>>,
+struct RebuiltDataStream<'a> {
+    plan: Option<TableWritePlan<'a>>,
     relocations: BTreeMap<u32, u32>,
 }
 
@@ -980,11 +984,18 @@ pub struct DocCompatibilityObjectStorage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DocFile {
     compound_file: CompoundFile,
+    data_link_baseline: Arc<DocDataLinkBaseline>,
     pub shared: OfficeSharedContent,
-    pub word_document: DocWordDocumentStream,
-    pub table: DocTableStream,
-    pub data: Option<DocDataStream>,
-    pub object_pool: Option<DocObjectPoolStorage>,
+    /// Clone-shared WordDocument typed tree. Call [`Arc::make_mut`] before
+    /// direct field edits; transactional SDK methods detach it automatically.
+    pub word_document: Arc<DocWordDocumentStream>,
+    /// Clone-shared Table-stream typed tree, detached automatically by SDK
+    /// mutations and explicitly with [`Arc::make_mut`] for direct edits.
+    pub table: Arc<DocTableStream>,
+    /// Clone-shared Data-stream typed tree and physical preservation backing.
+    pub data: Option<Arc<DocDataStream>>,
+    /// Clone-shared embedded-object graph retained from the ObjectPool storage.
+    pub object_pool: Option<Arc<DocObjectPoolStorage>>,
 }
 
 impl DocCp {
@@ -1051,8 +1062,8 @@ impl<'a> DocContentTree<'a> {
         self.file.data.iter().flat_map(|data| data.nodes.iter())
     }
 
-    pub const fn object_pool(&self) -> Option<&'a DocObjectPoolStorage> {
-        self.file.object_pool.as_ref()
+    pub fn object_pool(&self) -> Option<&'a DocObjectPoolStorage> {
+        self.file.object_pool.as_deref()
     }
 
     pub const fn preserves_compatibility(&self) -> bool {
@@ -4578,6 +4589,27 @@ impl DocFile {
         Self::from_compound_outcome(compound, options)
     }
 
+    /// Consumes a complete CFB image without copying its full archive buffer.
+    pub fn from_vec(bytes: Vec<u8>) -> Result<Self> {
+        Ok(Self::from_vec_with_options(bytes, ParseOptions::default())?.into_value())
+    }
+
+    pub fn from_vec_compatible(bytes: Vec<u8>) -> Result<ParseOutcome<Self>> {
+        Self::from_vec_with_options(bytes, ParseOptions::compatible(Limits::default()))
+    }
+
+    pub fn from_vec_with_limits(bytes: Vec<u8>, limits: Limits) -> Result<Self> {
+        Ok(Self::from_vec_with_options(bytes, ParseOptions::strict(limits))?.into_value())
+    }
+
+    pub fn from_vec_with_options(
+        bytes: Vec<u8>,
+        options: ParseOptions,
+    ) -> Result<ParseOutcome<Self>> {
+        let compound = compound_from_vec(bytes, options, BinaryFormat::Doc)?;
+        Self::from_compound_outcome(compound, options)
+    }
+
     /// Consumes an owned CFB and parses its managed streams in strict mode.
     pub fn from_compound_file(compound_file: CompoundFile) -> Result<Self> {
         Ok(
@@ -4622,7 +4654,8 @@ impl DocFile {
             mut diagnostics,
         } = compound;
         let limits = options.limits;
-        let word_bytes = required_stream(&compound_file, WORD_DOCUMENT_STREAM)?.to_vec();
+        let word_data = required_stream_data(&compound_file, WORD_DOCUMENT_STREAM)?;
+        let word_bytes = word_data.clone();
         ensure_stream_limit("WordDocument", &word_bytes, limits)?;
         let fib = Fib::from_word_document(&word_bytes)?;
         if fib
@@ -4640,7 +4673,8 @@ impl DocFile {
         } else {
             DocTableStreamName::Table0
         };
-        let table_bytes = required_stream(&compound_file, table_name.path())?.to_vec();
+        let table_data = required_stream_data(&compound_file, table_name.path())?;
+        let table_bytes = table_data.clone();
         ensure_stream_limit(table_name.path(), &table_bytes, limits)?;
 
         let clx = parse_required(&table_bytes, fib.clx_location(), "CLX", Clx::from_bytes)?;
@@ -5138,7 +5172,7 @@ impl DocFile {
             character_format_pages,
             paragraph_format_pages,
             section_properties,
-            physical_bytes: word_bytes,
+            physical_bytes: word_data,
             source_fib_len,
             source_piece_indices,
             source_chpx_runs,
@@ -5215,15 +5249,33 @@ impl DocFile {
             mso_envelope,
             deprecated_numbering_field_cache,
             compatibility_tables,
-            physical_bytes: table_bytes,
+            physical_bytes: table_data,
         };
+        let source_data = compound_file
+            .entry(DATA_STREAM)
+            .filter(|entry| entry.is_stream())
+            .map(|entry| entry.data.clone());
+        let source_data_stream_present = source_data.is_some();
         let data = parse_data_stream(
-            compound_file.stream(DATA_STREAM),
+            source_data,
             &word_document,
             &table,
             options,
             &mut diagnostics,
         )?;
+        let data_link_baseline = if options.is_strict() {
+            DocDataLinkBaseline {
+                source_stream_present: source_data_stream_present,
+                unresolved_references: BTreeMap::new(),
+            }
+        } else {
+            build_data_link_baseline(
+                source_data_stream_present,
+                &word_document,
+                &table,
+                data.as_ref(),
+            )?
+        };
         let object_pool = parse_object_pool(&compound_file, options, &mut diagnostics)?;
         let shared = OfficeSharedContent::from_compound_file_with_host(
             &compound_file,
@@ -5234,11 +5286,12 @@ impl DocFile {
         Ok(ParseOutcome::new(
             Self {
                 compound_file,
+                data_link_baseline: Arc::new(data_link_baseline),
                 shared: shared.value,
-                word_document,
-                table,
-                data,
-                object_pool,
+                word_document: word_document.into(),
+                table: table.into(),
+                data: data.map(Arc::new),
+                object_pool: object_pool.map(Arc::new),
             },
             diagnostics,
         ))
@@ -5255,7 +5308,7 @@ impl DocFile {
         let mut report = candidate
             .shared
             .replace_vba_module_source(stream_name, source)?;
-        if let Some(user_variables) = &mut candidate.table.user_variables {
+        if let Some(user_variables) = &mut Arc::make_mut(&mut candidate.table).user_variables {
             report.invalidated_host_signatures = user_variables.value.remove_vba_signatures();
             UserVariables::from_bytes(&user_variables.value.to_bytes()?)?;
         }
@@ -5272,7 +5325,7 @@ impl DocFile {
     ) -> Result<OfficeFormsMutation> {
         let mut candidate = self.clone();
         let mut report = candidate.shared.edit_vba_designer_storage(index, edit)?;
-        if let Some(user_variables) = &mut candidate.table.user_variables {
+        if let Some(user_variables) = &mut Arc::make_mut(&mut candidate.table).user_variables {
             report.invalidated_host_signatures = user_variables.value.remove_vba_signatures();
             UserVariables::from_bytes(&user_variables.value.to_bytes()?)?;
         }
@@ -5299,22 +5352,37 @@ impl DocFile {
             // source tree may carry compatibility-only physical CFB state
             // that the writer canonicalizes while serializing.
             let bytes = compound.to_bytes()?;
-            Self::from_bytes(&bytes)?;
+            drop(Self::validate_emitted_bytes(bytes, options)?);
         }
         Ok(compound)
     }
 
-    fn validate_emitted_bytes(bytes: &[u8], options: SaveOptions) -> Result<()> {
+    fn validate_emitted_bytes(bytes: Vec<u8>, options: SaveOptions) -> Result<Vec<u8>> {
         if !options.preserves_compatibility() {
-            Self::from_bytes(bytes)?;
+            let archive = Arc::new(bytes);
+            let compound = CompoundFile::from_shared_archive_with_limits(
+                Arc::clone(&archive),
+                Limits::default(),
+            )?;
+            drop(Self::from_compound_file(compound)?);
+            return Arc::try_unwrap(archive)
+                .map_err(|_| Error::invalid(0, "validated DOC retained its emitted CFB archive"));
         }
-        Ok(())
+        Ok(bytes)
     }
 
     fn to_compound_file_with_current_layout(&self, options: SaveOptions) -> Result<CompoundFile> {
+        self.compound_write_plan_with_current_layout(options)?
+            .into_compound()
+    }
+
+    fn compound_write_plan_with_current_layout(
+        &self,
+        options: SaveOptions,
+    ) -> Result<DocCompoundWritePlan<'_>> {
         self.validate_links()?;
-        let mut word = self.word_document.physical_bytes.clone();
-        let mut table = TableLayout::new(self.table.physical_bytes.clone());
+        let source_word = self.word_document.physical_bytes.as_slice();
+        let mut table = TableLayout::new(&self.table.physical_bytes);
         let mut fib = self.word_document.fib.clone();
         let mut clx_table = self.table.clx.clone();
         let mut character_bin_table = self.table.character_bin_table.clone();
@@ -5326,9 +5394,9 @@ impl DocFile {
         let mut styles_table = self.table.styles.clone();
         let mut list_definitions = self.table.list_definitions.clone();
         let RebuiltDataStream {
-            bytes: data_bytes,
+            plan: data_plan,
             relocations: data_relocations,
-        } = rebuild_data_stream(self.data.as_ref())?;
+        } = rebuild_data_stream(self.data.as_deref())?;
         relocate_root_data_references(
             &mut clx_table,
             &mut character_format_pages,
@@ -5822,6 +5890,21 @@ impl DocFile {
         }
         text_layout_changed |= rebuild_character_formatting || rebuild_paragraph_formatting;
 
+        let section_layout_changed =
+            section_properties
+                .iter()
+                .try_fold(false, |changed, section| -> Result<bool> {
+                    let Some(value) = &section.value else {
+                        return Ok(changed);
+                    };
+                    Ok(changed || value.to_bytes()?.len() != section.physical_len)
+                })?;
+        let mut word = if text_layout_changed || section_layout_changed {
+            MutableWordLayout::Owned(source_word.to_vec())
+        } else {
+            MutableWordLayout::Overlay(TableLayout::new(source_word))
+        };
+
         if text_layout_changed {
             let meaningful_end = usize::try_from(fib.rg_lw.cb_mac)
                 .map_err(|_| Error::Limit("FIB cbMac exceeds usize".into()))?;
@@ -5898,7 +5981,8 @@ impl DocFile {
                     relocate_text_file_positions(&mut page.value.file_positions, &relocations)?;
                 }
             }
-            word.splice(meaningful_end..meaningful_end, appended);
+            word.owned_mut()?
+                .splice(meaningful_end..meaningful_end, appended);
             fib.rg_lw.cb_mac = fib
                 .rg_lw
                 .cb_mac
@@ -5914,7 +5998,7 @@ impl DocFile {
                     })?,
                     &self.word_document.text_pieces,
                     &encoded_pieces,
-                    &mut word,
+                    word.owned_mut()?,
                     &mut fib,
                 )?;
                 character_bin_table.value = rebuilt.0;
@@ -5935,7 +6019,7 @@ impl DocFile {
                     })?,
                     &self.word_document.text_pieces,
                     &encoded_pieces,
-                    &mut word,
+                    word.owned_mut()?,
                     &mut fib,
                 )?;
                 paragraph_bin_table.value = rebuilt.0;
@@ -6023,7 +6107,8 @@ impl DocFile {
                         .map_err(|_| Error::Limit("Sepx offset exceeds i32".into()))?;
                     let encoded_len = u32::try_from(encoded.len())
                         .map_err(|_| Error::Limit("Sepx length exceeds u32".into()))?;
-                    word.splice(meaningful_end..meaningful_end, encoded);
+                    word.owned_mut()?
+                        .splice(meaningful_end..meaningful_end, encoded);
                     fib.rg_lw.cb_mac = fib
                         .rg_lw
                         .cb_mac
@@ -6053,7 +6138,7 @@ impl DocFile {
             "PlcBtePapx",
         )?;
         patch_located(&mut table, &sections_table, PlcfSed::to_bytes, "PlcfSed")?;
-        let (table, relocation) = table.finish()?;
+        let (table, relocation) = table.finish_plan()?;
         fib.relocate_table_locations(|location| relocation.relocate(location))?;
         patch_prefix(
             &mut word,
@@ -6061,18 +6146,17 @@ impl DocFile {
             fib.to_bytes()?,
             "FIB",
         )?;
+        let word = word.finish()?;
 
         let mut compound = self.compound_file.clone();
-        compound.overwrite_stream(WORD_DOCUMENT_STREAM, word)?;
-        compound.overwrite_stream(self.table.name.path(), table)?;
-        match data_bytes {
-            Some(bytes) => {
-                compound.upsert_stream(DATA_STREAM, bytes)?;
+        match data_plan.as_ref() {
+            Some(_) if !compound.is_stream(DATA_STREAM) => {
+                compound.upsert_stream(DATA_STREAM, Vec::new())?;
             }
             None if compound.is_stream(DATA_STREAM) => {
                 compound.remove_stream(DATA_STREAM)?;
             }
-            None => {}
+            Some(_) | None => {}
         }
         if let Some(object_pool) = &self.object_pool {
             for object in &object_pool.objects {
@@ -6083,7 +6167,13 @@ impl DocFile {
             }
         }
         self.shared.write_to_compound_file(&mut compound, options)?;
-        Ok(compound)
+        Ok(DocCompoundWritePlan {
+            compound,
+            word,
+            table_path: self.table.name.path(),
+            table: DocStreamWritePlan::Overlay(table),
+            data: data_plan.map(DocStreamWritePlan::Overlay),
+        })
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
@@ -6096,10 +6186,31 @@ impl DocFile {
 
     pub fn to_bytes_with_options(&self, options: SaveOptions) -> Result<Vec<u8>> {
         let bytes = self
-            .to_compound_file_with_current_layout(options)?
+            .compound_write_plan_with_current_layout(options)?
             .to_bytes()?;
-        Self::validate_emitted_bytes(&bytes, options)?;
-        Ok(bytes)
+        Self::validate_emitted_bytes(bytes, options)
+    }
+
+    pub fn write_to(&self, mut writer: impl Write) -> Result<()> {
+        self.write_to_with_options(&mut writer, SaveOptions::default())
+    }
+
+    pub fn write_to_preserving_compatibility(&self, writer: impl Write) -> Result<()> {
+        self.write_to_with_options(writer, SaveOptions::preserving_compatibility())
+    }
+
+    pub fn write_to_with_options(
+        &self,
+        mut writer: impl Write,
+        options: SaveOptions,
+    ) -> Result<()> {
+        if options.preserves_compatibility() {
+            return self
+                .compound_write_plan_with_current_layout(options)?
+                .write_to(writer);
+        }
+        writer.write_all(&self.to_bytes_with_options(options)?)?;
+        Ok(())
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
@@ -6111,6 +6222,11 @@ impl DocFile {
     }
 
     pub fn save_with_options(&self, path: impl AsRef<Path>, options: SaveOptions) -> Result<()> {
+        if options.preserves_compatibility() {
+            let plan = self.compound_write_plan_with_current_layout(options)?;
+            plan.write_to(std::io::sink())?;
+            return plan.write_to(fs::File::create(path)?);
+        }
         fs::write(path, self.to_bytes_with_options(options)?)?;
         Ok(())
     }
@@ -6195,7 +6311,7 @@ impl DocFile {
             replacement,
             ParagraphMarkEdit::ExplicitPapx,
         )?;
-        edited.word_document.papx_runs = Some(papx_runs);
+        Arc::make_mut(&mut edited.word_document).papx_runs = Some(papx_runs);
         edited.validate_current_papx_runs()?;
         edited.validate_document_part_structure(part)?;
         *self = edited;
@@ -6335,13 +6451,13 @@ impl DocFile {
         let piece_paragraph_properties = grpprl_for_group(&piece_properties, SprmGroup::Paragraph);
         let mut applied_paragraph_properties = expand_direct_paragraph_properties(
             &papx_properties,
-            self.data.as_ref(),
+            self.data.as_deref(),
             Some(style_index),
         )?;
         applied_paragraph_properties.properties.extend(
             expand_direct_paragraph_properties(
                 &piece_paragraph_properties,
-                self.data.as_ref(),
+                self.data.as_deref(),
                 None,
             )?
             .properties,
@@ -6395,9 +6511,13 @@ impl DocFile {
             piece_index,
             paragraph,
             character: DocDirectCharacterFormatting {
-                chpx_properties: chpx.properties.clone().unwrap_or_else(|| GrpPrl {
-                    properties: Vec::new(),
-                }),
+                chpx_properties: chpx
+                    .properties
+                    .as_deref()
+                    .cloned()
+                    .unwrap_or_else(|| GrpPrl {
+                        properties: Vec::new(),
+                    }),
                 piece_properties: grpprl_for_group(&piece_properties, SprmGroup::Character),
             },
         })
@@ -6524,7 +6644,7 @@ impl DocFile {
     }
 
     fn realign_papx_runs(&mut self) -> Result<()> {
-        let Some(runs) = &mut self.word_document.papx_runs else {
+        if self.word_document.papx_runs.is_none() {
             if self.word_document.rebuild_paragraph_formatting {
                 return Err(Error::invalid(
                     0,
@@ -6532,8 +6652,13 @@ impl DocFile {
                 ));
             }
             return Ok(());
-        };
-        let ranges = current_paragraph_ranges(&self.word_document.text_pieces)?;
+        }
+        let word_document = Arc::make_mut(&mut self.word_document);
+        let ranges = current_paragraph_ranges(&word_document.text_pieces)?;
+        let runs = word_document
+            .papx_runs
+            .as_mut()
+            .expect("PAPX runs were checked above");
         if runs.len() != ranges.len() {
             return Err(Error::invalid(
                 0,
@@ -7074,7 +7199,9 @@ impl DocFile {
             &prior_edits,
             &local_edit,
         )?;
-        let piece = &mut self.word_document.text_pieces[piece_index].value;
+        let word_document = Arc::make_mut(&mut self.word_document);
+        let table = Arc::make_mut(&mut self.table);
+        let piece = &mut word_document.text_pieces[piece_index].value;
         piece
             .characters
             .replace_code_unit_range(local_start..local_end, &replacement)
@@ -7085,7 +7212,7 @@ impl DocFile {
                 )
             })?;
         let remove_piece = piece.character_count() == 0;
-        if remove_piece && self.word_document.text_pieces.len() == 1 {
+        if remove_piece && word_document.text_pieces.len() == 1 {
             return Err(Error::invalid(
                 u64::from(global_start),
                 "DOC text replacement would remove the final PlcPcd text piece",
@@ -7096,8 +7223,7 @@ impl DocFile {
         let global_edit = CpReplacement::new(global_start, global_end, replacement_len)?;
         let part_edit = CpReplacement::new(range.start, range.end, replacement_len)?;
 
-        for position in self
-            .table
+        for position in table
             .clx
             .value
             .piece_table
@@ -7107,7 +7233,7 @@ impl DocFile {
         {
             *position = global_edit.relocate_i32(*position, "PlcPcd CP")?;
         }
-        for text_piece in self.word_document.text_pieces.iter_mut().skip(piece_index) {
+        for text_piece in word_document.text_pieces.iter_mut().skip(piece_index) {
             if text_piece.piece_index == piece_index {
                 text_piece.value.cp_end =
                     global_edit.relocate_i32(text_piece.value.cp_end, "text piece CP limit")?;
@@ -7119,17 +7245,16 @@ impl DocFile {
             }
         }
         if remove_piece {
-            self.table.clx.value.piece_table.pieces.remove(piece_index);
-            self.table
+            table.clx.value.piece_table.pieces.remove(piece_index);
+            table
                 .clx
                 .value
                 .piece_table
                 .character_positions
                 .remove(piece_index + 1);
-            self.word_document.text_pieces.remove(piece_index);
-            self.word_document.source_piece_indices.remove(piece_index);
-            for (index, piece) in self
-                .word_document
+            word_document.text_pieces.remove(piece_index);
+            word_document.source_piece_indices.remove(piece_index);
+            for (index, piece) in word_document
                 .text_pieces
                 .iter_mut()
                 .enumerate()
@@ -7139,28 +7264,26 @@ impl DocFile {
             }
         }
         set_document_part_length(
-            &mut self.word_document.fib,
+            &mut word_document.fib,
             part,
             part_edit.relocate_u32(part_len, "FIB document-part character count")?,
         )?;
         if part == FieldDocumentPart::Main {
-            relocate_main_document_cps(&mut self.table, &part_edit)?;
+            relocate_main_document_cps(table, &part_edit)?;
         } else {
-            relocate_global_document_cps(&mut self.table, &global_edit)?;
-            relocate_non_main_document_part_cps(&mut self.table, part, &part_edit)?;
+            relocate_global_document_cps(table, &global_edit)?;
+            relocate_non_main_document_part_cps(table, part, &part_edit)?;
         }
         if remove_piece {
-            self.word_document
-                .pending_text_edits
-                .remove(&source_piece_index);
+            word_document.pending_text_edits.remove(&source_piece_index);
         } else {
-            self.word_document
+            word_document
                 .pending_text_edits
                 .entry(source_piece_index)
                 .or_default()
                 .push(local_edit);
         }
-        if let Some(runs) = &mut self.word_document.chpx_runs {
+        if let Some(runs) = &mut word_document.chpx_runs {
             apply_character_run_edit(runs, &global_edit)?;
         } else if rebuild_formatting.character || remove_piece {
             return Err(Error::invalid(
@@ -7168,10 +7291,8 @@ impl DocFile {
                 "DOC CHPX CP tree is unavailable for a structural text edit",
             ));
         }
-        self.word_document.rebuild_character_formatting |=
-            rebuild_formatting.character || remove_piece;
-        self.word_document.rebuild_paragraph_formatting |=
-            rebuild_formatting.paragraph || remove_piece;
+        word_document.rebuild_character_formatting |= rebuild_formatting.character || remove_piece;
+        word_document.rebuild_paragraph_formatting |= rebuild_formatting.paragraph || remove_piece;
         Ok(())
     }
 
@@ -7181,8 +7302,13 @@ impl DocFile {
             &self.table.physical_bytes,
             &self.table.compatibility_tables,
         )?;
-        validate_object_pool_links(&self.compound_file, self.object_pool.as_ref())?;
-        validate_data_links(&self.word_document, &self.table, self.data.as_ref())?;
+        validate_object_pool_links(&self.compound_file, self.object_pool.as_deref())?;
+        validate_data_links(
+            &self.word_document,
+            &self.table,
+            self.data.as_deref(),
+            &self.data_link_baseline,
+        )?;
         let expected_name = if fib.base.flags.contains(FibBaseFlags::USE_1_TABLE) {
             DocTableStreamName::Table1
         } else {
@@ -8828,24 +8954,35 @@ enum DataReferenceKind {
     Ambiguous,
 }
 
-fn rebuild_data_stream(data: Option<&DocDataStream>) -> Result<RebuiltDataStream> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DocDataLinkBaseline {
+    source_stream_present: bool,
+    unresolved_references: BTreeMap<u32, DataReferenceKind>,
+}
+
+fn rebuild_data_stream<'a>(data: Option<&'a DocDataStream>) -> Result<RebuiltDataStream<'a>> {
     let Some(data) = data else {
         return Ok(RebuiltDataStream {
-            bytes: None,
+            plan: None,
             relocations: BTreeMap::new(),
         });
     };
-    let mut measured = TableLayout::new(data.physical_bytes.clone());
+    let mut measured = Vec::with_capacity(data.nodes.len());
+    let mut prepared = Vec::with_capacity(data.nodes.len());
     for node in &data.nodes {
-        measured.replace(
+        let encoded = encode_data_node_value(&node.value)?;
+        measured.push((
             usize::try_from(node.offset)
                 .map_err(|_| Error::Limit("Data node offset exceeds usize".into()))?,
             node.physical_len,
-            encode_data_node_value(&node.value)?,
-            "Data node",
-        )?;
+            encoded.len(),
+        ));
+        prepared.push(
+            (!matches!(node.value, DocDataNodeValue::ParagraphProperties(_))).then_some(encoded),
+        );
     }
-    let (_, measured_relocation) = measured.finish()?;
+    let measured_relocation =
+        plan_table_relocation(data.physical_bytes.len(), measured, "Data node")?;
     let mut relocations = BTreeMap::new();
     for node in &data.nodes {
         let location = FibFcLcb {
@@ -8859,21 +8996,26 @@ fn rebuild_data_stream(data: Option<&DocDataStream>) -> Result<RebuiltDataStream
         relocations.insert(node.offset, relocated.fc);
     }
 
-    let mut emitted = TableLayout::new(data.physical_bytes.clone());
-    for node in &data.nodes {
-        let mut value = node.value.clone();
-        if let DocDataNodeValue::ParagraphProperties(properties) = &mut value {
-            relocate_grpprl_data_references(&mut properties.properties, &relocations)?;
-        }
+    let mut emitted = TableLayout::new(&data.physical_bytes);
+    for (node, prepared) in data.nodes.iter().zip(prepared) {
+        let encoded = match (&node.value, prepared) {
+            (DocDataNodeValue::ParagraphProperties(properties), None) => {
+                let mut properties = properties.clone();
+                relocate_grpprl_data_references(&mut properties.properties, &relocations)?;
+                properties.to_bytes()?
+            }
+            (_, Some(encoded)) => encoded,
+            (_, None) => unreachable!("only paragraph properties require relocation"),
+        };
         emitted.replace(
             usize::try_from(node.offset)
                 .map_err(|_| Error::Limit("Data node offset exceeds usize".into()))?,
             node.physical_len,
-            encode_data_node_value(&value)?,
+            encoded,
             "Data node",
         )?;
     }
-    let (bytes, emitted_relocation) = emitted.finish()?;
+    let (plan, emitted_relocation) = emitted.finish_plan()?;
     for node in &data.nodes {
         let location = FibFcLcb {
             fc: node.offset,
@@ -8891,37 +9033,15 @@ fn rebuild_data_stream(data: Option<&DocDataStream>) -> Result<RebuiltDataStream
         }
     }
     Ok(RebuiltDataStream {
-        bytes: Some(bytes),
+        plan: Some(plan),
         relocations,
     })
 }
 
 fn encode_data_node_value(value: &DocDataNodeValue) -> Result<Vec<u8>> {
     match value {
-        DocDataNodeValue::Picture(value) => {
-            let mut value = value.clone();
-            let picture_len = value.picture.to_bytes()?.len();
-            let name_len = value
-                .shape_file_name
-                .as_ref()
-                .map_or(0usize, |name| name.len() + 1);
-            let total_len = Picf::ENCODED_LEN
-                .checked_add(name_len)
-                .and_then(|length| length.checked_add(picture_len))
-                .ok_or_else(|| Error::Limit("PICFAndOfficeArtData length overflow".into()))?;
-            value.picf.total_length = i32::try_from(total_len)
-                .map_err(|_| Error::Limit("PICFAndOfficeArtData length exceeds i32".into()))?;
-            value.to_bytes()
-        }
-        DocDataNodeValue::Binary(value) => {
-            let mut value = value.clone();
-            let total_len = NilPicfAndBinData::HEADER_LEN
-                .checked_add(value.binary_len()?)
-                .ok_or_else(|| Error::Limit("NilPICFAndBinData length overflow".into()))?;
-            value.total_length = i32::try_from(total_len)
-                .map_err(|_| Error::Limit("NilPICFAndBinData length exceeds i32".into()))?;
-            value.to_bytes()
-        }
+        DocDataNodeValue::Picture(value) => value.to_bytes_with_computed_length(),
+        DocDataNodeValue::Binary(value) => value.to_bytes_with_computed_length(),
         DocDataNodeValue::ParagraphProperties(value) => value.to_bytes(),
     }
 }
@@ -8944,14 +9064,17 @@ fn relocate_root_data_references(
     for page in character_pages {
         for run in &mut page.value.runs {
             if let Some(properties) = &mut run.properties {
-                relocate_grpprl_data_references(properties, relocations)?;
+                relocate_grpprl_data_references(Arc::make_mut(properties), relocations)?;
             }
         }
     }
     for page in paragraph_pages {
         for run in &mut page.value.runs {
             if let Some(properties) = &mut run.properties {
-                relocate_grpprl_data_references(&mut properties.properties, relocations)?;
+                relocate_grpprl_data_references(
+                    &mut Arc::make_mut(properties).properties,
+                    relocations,
+                )?;
             }
         }
     }
@@ -9264,11 +9387,11 @@ fn text_character_at_cp(word: &DocWordDocumentStream, cp: u32) -> Option<u16> {
         .iter()
         .find(|piece| piece.value.cp_start <= cp && cp < piece.value.cp_end)?;
     let index = usize::try_from(cp - piece.value.cp_start).ok()?;
-    piece.value.characters.code_units_iter().nth(index)
+    piece.value.characters.code_units().get(index).copied()
 }
 
 fn parse_data_stream(
-    bytes: Option<&[u8]>,
+    bytes: Option<CfbStreamData>,
     word: &DocWordDocumentStream,
     table: &DocTableStream,
     options: ParseOptions,
@@ -9276,7 +9399,7 @@ fn parse_data_stream(
 ) -> Result<Option<DocDataStream>> {
     let mut references = collect_data_references(word, table)?;
     let binary_field_types = collect_nil_picf_field_types(word, table);
-    let Some(bytes) = bytes else {
+    let Some(physical_bytes) = bytes else {
         if references.is_empty() {
             return Ok(None);
         }
@@ -9287,6 +9410,7 @@ fn parse_data_stream(
         report_data_compatibility(diagnostics, 0, error.to_string());
         return Ok(None);
     };
+    let bytes = physical_bytes.as_slice();
     ensure_stream_limit("Data", bytes, options.limits)?;
 
     let mut pending = references
@@ -9371,7 +9495,7 @@ fn parse_data_stream(
     }
     ensure_entry_limit("DOC Data nodes", retained.len(), options.limits)?;
     Ok(Some(DocDataStream {
-        physical_bytes: bytes.to_vec(),
+        physical_bytes,
         nodes: retained,
     }))
 }
@@ -9724,49 +9848,170 @@ fn validate_object_pool_links(
     Ok(())
 }
 
+fn build_data_link_baseline(
+    source_stream_present: bool,
+    word: &DocWordDocumentStream,
+    table: &DocTableStream,
+    data: Option<&DocDataStream>,
+) -> Result<DocDataLinkBaseline> {
+    let nodes = data
+        .into_iter()
+        .flat_map(|data| &data.nodes)
+        .map(|node| (node.offset, node))
+        .collect::<BTreeMap<_, _>>();
+    let mut unresolved_references = collect_complete_data_references(word, table, &nodes)?;
+    unresolved_references.retain(|offset, _| !nodes.contains_key(offset));
+    Ok(DocDataLinkBaseline {
+        source_stream_present,
+        unresolved_references,
+    })
+}
+
+fn collect_complete_data_references(
+    word: &DocWordDocumentStream,
+    table: &DocTableStream,
+    nodes: &BTreeMap<u32, &DocDataNode>,
+) -> Result<BTreeMap<u32, DataReferenceKind>> {
+    let mut references = collect_data_references(word, table)?;
+    let mut pending = references
+        .iter()
+        .map(|(offset, kind)| (*offset, *kind))
+        .collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < pending.len() {
+        let (offset, _) = pending[index];
+        index += 1;
+        let Some(DocDataNode {
+            value: DocDataNodeValue::ParagraphProperties(properties),
+            ..
+        }) = nodes.get(&offset).copied()
+        else {
+            continue;
+        };
+        let mut nested = BTreeMap::new();
+        collect_grpprl_data_references(&properties.properties, &mut nested)?;
+        for (nested_offset, nested_kind) in nested {
+            match references.get_mut(&nested_offset) {
+                Some(existing) if *existing != nested_kind => {
+                    *existing = DataReferenceKind::Ambiguous;
+                    if let Some(pending_entry) = pending
+                        .iter_mut()
+                        .find(|(pending_offset, _)| *pending_offset == nested_offset)
+                    {
+                        pending_entry.1 = DataReferenceKind::Ambiguous;
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    references.insert(nested_offset, nested_kind);
+                    pending.push((nested_offset, nested_kind));
+                }
+            }
+        }
+    }
+    Ok(references)
+}
+
+fn reference_kinds_match(left: DataReferenceKind, right: DataReferenceKind) -> bool {
+    left == right
+        || matches!(left, DataReferenceKind::Ambiguous)
+        || matches!(right, DataReferenceKind::Ambiguous)
+}
+
+fn data_node_matches_reference(node: &DocDataNode, kind: DataReferenceKind) -> bool {
+    match kind {
+        DataReferenceKind::PictureOrBinary => matches!(
+            node.value,
+            DocDataNodeValue::Picture(_) | DocDataNodeValue::Binary(_)
+        ),
+        DataReferenceKind::ParagraphProperties => {
+            matches!(node.value, DocDataNodeValue::ParagraphProperties(_))
+        }
+        DataReferenceKind::Ambiguous => true,
+    }
+}
+
 fn validate_data_links(
     word: &DocWordDocumentStream,
     table: &DocTableStream,
     data: Option<&DocDataStream>,
+    baseline: &DocDataLinkBaseline,
 ) -> Result<()> {
     let Some(data) = data else {
-        return Ok(());
+        let nodes = BTreeMap::new();
+        let references = collect_complete_data_references(word, table, &nodes)?;
+        if references.is_empty()
+            || (!baseline.source_stream_present
+                && references.iter().all(|(offset, kind)| {
+                    baseline
+                        .unresolved_references
+                        .get(offset)
+                        .is_some_and(|baseline_kind| reference_kinds_match(*kind, *baseline_kind))
+                }))
+        {
+            return Ok(());
+        }
+        return Err(Error::invalid(
+            0,
+            "DOC SPRM references exist but the Data stream was removed",
+        ));
     };
-    let mut diagnostics = Vec::new();
-    let expected = parse_data_stream(
-        Some(&data.physical_bytes),
-        word,
-        table,
-        ParseOptions::compatible(Limits::default()),
-        &mut diagnostics,
-    )?
-    .expect("a supplied Data stream produces a root");
-    if expected.nodes.len() != data.nodes.len()
-        || expected
-            .nodes
-            .iter()
-            .zip(&data.nodes)
-            .any(|(expected, actual)| {
-                expected.offset != actual.offset
-                    || expected.physical_len != actual.physical_len
-                    || !same_data_node_kind(&expected.value, &actual.value)
-            })
-    {
+
+    let mut nodes = BTreeMap::new();
+    let mut previous_end = 0usize;
+    for node in &data.nodes {
+        let offset = usize::try_from(node.offset)
+            .map_err(|_| Error::Limit("Data node offset exceeds usize".into()))?;
+        let end = offset
+            .checked_add(node.physical_len)
+            .ok_or_else(|| Error::Limit("Data node physical range overflow".into()))?;
+        if end > data.physical_bytes.len() {
+            return Err(Error::invalid(
+                u64::from(node.offset),
+                "DOC Data node physical range exceeds the stream",
+            ));
+        }
+        if offset < previous_end {
+            return Err(Error::invalid(
+                u64::from(node.offset),
+                "DOC Data nodes overlap or are not in physical order",
+            ));
+        }
+        previous_end = end;
+        if nodes.insert(node.offset, node).is_some() {
+            return Err(Error::invalid(
+                u64::from(node.offset),
+                "DOC Data node offset is duplicated",
+            ));
+        }
+    }
+
+    let references = collect_complete_data_references(word, table, &nodes)?;
+    for (offset, kind) in &references {
+        let Some(node) = nodes.get(offset) else {
+            if baseline
+                .unresolved_references
+                .get(offset)
+                .is_some_and(|baseline_kind| reference_kinds_match(*kind, *baseline_kind))
+            {
+                continue;
+            }
+            return Err(Error::invalid(
+                u64::from(*offset),
+                "DOC SPRM references a missing typed Data node",
+            ));
+        };
+        if !data_node_matches_reference(node, *kind) {
+            return Err(Error::invalid(
+                u64::from(*offset),
+                "DOC SPRM/Data node type link changed",
+            ));
+        }
+    }
+    if nodes.keys().any(|offset| !references.contains_key(offset)) {
         return Err(Error::invalid(0, "DOC SPRM/Data node links changed"));
     }
     Ok(())
-}
-
-fn same_data_node_kind(left: &DocDataNodeValue, right: &DocDataNodeValue) -> bool {
-    matches!(
-        (left, right),
-        (DocDataNodeValue::Picture(_), DocDataNodeValue::Picture(_))
-            | (DocDataNodeValue::Binary(_), DocDataNodeValue::Binary(_))
-            | (
-                DocDataNodeValue::ParagraphProperties(_),
-                DocDataNodeValue::ParagraphProperties(_)
-            )
-    )
 }
 
 fn parse_fkp_pages<T>(
@@ -10528,9 +10773,11 @@ fn parse_optional<T>(
         .transpose()
 }
 
-fn required_stream<'a>(compound: &'a CompoundFile, path: &str) -> Result<&'a [u8]> {
+fn required_stream_data(compound: &CompoundFile, path: &str) -> Result<CfbStreamData> {
     compound
-        .stream(path)
+        .entry(path)
+        .filter(|entry| entry.is_stream())
+        .map(|entry| entry.data.clone())
         .ok_or_else(|| Error::invalid(0, format!("required CFB stream {path} is missing")))
 }
 
@@ -10574,7 +10821,7 @@ struct TextRelocation {
 struct PhysicalCharacterRun {
     start: u32,
     end: u32,
-    properties: Option<GrpPrl>,
+    properties: Option<Arc<GrpPrl>>,
 }
 
 #[derive(Clone, Debug)]
@@ -10767,7 +11014,7 @@ fn current_paragraph_ranges(pieces: &[DocTextPiece]) -> Result<Vec<(u32, u32)>> 
     Ok(ranges)
 }
 
-fn text_piece_u16_values(characters: &TextPieceCharacters) -> Box<dyn Iterator<Item = u16> + '_> {
+fn text_piece_u16_values(characters: &TextPieceCharacters) -> impl Iterator<Item = u16> + '_ {
     characters.code_units_iter()
 }
 
@@ -11483,7 +11730,7 @@ fn text_piece_character_replacement(
     }
     let source_units = source.code_units();
     let destination_units = destination.code_units();
-    let (prefix, suffix) = common_prefix_and_suffix(&source_units, &destination_units);
+    let (prefix, suffix) = common_prefix_and_suffix(source_units, destination_units);
     let old_start =
         u32::try_from(prefix).map_err(|_| Error::Limit("text edit start exceeds u32".into()))?;
     let old_end = u32::try_from(source_len - suffix)
@@ -11610,9 +11857,90 @@ struct PendingTableReplacement {
 }
 
 #[derive(Debug)]
-struct TableLayout {
-    original: Vec<u8>,
+struct TableLayout<'a> {
+    original: &'a [u8],
     replacements: Vec<PendingTableReplacement>,
+}
+
+#[derive(Debug)]
+struct TableWritePlan<'a> {
+    original: &'a [u8],
+    replacements: Vec<PendingTableReplacement>,
+    output_len: usize,
+}
+
+enum MutableWordLayout<'a> {
+    Owned(Vec<u8>),
+    Overlay(TableLayout<'a>),
+}
+
+enum DocStreamWritePlan<'a> {
+    Owned(Vec<u8>),
+    Overlay(TableWritePlan<'a>),
+}
+
+struct DocCompoundWritePlan<'a> {
+    compound: CompoundFile,
+    word: DocStreamWritePlan<'a>,
+    table_path: &'static str,
+    table: DocStreamWritePlan<'a>,
+    data: Option<DocStreamWritePlan<'a>>,
+}
+
+impl CfbStreamWriter for DocStreamWritePlan<'_> {
+    fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+        DocStreamWritePlan::write_to(self, writer)
+    }
+}
+
+impl DocCompoundWritePlan<'_> {
+    fn stream_overrides(&self) -> Vec<CfbStreamOverride<'_>> {
+        let mut overrides = Vec::with_capacity(3);
+        overrides.push(CfbStreamOverride::new(
+            Path::new(WORD_DOCUMENT_STREAM),
+            self.word.output_len(),
+            &self.word,
+        ));
+        overrides.push(CfbStreamOverride::new(
+            Path::new(self.table_path),
+            self.table.output_len(),
+            &self.table,
+        ));
+        if let Some(data) = &self.data {
+            overrides.push(CfbStreamOverride::new(
+                Path::new(DATA_STREAM),
+                data.output_len(),
+                data,
+            ));
+        }
+        overrides
+    }
+
+    fn to_bytes(&self) -> Result<Vec<u8>> {
+        self.compound
+            .to_bytes_with_stream_overrides(&self.stream_overrides())
+    }
+
+    fn write_to(&self, writer: impl Write) -> Result<()> {
+        self.compound
+            .write_to_with_stream_overrides(&self.stream_overrides(), writer)
+    }
+
+    fn into_compound(self) -> Result<CompoundFile> {
+        let Self {
+            mut compound,
+            word,
+            table_path,
+            table,
+            data,
+        } = self;
+        compound.overwrite_stream(WORD_DOCUMENT_STREAM, word.into_bytes()?)?;
+        compound.overwrite_stream(table_path, table.into_bytes()?)?;
+        if let Some(data) = data {
+            compound.upsert_stream(DATA_STREAM, data.into_bytes()?)?;
+        }
+        Ok(compound)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -11630,15 +11958,21 @@ struct TableRelocation {
     replacements: Vec<AppliedTableReplacement>,
 }
 
-impl TableLayout {
-    fn new(original: Vec<u8>) -> Self {
+impl<'a> TableLayout<'a> {
+    fn new(original: &'a [u8]) -> Self {
         Self {
             original,
             replacements: Vec::new(),
         }
     }
 
-    fn finish(mut self) -> Result<(Vec<u8>, TableRelocation)> {
+    #[cfg(test)]
+    fn finish(self) -> Result<(Vec<u8>, TableRelocation)> {
+        let (plan, relocation) = self.finish_plan()?;
+        Ok((plan.to_bytes()?, relocation))
+    }
+
+    fn finish_plan(mut self) -> Result<(TableWritePlan<'a>, TableRelocation)> {
         self.replacements.sort_by_key(|value| value.offset);
         for pair in self.replacements.windows(2) {
             let previous_end = pair[0]
@@ -11657,10 +11991,19 @@ impl TableLayout {
         }
 
         let original_len = self.original.len();
-        let mut output = Vec::new();
+        let output_len =
+            self.replacements
+                .iter()
+                .try_fold(original_len, |length, replacement| {
+                    length
+                        .checked_sub(replacement.expected)
+                        .and_then(|length| length.checked_add(replacement.encoded.len()))
+                        .ok_or_else(|| Error::Limit("Table Stream output length overflow".into()))
+                })?;
         let mut cursor = 0usize;
+        let mut emitted = 0usize;
         let mut applied = Vec::with_capacity(self.replacements.len());
-        for replacement in self.replacements {
+        for replacement in &self.replacements {
             let old_end = replacement
                 .offset
                 .checked_add(replacement.expected)
@@ -11680,10 +12023,14 @@ impl TableLayout {
                     format!("{} exceeds Table Stream", replacement.label),
                 ));
             }
-            output.extend_from_slice(unchanged);
-            let new_offset = output.len();
+            emitted = emitted
+                .checked_add(unchanged.len())
+                .ok_or_else(|| Error::Limit("Table Stream output length overflow".into()))?;
+            let new_offset = emitted;
             let new_len = replacement.encoded.len();
-            output.extend_from_slice(&replacement.encoded);
+            emitted = emitted
+                .checked_add(new_len)
+                .ok_or_else(|| Error::Limit("Table Stream output length overflow".into()))?;
             applied.push(AppliedTableReplacement {
                 old_offset: replacement.offset,
                 old_len: replacement.expected,
@@ -11692,9 +12039,16 @@ impl TableLayout {
             });
             cursor = old_end;
         }
-        output.extend_from_slice(&self.original[cursor..]);
+        emitted = emitted
+            .checked_add(self.original.len() - cursor)
+            .ok_or_else(|| Error::Limit("Table Stream output length overflow".into()))?;
+        debug_assert_eq!(emitted, output_len);
         Ok((
-            output,
+            TableWritePlan {
+                original: self.original,
+                replacements: self.replacements,
+                output_len,
+            },
             TableRelocation {
                 original_len,
                 changed_layout: applied.iter().any(|value| value.old_len != value.new_len),
@@ -11704,7 +12058,101 @@ impl TableLayout {
     }
 }
 
-impl PatchSink for TableLayout {
+impl TableWritePlan<'_> {
+    fn to_bytes(&self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::with_capacity(self.output_len);
+        self.write_to(&mut bytes)?;
+        debug_assert_eq!(bytes.len(), self.output_len);
+        Ok(bytes)
+    }
+
+    fn write_to<W: Write + ?Sized>(&self, writer: &mut W) -> Result<()> {
+        let mut cursor = 0usize;
+        for replacement in &self.replacements {
+            writer.write_all(&self.original[cursor..replacement.offset])?;
+            writer.write_all(&replacement.encoded)?;
+            cursor = replacement.offset + replacement.expected;
+        }
+        writer.write_all(&self.original[cursor..])?;
+        Ok(())
+    }
+}
+
+impl<'a> MutableWordLayout<'a> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Owned(bytes) => bytes.len(),
+            Self::Overlay(layout) => layout.original.len(),
+        }
+    }
+
+    fn owned_mut(&mut self) -> Result<&mut Vec<u8>> {
+        match self {
+            Self::Owned(bytes) => Ok(bytes),
+            Self::Overlay(_) => Err(Error::invalid(
+                0,
+                "WordDocument variable layout was not selected before mutation",
+            )),
+        }
+    }
+
+    fn finish(self) -> Result<DocStreamWritePlan<'a>> {
+        match self {
+            Self::Owned(bytes) => Ok(DocStreamWritePlan::Owned(bytes)),
+            Self::Overlay(layout) => {
+                let (plan, relocation) = layout.finish_plan()?;
+                if relocation.changed_layout {
+                    return Err(Error::invalid(
+                        0,
+                        "WordDocument overlay changed physical layout without relocation",
+                    ));
+                }
+                Ok(DocStreamWritePlan::Overlay(plan))
+            }
+        }
+    }
+}
+
+impl PatchSink for MutableWordLayout<'_> {
+    fn replace(
+        &mut self,
+        offset: usize,
+        expected: usize,
+        encoded: Vec<u8>,
+        label: &str,
+    ) -> Result<()> {
+        match self {
+            Self::Owned(bytes) => bytes.replace(offset, expected, encoded, label),
+            Self::Overlay(layout) => layout.replace(offset, expected, encoded, label),
+        }
+    }
+}
+
+impl DocStreamWritePlan<'_> {
+    fn output_len(&self) -> usize {
+        match self {
+            Self::Owned(bytes) => bytes.len(),
+            Self::Overlay(plan) => plan.output_len,
+        }
+    }
+
+    fn write_to<W: Write + ?Sized>(&self, writer: &mut W) -> Result<()> {
+        match self {
+            Self::Owned(bytes) => writer.write_all(bytes)?,
+            Self::Overlay(plan) => plan.write_to(writer)?,
+        }
+        Ok(())
+    }
+
+    fn into_bytes(self) -> Result<Vec<u8>> {
+        match self {
+            Self::Owned(bytes) => Ok(bytes),
+            Self::Overlay(plan) => plan.to_bytes(),
+        }
+    }
+}
+
+impl PatchSink for TableLayout<'_> {
     fn replace(
         &mut self,
         offset: usize,
@@ -11715,14 +12163,17 @@ impl PatchSink for TableLayout {
         if expected == 0 && encoded.is_empty() {
             return Ok(());
         }
-        if offset
+        let end = offset
             .checked_add(expected)
-            .is_none_or(|end| end > self.original.len())
-        {
+            .ok_or_else(|| Error::Limit(format!("{label} replacement end overflow")))?;
+        if end > self.original.len() {
             return Err(Error::invalid(
                 offset as u64,
                 format!("{label} exceeds Table Stream"),
             ));
+        }
+        if encoded.len() == expected && self.original.get(offset..end) == Some(encoded.as_slice()) {
+            return Ok(());
         }
         self.replacements.push(PendingTableReplacement {
             offset,
@@ -11787,6 +12238,53 @@ impl TableRelocation {
             lcb: location.lcb,
         }))
     }
+}
+
+fn plan_table_relocation(
+    original_len: usize,
+    mut replacements: Vec<(usize, usize, usize)>,
+    label: &str,
+) -> Result<TableRelocation> {
+    replacements.sort_by_key(|(offset, _, _)| *offset);
+    let mut old_cursor = 0usize;
+    let mut new_cursor = 0usize;
+    let mut applied = Vec::with_capacity(replacements.len());
+    for (old_offset, old_len, new_len) in replacements {
+        if old_offset < old_cursor {
+            return Err(Error::invalid(
+                old_offset as u64,
+                format!("{label} replacements overlap"),
+            ));
+        }
+        let old_end = old_offset
+            .checked_add(old_len)
+            .ok_or_else(|| Error::Limit(format!("{label} replacement end overflow")))?;
+        if old_end > original_len {
+            return Err(Error::invalid(
+                old_offset as u64,
+                format!("{label} exceeds its stream"),
+            ));
+        }
+        let unchanged_len = old_offset - old_cursor;
+        let new_offset = new_cursor
+            .checked_add(unchanged_len)
+            .ok_or_else(|| Error::Limit(format!("{label} output offset overflow")))?;
+        new_cursor = new_offset
+            .checked_add(new_len)
+            .ok_or_else(|| Error::Limit(format!("{label} output end overflow")))?;
+        applied.push(AppliedTableReplacement {
+            old_offset,
+            old_len,
+            new_offset,
+            new_len,
+        });
+        old_cursor = old_end;
+    }
+    Ok(TableRelocation {
+        original_len,
+        changed_layout: applied.iter().any(|value| value.old_len != value.new_len),
+        replacements: applied,
+    })
 }
 
 fn patch_located<T, S: PatchSink + ?Sized>(
@@ -11885,11 +12383,17 @@ mod tests {
 
     #[test]
     fn table_layout_rebuilds_ranges_and_relocates_fib_coordinates() {
-        let mut layout = TableLayout::new(b"abcdefghij".to_vec());
+        let mut layout = TableLayout::new(b"abcdefghij");
         layout.replace(2, 2, b"XYZ".to_vec(), "grow").unwrap();
         layout.replace(7, 1, Vec::new(), "remove").unwrap();
-        let (bytes, relocation) = layout.finish().unwrap();
+        let (plan, relocation) = layout.finish_plan().unwrap();
+        let bytes = plan.to_bytes().unwrap();
+        let mut streamed = Vec::new();
+        plan.write_to(&mut streamed).unwrap();
+        let planned =
+            plan_table_relocation(10, vec![(2, 2, 3), (7, 1, 0)], "test replacement").unwrap();
         assert_eq!(bytes, b"abXYZefgij");
+        assert_eq!(streamed, bytes);
         assert_eq!(
             relocation.relocate(FibFcLcb { fc: 2, lcb: 2 }).unwrap(),
             Some(FibFcLcb { fc: 2, lcb: 3 })
@@ -11903,16 +12407,42 @@ mod tests {
             Some(FibFcLcb { fc: 8, lcb: 0 })
         );
         assert!(relocation.relocate(FibFcLcb { fc: 1, lcb: 2 }).is_err());
+        for location in [
+            FibFcLcb { fc: 2, lcb: 2 },
+            FibFcLcb { fc: 4, lcb: 2 },
+            FibFcLcb { fc: 7, lcb: 1 },
+            FibFcLcb { fc: 1, lcb: 2 },
+        ] {
+            assert_eq!(
+                planned
+                    .relocate(location)
+                    .map_err(|error| error.to_string()),
+                relocation
+                    .relocate(location)
+                    .map_err(|error| error.to_string())
+            );
+        }
     }
 
     #[test]
     fn same_size_table_layout_preserves_compatibility_overlaps() {
-        let mut layout = TableLayout::new(b"abcdef".to_vec());
+        let mut layout = TableLayout::new(b"abcdef");
         layout.replace(2, 2, b"XY".to_vec(), "same size").unwrap();
         let (bytes, relocation) = layout.finish().unwrap();
         assert_eq!(bytes, b"abXYef");
         let overlapping = FibFcLcb { fc: 1, lcb: 4 };
         assert_eq!(relocation.relocate(overlapping).unwrap(), Some(overlapping));
+    }
+
+    #[test]
+    fn table_layout_drops_byte_identical_owned_replacements() {
+        let mut layout = TableLayout::new(b"abcdef");
+        layout.replace(2, 2, b"cd".to_vec(), "unchanged").unwrap();
+        assert!(layout.replacements.is_empty());
+        let (bytes, relocation) = layout.finish().unwrap();
+        assert_eq!(bytes, b"abcdef");
+        assert!(!relocation.changed_layout);
+        assert!(relocation.replacements.is_empty());
     }
 
     #[test]
@@ -12006,12 +12536,12 @@ mod tests {
     #[test]
     fn character_run_edits_inherit_the_start_run_and_remove_inner_boundaries() {
         let property = |value| {
-            Some(GrpPrl {
+            Some(Arc::new(GrpPrl {
                 properties: vec![super::super::Prl {
                     sprm: super::super::Sprm::from_opcode(0x0835),
                     operand: SprmOperand::Toggle(value),
                 }],
-            })
+            }))
         };
         let mut runs = vec![
             DocChpxRun {
@@ -12103,7 +12633,7 @@ mod tests {
             ],
         };
         let data = DocDataStream {
-            physical_bytes: Vec::new(),
+            physical_bytes: Vec::new().into(),
             nodes: vec![
                 DocDataNode {
                     offset: 4,

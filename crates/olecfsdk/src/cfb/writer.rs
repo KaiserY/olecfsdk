@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::{
-    CompoundFile, Entry, EntryKind, Version,
+    CfbStreamOverride, CompoundFile, Entry, EntryKind, Version,
     allocation::{DIFAT_SECTOR, END_OF_CHAIN, FAT_SECTOR},
     directory::{
         DIRECTORY_ENTRY_LEN, DirectoryColor, DirectoryEntry, DirectoryObjectType, DirectoryPointer,
@@ -29,17 +29,20 @@ pub(crate) fn write_compound(compound: &CompoundFile) -> Result<Vec<u8>> {
         compound.version,
         &compound.entries,
         &compound.unallocated_sectors,
+        &[],
     )?;
     let output_len = layout_output_len(
         &layout,
         &compound.unallocated_sectors,
         &compound.trailing_data,
+        &[],
     )?;
     let mut output = Vec::with_capacity(output_len);
     emit_layout(
         &layout,
         &compound.unallocated_sectors,
         &compound.trailing_data,
+        &[],
         &mut output,
     )?;
     debug_assert_eq!(output.len(), output_len);
@@ -47,11 +50,50 @@ pub(crate) fn write_compound(compound: &CompoundFile) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn write_compound_to(compound: &CompoundFile, writer: &mut impl Write) -> Result<()> {
+    write_compound_to_with_overrides(compound, &[], writer)
+}
+
+pub(crate) fn write_compound_with_overrides(
+    compound: &CompoundFile,
+    overrides: &[CfbStreamOverride<'_>],
+) -> Result<Vec<u8>> {
+    validate_overrides(&compound.entries, overrides)?;
+    let layout = build_layout(
+        compound.version,
+        &compound.entries,
+        &compound.unallocated_sectors,
+        overrides,
+    )?;
+    let output_len = layout_output_len(
+        &layout,
+        &compound.unallocated_sectors,
+        &compound.trailing_data,
+        overrides,
+    )?;
+    let mut output = Vec::with_capacity(output_len);
+    emit_layout(
+        &layout,
+        &compound.unallocated_sectors,
+        &compound.trailing_data,
+        overrides,
+        &mut output,
+    )?;
+    debug_assert_eq!(output.len(), output_len);
+    Ok(output)
+}
+
+pub(crate) fn write_compound_to_with_overrides(
+    compound: &CompoundFile,
+    overrides: &[CfbStreamOverride<'_>],
+    writer: &mut impl Write,
+) -> Result<()> {
+    validate_overrides(&compound.entries, overrides)?;
     write_logical_compound_to(
         compound.version,
         &compound.entries,
         &compound.unallocated_sectors,
         &compound.trailing_data,
+        overrides,
         writer,
     )
 }
@@ -67,10 +109,10 @@ pub(crate) fn write_empty_compound(version: Version) -> Result<Vec<u8>> {
         modified: FileTime::ZERO,
         data: Vec::new().into(),
     }];
-    let layout = build_layout(version, &entries, &[])?;
-    let output_len = layout_output_len(&layout, &[], &[])?;
+    let layout = build_layout(version, &entries, &[], &[])?;
+    let output_len = layout_output_len(&layout, &[], &[], &[])?;
     let mut output = Vec::with_capacity(output_len);
-    emit_layout(&layout, &[], &[], &mut output)?;
+    emit_layout(&layout, &[], &[], &[], &mut output)?;
     debug_assert_eq!(output.len(), output_len);
     Ok(output)
 }
@@ -93,16 +135,24 @@ fn write_logical_compound_to(
     entries: &[Entry],
     unallocated_sectors: &[Vec<u8>],
     trailing_data: &[u8],
+    overrides: &[CfbStreamOverride<'_>],
     writer: &mut impl Write,
 ) -> Result<()> {
-    let layout = build_layout(version, entries, unallocated_sectors)?;
-    emit_layout(&layout, unallocated_sectors, trailing_data, writer)
+    let layout = build_layout(version, entries, unallocated_sectors, overrides)?;
+    emit_layout(
+        &layout,
+        unallocated_sectors,
+        trailing_data,
+        overrides,
+        writer,
+    )
 }
 
 fn build_layout<'a>(
     version: Version,
     entries: &'a [Entry],
     unallocated_sectors: &[Vec<u8>],
+    overrides: &[CfbStreamOverride<'_>],
 ) -> Result<CompoundLayout<'a>> {
     let sector_len = match version {
         Version::V3 => 512,
@@ -110,9 +160,9 @@ fn build_layout<'a>(
     };
     let ordered = ordered_entries(entries)?;
     if version == Version::V3
-        && ordered
-            .iter()
-            .any(|entry| entry.kind == EntryKind::Stream && entry.data.len() > 0x8000_0000)
+        && ordered.iter().any(|entry| {
+            entry.kind == EntryKind::Stream && stream_len(entry, overrides) > 0x8000_0000
+        })
     {
         return Err(Error::Limit(
             "CFB v3 streams cannot exceed the specified 2 GiB limit".into(),
@@ -124,14 +174,14 @@ fn build_layout<'a>(
 
     for (index, entry) in ordered.iter().enumerate() {
         if entry.kind != EntryKind::Stream
-            || entry.data.is_empty()
-            || entry.data.len() >= MINI_STREAM_CUTOFF as usize
+            || stream_len(entry, overrides) == 0
+            || stream_len(entry, overrides) >= MINI_STREAM_CUTOFF as usize
         {
             continue;
         }
         let start = u32_len(mini_fat.len(), "mini-sector count")?;
         mini_starts[index] = start;
-        let count = div_ceil(entry.data.len(), MINI_SECTOR_LEN);
+        let count = div_ceil(stream_len(entry, overrides), MINI_SECTOR_LEN);
         for offset in 0..count {
             let offset = u32_len(offset, "mini-sector chain length")?;
             let current = start
@@ -187,16 +237,27 @@ fn build_layout<'a>(
     let mini_fat_sector_count = mini_fat.len() / mini_fat_entries_per_sector;
 
     for (index, entry) in ordered.iter().enumerate() {
-        if entry.kind == EntryKind::Stream && entry.data.len() >= MINI_STREAM_CUTOFF as usize {
-            starts[index] =
-                reserve_payload(&mut next_sector, &mut chains, entry.data.len(), sector_len)?;
+        if entry.kind == EntryKind::Stream
+            && stream_len(entry, overrides) >= MINI_STREAM_CUTOFF as usize
+        {
+            starts[index] = reserve_payload(
+                &mut next_sector,
+                &mut chains,
+                stream_len(entry, overrides),
+                sector_len,
+            )?;
         } else if entry.kind == EntryKind::Stream {
             starts[index] = mini_starts[index];
         }
     }
 
-    let directory_entries =
-        build_directory_entries(&ordered, &starts, root_mini_start, mini_stream_len as u64)?;
+    let directory_entries = build_directory_entries(
+        &ordered,
+        &starts,
+        root_mini_start,
+        mini_stream_len as u64,
+        overrides,
+    )?;
     let entries_per_sector = sector_len / DIRECTORY_ENTRY_LEN;
     let padded_directory_entry_count = checked_next_multiple(
         directory_entries.len(),
@@ -303,10 +364,112 @@ fn build_layout<'a>(
     })
 }
 
+fn validate_overrides(entries: &[Entry], overrides: &[CfbStreamOverride<'_>]) -> Result<()> {
+    for (index, stream_override) in overrides.iter().enumerate() {
+        if overrides[..index]
+            .iter()
+            .any(|previous| previous.path == stream_override.path)
+        {
+            return Err(Error::invalid(
+                0,
+                format!(
+                    "duplicate CFB stream override {}",
+                    stream_override.path.display()
+                ),
+            ));
+        }
+        let entry = entries
+            .iter()
+            .find(|entry| entry.path == stream_override.path)
+            .ok_or_else(|| {
+                Error::invalid(
+                    0,
+                    format!(
+                        "CFB stream override {} does not exist",
+                        stream_override.path.display()
+                    ),
+                )
+            })?;
+        if entry.kind != EntryKind::Stream {
+            return Err(Error::invalid(
+                0,
+                format!(
+                    "CFB stream override {} is not a stream",
+                    stream_override.path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn stream_override<'a>(
+    entry: &Entry,
+    overrides: &'a [CfbStreamOverride<'_>],
+) -> Option<&'a CfbStreamOverride<'a>> {
+    overrides
+        .iter()
+        .find(|stream_override| stream_override.path == entry.path)
+}
+
+fn stream_len(entry: &Entry, overrides: &[CfbStreamOverride<'_>]) -> usize {
+    stream_override(entry, overrides).map_or_else(|| entry.data.len(), |value| value.len)
+}
+
+fn write_stream(
+    entry: &Entry,
+    overrides: &[CfbStreamOverride<'_>],
+    writer: &mut impl Write,
+) -> Result<()> {
+    let Some(stream_override) = stream_override(entry, overrides) else {
+        return entry.data.write_to(writer);
+    };
+    let mut exact = ExactSizeWriter {
+        writer,
+        remaining: stream_override.len,
+    };
+    stream_override.writer.write_to(&mut exact)?;
+    if exact.remaining != 0 {
+        return Err(Error::invalid(
+            0,
+            format!(
+                "CFB stream override {} emitted {} fewer bytes than declared",
+                stream_override.path.display(),
+                exact.remaining
+            ),
+        ));
+    }
+    Ok(())
+}
+
+struct ExactSizeWriter<'a, W: Write + ?Sized> {
+    writer: &'a mut W,
+    remaining: usize,
+}
+
+impl<W: Write + ?Sized> Write for ExactSizeWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.remaining {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "CFB stream override emitted more bytes than declared",
+            ));
+        }
+        let written = self.writer.write(bytes)?;
+        self.remaining = self.remaining.saturating_sub(written);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
 fn emit_layout(
     layout: &CompoundLayout<'_>,
     unallocated_sectors: &[Vec<u8>],
     trailing_data: &[u8],
+    overrides: &[CfbStreamOverride<'_>],
     writer: &mut impl Write,
 ) -> Result<()> {
     let header = encode_header(&layout.header)?;
@@ -314,20 +477,18 @@ fn emit_layout(
     write_zeros(writer, layout.sector_len - header.len())?;
 
     for entry in &layout.ordered {
+        let stream_len = stream_len(entry, overrides);
         if entry.kind != EntryKind::Stream
-            || entry.data.is_empty()
-            || entry.data.len() >= MINI_STREAM_CUTOFF as usize
+            || stream_len == 0
+            || stream_len >= MINI_STREAM_CUTOFF as usize
         {
             continue;
         }
-        writer.write_all(&entry.data)?;
+        write_stream(entry, overrides, writer)?;
         write_zeros(
             writer,
-            checked_next_multiple(
-                entry.data.len(),
-                MINI_SECTOR_LEN,
-                "mini stream payload length",
-            )? - entry.data.len(),
+            checked_next_multiple(stream_len, MINI_SECTOR_LEN, "mini stream payload length")?
+                - stream_len,
         )?;
     }
     write_zeros(
@@ -342,17 +503,18 @@ fn emit_layout(
     write_u32_sectors(writer, &layout.mini_fat, layout.sector_len)?;
 
     for entry in &layout.ordered {
-        if entry.kind != EntryKind::Stream || entry.data.len() < MINI_STREAM_CUTOFF as usize {
+        let stream_len = stream_len(entry, overrides);
+        if entry.kind != EntryKind::Stream || stream_len < MINI_STREAM_CUTOFF as usize {
             continue;
         }
-        writer.write_all(&entry.data)?;
+        write_stream(entry, overrides, writer)?;
         write_zeros(
             writer,
             checked_next_multiple(
-                entry.data.len(),
+                stream_len,
                 layout.sector_len,
                 "regular stream payload length",
-            )? - entry.data.len(),
+            )? - stream_len,
         )?;
     }
 
@@ -397,6 +559,7 @@ fn layout_output_len(
     layout: &CompoundLayout<'_>,
     unallocated_sectors: &[Vec<u8>],
     trailing_data: &[u8],
+    overrides: &[CfbStreamOverride<'_>],
 ) -> Result<usize> {
     let mut len = layout.sector_len;
     let mut add = |amount: usize| -> Result<()> {
@@ -417,9 +580,10 @@ fn layout_output_len(
         .checked_mul(4)
         .ok_or_else(|| Error::Limit("CFB MiniFAT byte length overflow".into()))?)?;
     for entry in &layout.ordered {
-        if entry.kind == EntryKind::Stream && entry.data.len() >= MINI_STREAM_CUTOFF as usize {
+        let stream_len = stream_len(entry, overrides);
+        if entry.kind == EntryKind::Stream && stream_len >= MINI_STREAM_CUTOFF as usize {
             add(checked_next_multiple(
-                entry.data.len(),
+                stream_len,
                 layout.sector_len,
                 "regular stream payload length",
             )?)?;
@@ -475,6 +639,7 @@ fn build_directory_entries(
     starts: &[u32],
     root_mini_start: u32,
     root_mini_len: u64,
+    overrides: &[CfbStreamOverride<'_>],
 ) -> Result<Vec<DirectoryEntry>> {
     let mut ids = BTreeMap::new();
     for (index, entry) in entries.iter().enumerate() {
@@ -490,7 +655,7 @@ fn build_directory_entries(
             EntryKind::Stream => (
                 DirectoryObjectType::Stream,
                 starts[index],
-                entry.data.len() as u64,
+                stream_len(entry, overrides) as u64,
             ),
         };
         records.push(DirectoryEntry {

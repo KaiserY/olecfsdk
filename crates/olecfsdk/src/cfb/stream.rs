@@ -1,3 +1,5 @@
+use std::{ops::Range, sync::Arc};
+
 use crate::{
     Error, Result,
     common::{FileTime, Guid},
@@ -5,26 +7,33 @@ use crate::{
 };
 
 use super::{
-    Entry, EntryKind,
+    CfbStreamData, Entry, EntryKind,
     allocation::{END_OF_CHAIN, Fat, MiniFat},
     directory::{Directory, DirectoryObjectType},
     header::{FREE_SECTOR, Header, MINI_STREAM_CUTOFF},
-    sector::SectorRead,
+    sector::{SectorRead, SectorSource},
 };
 
 const MINI_SECTOR_LEN: usize = 64;
 
-pub(crate) fn read_entries<S: SectorRead + ?Sized>(
+pub(crate) fn read_entries_archived(
     header: &Header,
     fat: &Fat,
     mini_fat: &MiniFat,
     directory: &Directory,
-    source: &mut S,
+    source: &mut SectorSource<'_>,
+    archive: &Arc<Vec<u8>>,
     limits: Limits,
 ) -> Result<Vec<Entry>> {
     let root = directory.root();
     let root_len = checked_stream_len(root.effective_stream_size(header.version()), limits)?;
-    let root_mini_stream = read_regular_stream(fat, source, root.start_sector, root_len, limits)?;
+    let root_mini_stream = Arc::new(read_regular_stream(
+        fat,
+        source,
+        root.start_sector,
+        root_len,
+        limits,
+    )?);
     if !root_mini_stream.len().is_multiple_of(MINI_SECTOR_LEN) {
         return Err(Error::invalid(
             120,
@@ -51,17 +60,24 @@ pub(crate) fn read_entries<S: SectorRead + ?Sized>(
         };
         let stream_len = checked_stream_len(raw.effective_stream_size(header.version()), limits)?;
         let data = if kind != EntryKind::Stream || stream_len == 0 {
-            Vec::new()
+            CfbStreamData::default()
         } else if stream_len < MINI_STREAM_CUTOFF as usize {
-            read_mini_stream(
+            archived_mini_stream(
                 mini_fat,
-                &root_mini_stream,
+                Arc::clone(&root_mini_stream),
                 raw.start_sector,
                 stream_len,
                 limits,
             )?
         } else {
-            read_regular_stream(fat, source, raw.start_sector, stream_len, limits)?
+            archived_regular_stream(
+                fat,
+                source,
+                Arc::clone(archive),
+                raw.start_sector,
+                stream_len,
+                limits,
+            )?
         };
         let clsid = if kind == EntryKind::Stream {
             Guid::ZERO
@@ -74,10 +90,6 @@ pub(crate) fn read_entries<S: SectorRead + ?Sized>(
             kind,
             clsid,
             state_bits: raw.state_bits,
-            // Keep the raw directory entry available through `Directory`, but
-            // expose a spec-normalized logical model for editing and rewrite.
-            // MS-CFB requires both stream times and the root creation time to
-            // be zero.
             created: if matches!(kind, EntryKind::Root | EntryKind::Stream) {
                 FileTime::ZERO
             } else {
@@ -88,11 +100,132 @@ pub(crate) fn read_entries<S: SectorRead + ?Sized>(
             } else {
                 raw.modified_time
             },
-            data: data.into(),
+            data,
         });
     }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(entries)
+}
+
+fn archived_regular_stream(
+    fat: &Fat,
+    source: &mut SectorSource<'_>,
+    archive: Arc<Vec<u8>>,
+    start: u32,
+    len: usize,
+    limits: Limits,
+) -> Result<CfbStreamData> {
+    if len > limits.max_allocation {
+        return Err(Error::Limit(format!(
+            "stream allocation {len} exceeds {}",
+            limits.max_allocation
+        )));
+    }
+    if matches!(start, END_OF_CHAIN | FREE_SECTOR) {
+        return Err(Error::invalid(
+            0,
+            "non-empty stream has no regular sector chain",
+        ));
+    }
+    let chain = fat.chain(start, source.sector_count())?;
+    let capacity = chain
+        .len()
+        .checked_mul(source.sector_len())
+        .ok_or_else(|| Error::Limit("regular stream chain size overflow".into()))?;
+    if capacity < len {
+        return Err(Error::invalid(
+            0,
+            "regular stream chain is shorter than stream size",
+        ));
+    }
+    let mut ranges = Vec::<Range<usize>>::new();
+    let mut remaining = len;
+    for sector in chain {
+        if remaining == 0 {
+            break;
+        }
+        let needed = remaining.min(source.sector_len());
+        if needed > source.valid_len(sector) {
+            return Err(Error::invalid(
+                0,
+                "stream data is truncated at physical EOF",
+            ));
+        }
+        if source.is_partial(sector) {
+            source.sector(sector)?;
+        }
+        let physical_start = usize::try_from(sector.get())
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .and_then(|index| index.checked_mul(source.sector_len()))
+            .ok_or_else(|| Error::invalid(0, "regular stream sector offset overflow"))?;
+        let physical_end = physical_start
+            .checked_add(needed)
+            .ok_or_else(|| Error::invalid(0, "regular stream sector end overflow"))?;
+        if let Some(previous) = ranges.last_mut()
+            && previous.end == physical_start
+        {
+            previous.end = physical_end;
+        } else {
+            ranges.push(physical_start..physical_end);
+        }
+        remaining -= needed;
+    }
+    CfbStreamData::archived(archive, ranges, len)
+}
+
+fn archived_mini_stream(
+    mini_fat: &MiniFat,
+    root_stream: Arc<Vec<u8>>,
+    start: u32,
+    len: usize,
+    limits: Limits,
+) -> Result<CfbStreamData> {
+    if len > limits.max_allocation {
+        return Err(Error::Limit(format!(
+            "stream allocation {len} exceeds {}",
+            limits.max_allocation
+        )));
+    }
+    let mini_sector_count = root_stream.len() / MINI_SECTOR_LEN;
+    let chain = mini_fat.chain(start, mini_sector_count)?;
+    let capacity = chain
+        .len()
+        .checked_mul(MINI_SECTOR_LEN)
+        .ok_or_else(|| Error::Limit("mini stream chain size overflow".into()))?;
+    if capacity < len {
+        return Err(Error::invalid(
+            0,
+            "mini stream chain is shorter than stream size",
+        ));
+    }
+    let mut ranges = Vec::<Range<usize>>::new();
+    let mut remaining = len;
+    for mini_sector in chain {
+        if remaining == 0 {
+            break;
+        }
+        let range_start = usize::try_from(mini_sector.get())
+            .ok()
+            .and_then(|index| index.checked_mul(MINI_SECTOR_LEN))
+            .ok_or_else(|| Error::invalid(0, "mini-sector offset overflow"))?;
+        let needed = remaining.min(MINI_SECTOR_LEN);
+        let range_end = range_start
+            .checked_add(needed)
+            .ok_or_else(|| Error::invalid(0, "mini-sector end overflow"))?;
+        if range_end > root_stream.len() {
+            return Err(Error::invalid(0, "mini-sector is outside the root stream"));
+        }
+        if let Some(previous) = ranges.last_mut()
+            && previous.end == range_start
+        {
+            previous.end = range_end;
+        } else {
+            ranges.push(range_start..range_end);
+        }
+        remaining -= needed;
+    }
+    CfbStreamData::archived(root_stream, ranges, len)
 }
 
 fn read_regular_stream<S: SectorRead + ?Sized>(
@@ -145,56 +278,6 @@ fn read_regular_stream<S: SectorRead + ?Sized>(
             ));
         }
         data.extend_from_slice(&bytes[..needed]);
-    }
-    Ok(data)
-}
-
-fn read_mini_stream(
-    mini_fat: &MiniFat,
-    root_stream: &[u8],
-    start: u32,
-    len: usize,
-    limits: Limits,
-) -> Result<Vec<u8>> {
-    if len == 0 {
-        return Ok(Vec::new());
-    }
-    let mini_sector_count = root_stream.len() / MINI_SECTOR_LEN;
-    let chain = mini_fat.chain(start, mini_sector_count)?;
-    let capacity = chain
-        .len()
-        .checked_mul(MINI_SECTOR_LEN)
-        .ok_or_else(|| Error::Limit("mini stream chain size overflow".into()))?;
-    if capacity < len {
-        return Err(Error::invalid(
-            0,
-            "mini stream chain is shorter than stream size",
-        ));
-    }
-    if len > limits.max_allocation {
-        return Err(Error::Limit(format!(
-            "stream allocation {len} exceeds {}",
-            limits.max_allocation
-        )));
-    }
-    let mut data = Vec::with_capacity(len);
-    for mini_sector in chain {
-        let start = mini_sector
-            .get()
-            .checked_mul(MINI_SECTOR_LEN as u32)
-            .ok_or_else(|| Error::invalid(0, "mini-sector offset overflow"))?
-            as usize;
-        let end = start
-            .checked_add(MINI_SECTOR_LEN)
-            .ok_or_else(|| Error::invalid(0, "mini-sector end overflow"))?;
-        let bytes = root_stream
-            .get(start..end)
-            .ok_or_else(|| Error::invalid(0, "mini-sector is outside the root stream"))?;
-        let remaining = len - data.len();
-        data.extend_from_slice(&bytes[..remaining.min(MINI_SECTOR_LEN)]);
-        if data.len() == len {
-            break;
-        }
     }
     Ok(data)
 }

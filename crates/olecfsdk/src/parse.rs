@@ -172,6 +172,15 @@ pub(crate) fn compound_from_bytes(
     compound_outcome(compound, options, format)
 }
 
+pub(crate) fn compound_from_vec(
+    bytes: Vec<u8>,
+    options: ParseOptions,
+    format: BinaryFormat,
+) -> Result<ParseOutcome<CompoundFile>> {
+    let compound = CompoundFile::from_vec_with_limits(bytes, options.limits)?;
+    compound_outcome(compound, options, format)
+}
+
 pub(crate) fn compound_outcome(
     compound: CompoundFile,
     options: ParseOptions,

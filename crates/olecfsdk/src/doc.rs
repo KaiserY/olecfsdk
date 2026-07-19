@@ -27,6 +27,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
     ops::Range,
+    sync::Arc,
 };
 
 use bitflags::bitflags;
@@ -3696,7 +3697,8 @@ pub struct ChpxFkp {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChpxFkpRun {
     pub property_offset: Option<u16>,
-    pub properties: Option<GrpPrl>,
+    /// Clone-shared direct formatting; use [`Arc::make_mut`] for field edits.
+    pub properties: Option<Arc<GrpPrl>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3712,7 +3714,8 @@ pub struct PapxFkpRun {
     /// Version-specific PHE/PHE2 bytes in BxPap. They are a fixed-width
     /// physical field and remain distinct from page padding.
     pub paragraph_height_info: [u8; 12],
-    pub properties: Option<PapxInFkp>,
+    /// Clone-shared paragraph formatting; use [`Arc::make_mut`] for field edits.
+    pub properties: Option<Arc<PapxInFkp>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4813,18 +4816,15 @@ impl TextPieceCharacters {
         }
     }
 
-    pub(crate) fn code_units(&self) -> Vec<u16> {
+    pub(crate) const fn code_units(&self) -> &[u16] {
         match self {
-            Self::String(value) => value.code_units.clone(),
-            Self::CompatibilityUtf16 { code_units } => code_units.clone(),
+            Self::String(value) => value.code_units.as_slice(),
+            Self::CompatibilityUtf16 { code_units } => code_units.as_slice(),
         }
     }
 
-    pub(crate) fn code_units_iter(&self) -> Box<dyn Iterator<Item = u16> + '_> {
-        match self {
-            Self::String(value) => Box::new(value.code_units.iter().copied()),
-            Self::CompatibilityUtf16 { code_units } => Box::new(code_units.iter().copied()),
-        }
+    pub(crate) fn code_units_iter(&self) -> impl Iterator<Item = u16> + '_ {
+        self.code_units().iter().copied()
     }
 
     pub(crate) fn string_range(&self, range: Range<usize>) -> Result<Option<&str>> {
@@ -4883,14 +4883,14 @@ impl TextPieceCharacters {
             }
             _ => TextPieceEncoding::Utf16,
         };
-        let mut code_units = self.code_units();
+        let mut code_units = self.code_units().to_vec();
         if range.end > code_units.len() {
             return Err(Error::invalid(
                 0,
                 "DOC text replacement exceeds its text piece",
             ));
         }
-        code_units.splice(range, replacement.code_units());
+        code_units.splice(range, replacement.code_units().iter().copied());
         *self = match destination_encoding {
             TextPieceEncoding::Compressed => {
                 let value = code_units
@@ -17850,7 +17850,7 @@ impl ChpxFkp {
             used[offset..end].fill(true);
             runs.push(ChpxFkpRun {
                 property_offset: Some(offset as u16),
-                properties: Some(GrpPrl::from_bytes(&bytes[offset + 1..end])?),
+                properties: Some(GrpPrl::from_bytes(&bytes[offset + 1..end])?.into()),
             });
         }
         let unused_regions = collect_unused_regions(bytes, &used);
@@ -18088,12 +18088,15 @@ impl PapxFkp {
             runs.push(PapxFkpRun {
                 property_offset: Some(offset as u16),
                 paragraph_height_info,
-                properties: Some(PapxInFkp {
-                    length_encoding,
-                    style_index,
-                    properties,
-                    trailing_byte,
-                }),
+                properties: Some(
+                    PapxInFkp {
+                        length_encoding,
+                        style_index,
+                        properties,
+                        trailing_byte,
+                    }
+                    .into(),
+                ),
             });
         }
         Ok(Self {
@@ -19301,6 +19304,27 @@ impl PicfAndOfficeArtData {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let picture = self.picture.to_bytes()?;
+        self.to_bytes_with_parts(self.picf, &picture)
+    }
+
+    pub(crate) fn to_bytes_with_computed_length(&self) -> Result<Vec<u8>> {
+        let picture = self.picture.to_bytes()?;
+        let name_len = self
+            .shape_file_name
+            .as_ref()
+            .map_or(0usize, |name| name.len() + 1);
+        let total_len = Picf::ENCODED_LEN
+            .checked_add(name_len)
+            .and_then(|length| length.checked_add(picture.len()))
+            .ok_or_else(|| Error::Limit("PICFAndOfficeArtData length overflow".into()))?;
+        let mut picf = self.picf;
+        picf.total_length = i32::try_from(total_len)
+            .map_err(|_| Error::Limit("PICFAndOfficeArtData length exceeds i32".into()))?;
+        self.to_bytes_with_parts(picf, &picture)
+    }
+
+    fn to_bytes_with_parts(&self, picf: Picf, picture: &[u8]) -> Result<Vec<u8>> {
         if matches!(self.picf.storage.format, PictureStorageFormat::Shape)
             != self.shape_file_name.is_none()
         {
@@ -19309,7 +19333,11 @@ impl PicfAndOfficeArtData {
                 "PICF shape-file name presence does not match MFPF",
             ));
         }
-        let mut bytes = self.picf.to_bytes()?;
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(picf.total_length)
+                .map_err(|_| Error::invalid(0, "PICF lcb is negative"))?,
+        );
+        bytes.extend_from_slice(&picf.to_bytes()?);
         if let Some(name) = &self.shape_file_name {
             bytes.push(
                 u8::try_from(name.len())
@@ -19317,8 +19345,8 @@ impl PicfAndOfficeArtData {
             );
             bytes.extend_from_slice(name);
         }
-        bytes.extend_from_slice(&self.picture.to_bytes()?);
-        if usize::try_from(self.picf.total_length).ok() != Some(bytes.len()) {
+        bytes.extend_from_slice(picture);
+        if usize::try_from(picf.total_length).ok() != Some(bytes.len()) {
             return Err(Error::invalid(
                 0,
                 "PICF lcb does not match encoded PICFAndOfficeArtData length",
@@ -19347,11 +19375,29 @@ impl NilPicfAndBinData {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let binary_data = self.binary_data.to_bytes()?;
+        self.to_bytes_with_binary_data(self.total_length, binary_data)
+    }
+
+    pub(crate) fn to_bytes_with_computed_length(&self) -> Result<Vec<u8>> {
+        let binary_data = self.binary_data.to_bytes()?;
+        let total_len = Self::HEADER_LEN
+            .checked_add(binary_data.len())
+            .ok_or_else(|| Error::Limit("NilPICFAndBinData length overflow".into()))?;
+        let total_length = i32::try_from(total_len)
+            .map_err(|_| Error::Limit("NilPICFAndBinData length exceeds i32".into()))?;
+        self.to_bytes_with_binary_data(total_length, binary_data)
+    }
+
+    fn to_bytes_with_binary_data(
+        &self,
+        total_length: i32,
+        binary_data: Vec<u8>,
+    ) -> Result<Vec<u8>> {
         let mut writer = Writer::new(Cursor::new(Vec::with_capacity(
             Self::HEADER_LEN.saturating_add(binary_data.len()),
         )));
         NilPicfWire {
-            total_length: self.total_length,
+            total_length,
             header_length: self.header_length,
             ignored_header: self.ignored_header,
             binary_data,
@@ -24796,6 +24842,23 @@ mod tests {
         assert_eq!(picf_bytes.len(), Picf::ENCODED_LEN);
         assert_eq!(Picf::from_bytes(&picf_bytes).unwrap(), picf);
 
+        let mut stale_picture = PicfAndOfficeArtData {
+            picf,
+            shape_file_name: None,
+            picture: OfficeArtStream {
+                records: Vec::new(),
+            },
+        };
+        stale_picture.picf.total_length = 0;
+        assert!(stale_picture.to_bytes().is_err());
+        let canonical_picture_bytes = stale_picture.to_bytes_with_computed_length().unwrap();
+        let canonical_picture = PicfAndOfficeArtData::from_bytes(&canonical_picture_bytes).unwrap();
+        assert_eq!(
+            canonical_picture.picf.total_length,
+            i32::try_from(canonical_picture_bytes.len()).unwrap()
+        );
+        assert_eq!(canonical_picture.picture.records, Vec::new());
+
         let binary = NilPicfAndBinData {
             total_length: 71,
             header_length: 68,
@@ -24807,6 +24870,16 @@ mod tests {
             NilPicfAndBinData::from_bytes(&binary_bytes).unwrap(),
             binary
         );
+        let mut stale_binary = binary;
+        stale_binary.total_length = 0;
+        assert!(stale_binary.to_bytes().is_err());
+        let canonical_binary_bytes = stale_binary.to_bytes_with_computed_length().unwrap();
+        let canonical_binary = NilPicfAndBinData::from_bytes(&canonical_binary_bytes).unwrap();
+        assert_eq!(
+            canonical_binary.total_length,
+            i32::try_from(canonical_binary_bytes.len()).unwrap()
+        );
+        assert_eq!(canonical_binary.binary_data, stale_binary.binary_data);
 
         let properties = PrcData {
             properties: GrpPrl {
@@ -24834,15 +24907,39 @@ mod tests {
             vec![
                 ChpxFkpRun {
                     property_offset: None,
-                    properties: Some(properties.clone()),
+                    properties: Some(properties.clone().into()),
                 },
                 ChpxFkpRun {
                     property_offset: Some(42),
-                    properties: Some(properties.clone()),
+                    properties: Some(properties.clone().into()),
                 },
             ],
         )
         .unwrap();
+        let mut cloned_chpx = chpx.clone();
+        assert!(Arc::ptr_eq(
+            chpx.runs[0].properties.as_ref().unwrap(),
+            cloned_chpx.runs[0].properties.as_ref().unwrap(),
+        ));
+        Arc::make_mut(cloned_chpx.runs[0].properties.as_mut().unwrap())
+            .properties
+            .clear();
+        assert!(
+            !chpx.runs[0]
+                .properties
+                .as_ref()
+                .unwrap()
+                .properties
+                .is_empty()
+        );
+        assert!(
+            cloned_chpx.runs[0]
+                .properties
+                .as_ref()
+                .unwrap()
+                .properties
+                .is_empty()
+        );
         assert_eq!(chpx.runs[0].property_offset, chpx.runs[1].property_offset);
         let chpx_bytes = chpx.to_bytes().unwrap();
         let reopened_chpx = ChpxFkp::from_bytes(&chpx_bytes).unwrap();
@@ -24862,12 +24959,12 @@ mod tests {
                 PapxFkpRun {
                     property_offset: None,
                     paragraph_height_info: [1; 12],
-                    properties: Some(papx_properties.clone()),
+                    properties: Some(papx_properties.clone().into()),
                 },
                 PapxFkpRun {
                     property_offset: Some(64),
                     paragraph_height_info: [2; 12],
-                    properties: Some(papx_properties),
+                    properties: Some(papx_properties.into()),
                 },
             ],
         )

@@ -8,11 +8,11 @@
 //! save policy for compatibility nodes. The independent [`PptHistoryStrategy`]
 //! controls physical incremental history and is not a compatibility switch.
 
-use std::path::Path;
+use std::{borrow::Cow, io::Write, path::Path, sync::Arc};
 
 use crate::{
     Error, Result,
-    cfb::CompoundFile,
+    cfb::{CfbStreamOverride, CfbStreamWriter, CompoundFile},
     forms::ParentControlStorageModel,
     io::BinaryFormat,
     limits::Limits,
@@ -21,7 +21,7 @@ use crate::{
     },
     parse::{
         ParseDiagnostic, ParseDiagnosticCode, ParseOptions, ParseOutcome, SpecificationReference,
-        compound_from_bytes, compound_from_path, compound_outcome,
+        compound_from_bytes, compound_from_path, compound_from_vec, compound_outcome,
     },
     save::SaveOptions,
     shared_content::{
@@ -48,13 +48,102 @@ const PICTURES_STREAM: &str = "/Pictures";
 ///
 /// See the runnable `edit_ppt` example for open, live-presentation traversal,
 /// slide-text edit, save, and strict reopen.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct PptFile {
     compound_file: CompoundFile,
     pub shared: OfficeSharedContent,
-    pub document: PowerPointDocument,
-    pub current_user: CurrentUserStream,
-    pub pictures: Option<PicturesStream>,
+    /// Clone-shared recursive record tree. Call [`Arc::make_mut`] before
+    /// direct field edits; transactional SDK methods detach it automatically.
+    pub document: Arc<PowerPointDocument>,
+    /// Clone-shared Current User stream, detached with the document tree when
+    /// relayout changes the active edit offset.
+    pub current_user: Arc<CurrentUserStream>,
+    /// Clone-shared Pictures stream, detached automatically by SDK mutations.
+    pub pictures: Option<Arc<PicturesStream>>,
+    layout_baseline: PptManagedLayoutBaseline,
+}
+
+#[derive(Clone, Debug)]
+struct PptManagedLayoutBaseline {
+    document: Arc<PowerPointDocument>,
+    current_user: Arc<CurrentUserStream>,
+    pictures: Option<Arc<PicturesStream>>,
+    strict: bool,
+}
+
+impl PptManagedLayoutBaseline {
+    fn new(
+        document: &Arc<PowerPointDocument>,
+        current_user: &Arc<CurrentUserStream>,
+        pictures: &Option<Arc<PicturesStream>>,
+        strict: bool,
+    ) -> Self {
+        Self {
+            document: Arc::clone(document),
+            current_user: Arc::clone(current_user),
+            pictures: pictures.as_ref().map(Arc::clone),
+            strict,
+        }
+    }
+
+    fn matches(
+        &self,
+        document: &Arc<PowerPointDocument>,
+        current_user: &Arc<CurrentUserStream>,
+        pictures: &Option<Arc<PicturesStream>>,
+    ) -> bool {
+        Arc::ptr_eq(&self.document, document)
+            && Arc::ptr_eq(&self.current_user, current_user)
+            && match (&self.pictures, pictures) {
+                (Some(baseline), Some(current)) => Arc::ptr_eq(baseline, current),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl PartialEq for PptFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.compound_file == other.compound_file
+            && self.shared == other.shared
+            && self.document == other.document
+            && self.current_user == other.current_user
+            && self.pictures == other.pictures
+    }
+}
+
+struct PptManagedStreams {
+    document: Vec<u8>,
+    current_user: Vec<u8>,
+    pictures: Option<Vec<u8>>,
+}
+
+struct PptDocumentStreamWriter<'a>(&'a PowerPointDocument);
+
+struct PptPicturesStreamWriter<'a>(&'a PicturesStream);
+
+impl CfbStreamWriter for PptDocumentStreamWriter<'_> {
+    fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+        self.0.write_to(writer)
+    }
+}
+
+impl CfbStreamWriter for PptPicturesStreamWriter<'_> {
+    fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+        self.0.write_to(writer)
+    }
+}
+
+impl PptManagedStreams {
+    fn matches_source(&self, source: &CompoundFile) -> bool {
+        source.stream(DOCUMENT_STREAM) == Some(self.document.as_slice())
+            && source.stream(CURRENT_USER_STREAM) == Some(self.current_user.as_slice())
+            && match (source.stream(PICTURES_STREAM), self.pictures.as_deref()) {
+                (Some(source), Some(current)) => source == current,
+                (None, None) => true,
+                _ => false,
+            }
+    }
 }
 
 /// Result of appending one MS-PPT incremental-save checkpoint.
@@ -80,6 +169,33 @@ pub enum PptHistoryStrategy {
 }
 
 impl PptFile {
+    fn sync_layout_baseline(&mut self, strict: bool) {
+        self.layout_baseline = PptManagedLayoutBaseline::new(
+            &self.document,
+            &self.current_user,
+            &self.pictures,
+            strict,
+        );
+    }
+
+    fn has_current_managed_layout(&self) -> bool {
+        self.layout_baseline
+            .matches(&self.document, &self.current_user, &self.pictures)
+    }
+
+    fn write_ready_layout(&self, options: SaveOptions) -> Result<Cow<'_, Self>> {
+        if (options.preserves_compatibility() || self.layout_baseline.strict)
+            && self.has_current_managed_layout()
+        {
+            return Ok(Cow::Borrowed(self));
+        }
+        let mut rebuilt = self.clone();
+        if matches!(rebuilt.current_user.data, CurrentUserData::Parsed(_)) {
+            rebuilt.relayout_in_place_with_policy(options.preserves_compatibility())?;
+        }
+        Ok(Cow::Owned(rebuilt))
+    }
+
     /// Returns the immutable parse-time CFB backing used to preserve unknown
     /// and externally-owned entries.
     ///
@@ -128,6 +244,27 @@ impl PptFile {
         options: ParseOptions,
     ) -> Result<ParseOutcome<Self>> {
         let compound = compound_from_bytes(bytes, options, BinaryFormat::Ppt)?;
+        Self::from_compound_outcome(compound, options)
+    }
+
+    /// Consumes a complete CFB image without copying its full archive buffer.
+    pub fn from_vec(bytes: Vec<u8>) -> Result<Self> {
+        Ok(Self::from_vec_with_options(bytes, ParseOptions::default())?.into_value())
+    }
+
+    pub fn from_vec_compatible(bytes: Vec<u8>) -> Result<ParseOutcome<Self>> {
+        Self::from_vec_with_options(bytes, ParseOptions::compatible(Limits::default()))
+    }
+
+    pub fn from_vec_with_limits(bytes: Vec<u8>, limits: Limits) -> Result<Self> {
+        Ok(Self::from_vec_with_options(bytes, ParseOptions::strict(limits))?.into_value())
+    }
+
+    pub fn from_vec_with_options(
+        bytes: Vec<u8>,
+        options: ParseOptions,
+    ) -> Result<ParseOutcome<Self>> {
+        let compound = compound_from_vec(bytes, options, BinaryFormat::Ppt)?;
         Self::from_compound_outcome(compound, options)
     }
 
@@ -194,7 +331,7 @@ impl PptFile {
         } else {
             self.document.live_presentation(current_user)
         };
-        let pictures_layout = match &mut self.pictures {
+        let pictures_layout = match self.pictures.as_mut().map(Arc::make_mut) {
             Some(PicturesStream::Complete(pictures)) => Some(pictures.relayout()?),
             Some(PicturesStream::Compatibility { .. } | PicturesStream::Partial(_))
                 if preserve_compatibility =>
@@ -211,7 +348,7 @@ impl PptFile {
         };
         match presentation {
             Ok(_) => {
-                self.document.relocate_picture_references(
+                Arc::make_mut(&mut self.document).relocate_picture_references(
                     pictures_layout.as_ref(),
                     preserve_compatibility,
                 )?;
@@ -223,11 +360,13 @@ impl PptFile {
                         .is_none_or(|layout| !layout.changed()) => {}
             Err(error) => return Err(error),
         }
-        let CurrentUserData::Parsed(current_user) = &mut self.current_user.data else {
+        let CurrentUserData::Parsed(current_user) = &mut Arc::make_mut(&mut self.current_user).data
+        else {
             unreachable!("CurrentUserAtom was checked above")
         };
-        self.document
-            .relayout_with_policy(current_user, preserve_compatibility)?;
+        Arc::make_mut(&mut self.document)
+            .relayout_in_place(current_user, preserve_compatibility)?;
+        self.sync_layout_baseline(!preserve_compatibility);
         Ok(())
     }
 
@@ -332,9 +471,11 @@ impl PptFile {
             }
             source.object.source_record.offset
         };
-        let result = rebuilt
-            .document
-            .edit_list_text_body(source_offset, text_body_index, edit)?;
+        let result = Arc::make_mut(&mut rebuilt.document).edit_list_text_body(
+            source_offset,
+            text_body_index,
+            edit,
+        )?;
         rebuilt.relayout_in_place_with_policy(preserve_compatibility)?;
         let presentation = if preserve_compatibility {
             rebuilt.live_presentation_compatible()?.into_value()
@@ -356,13 +497,16 @@ impl PptFile {
     /// user edit containing only the MS-PPT live persist objects.
     pub fn rebuild_current_live_state(&mut self) -> Result<()> {
         let mut rebuilt = self.clone();
-        let CurrentUserData::Parsed(current_user) = &mut rebuilt.current_user.data else {
+        let CurrentUserData::Parsed(current_user) =
+            &mut Arc::make_mut(&mut rebuilt.current_user).data
+        else {
             return Err(Error::invalid(
                 0,
                 "PPT current-live-state rebuild requires a conforming CurrentUserAtom",
             ));
         };
-        rebuilt.document.rebuild_current_live_state(current_user)?;
+        Arc::make_mut(&mut rebuilt.document).rebuild_current_live_state(current_user)?;
+        rebuilt.sync_layout_baseline(true);
         *self = rebuilt;
         Ok(())
     }
@@ -383,7 +527,9 @@ impl PptFile {
                 "append-user-edit requires a conforming source CurrentUserAtom",
             ));
         };
-        let CurrentUserData::Parsed(current_user) = &mut rebuilt.current_user.data else {
+        let CurrentUserData::Parsed(current_user) =
+            &mut Arc::make_mut(&mut rebuilt.current_user).data
+        else {
             return Err(Error::invalid(
                 0,
                 "append-user-edit requires a conforming CurrentUserAtom",
@@ -395,9 +541,11 @@ impl PptFile {
             .edits
             .len();
         let previous_record_count = rebuilt.document.records.records.len();
-        let source_pictures_layout =
-            source_to_current_pictures_layout(&baseline.pictures, &rebuilt.pictures)?;
-        let persist_ids = rebuilt.document.append_user_edit_from_baseline(
+        let source_pictures_layout = source_to_current_pictures_layout(
+            baseline.pictures.as_deref(),
+            rebuilt.pictures.as_deref(),
+        )?;
+        let persist_ids = Arc::make_mut(&mut rebuilt.document).append_user_edit_from_baseline(
             current_user,
             &baseline.document,
             baseline_current_user,
@@ -585,6 +733,11 @@ impl PptFile {
             Some(OfficeHostKind::Ppt),
         )?;
         diagnostics.extend(shared.diagnostics);
+        let document = Arc::new(document);
+        let current_user = Arc::new(current_user);
+        let pictures = pictures.map(Arc::new);
+        let layout_baseline =
+            PptManagedLayoutBaseline::new(&document, &current_user, &pictures, options.is_strict());
         Ok(ParseOutcome::new(
             Self {
                 compound_file,
@@ -592,6 +745,7 @@ impl PptFile {
                 document,
                 current_user,
                 pictures,
+                layout_baseline,
             },
             diagnostics,
         ))
@@ -618,8 +772,7 @@ impl PptFile {
             .ok_or_else(|| Error::invalid(0, "PPT live presentation has no VBA project"))?
             .reference
             .record_index;
-        let record = candidate
-            .document
+        let record = Arc::make_mut(&mut candidate.document)
             .records
             .records
             .get_mut(record_index)
@@ -661,8 +814,7 @@ impl PptFile {
             .ok_or_else(|| Error::invalid(0, "PPT live presentation has no VBA project"))?
             .reference
             .record_index;
-        let record = candidate
-            .document
+        let record = Arc::make_mut(&mut candidate.document)
             .records
             .records
             .get_mut(record_index)
@@ -696,6 +848,12 @@ impl PptFile {
     /// Rebuilds managed streams under the requested compatibility policy.
     /// Physical history is preserved unless a history-strategy API is used.
     pub fn to_compound_file_with_options(&self, options: SaveOptions) -> Result<CompoundFile> {
+        if let Ok(streams) = self.managed_streams_with_current_layout(options)
+            && (options.preserves_compatibility() || self.layout_baseline.strict)
+            && (self.has_current_managed_layout() || streams.matches_source(&self.compound_file))
+        {
+            return self.to_compound_file_with_managed_streams(options, streams);
+        }
         let mut rebuilt = self.clone();
         if matches!(rebuilt.current_user.data, CurrentUserData::Parsed(_)) {
             rebuilt.relayout_in_place_with_policy(options.preserves_compatibility())?;
@@ -722,6 +880,27 @@ impl PptFile {
     }
 
     fn to_compound_file_with_current_layout(&self, options: SaveOptions) -> Result<CompoundFile> {
+        let streams = self.managed_streams_with_current_layout(options)?;
+        self.to_compound_file_with_managed_streams(options, streams)
+    }
+
+    fn managed_streams_with_current_layout(
+        &self,
+        options: SaveOptions,
+    ) -> Result<PptManagedStreams> {
+        self.validate_current_layout(options)?;
+        Ok(PptManagedStreams {
+            document: self.document.to_bytes()?,
+            current_user: self.current_user.to_bytes()?,
+            pictures: self
+                .pictures
+                .as_deref()
+                .map(PicturesStream::to_bytes)
+                .transpose()?,
+        })
+    }
+
+    fn validate_current_layout(&self, options: SaveOptions) -> Result<()> {
         if !options.preserves_compatibility() {
             if !matches!(&self.current_user.data, CurrentUserData::Parsed(_)) {
                 return Err(Error::invalid(
@@ -735,7 +914,7 @@ impl PptFile {
                 self.document.incremental_save_chain(atom)?;
             }
             if matches!(
-                &self.pictures,
+                self.pictures.as_deref(),
                 Some(PicturesStream::Compatibility { .. } | PicturesStream::Partial(_))
             ) {
                 return Err(Error::invalid(
@@ -744,14 +923,79 @@ impl PptFile {
                 ));
             }
         }
+        Ok(())
+    }
+
+    fn compound_for_managed_streaming(&self, options: SaveOptions) -> Result<CompoundFile> {
+        self.validate_current_layout(options)?;
         let mut compound = self.compound_file.clone();
-        compound.overwrite_stream(DOCUMENT_STREAM, self.document.to_bytes()?)?;
         compound.overwrite_stream(CURRENT_USER_STREAM, self.current_user.to_bytes()?)?;
-        sync_optional_stream(
-            &mut compound,
-            PICTURES_STREAM,
-            self.pictures.as_ref().map(PicturesStream::to_bytes),
-        )?;
+        match self.pictures.as_deref() {
+            Some(_) if !compound.is_stream(PICTURES_STREAM) => {
+                compound.upsert_stream(PICTURES_STREAM, Vec::new())?;
+            }
+            None if compound.is_stream(PICTURES_STREAM) => {
+                compound.remove_stream(PICTURES_STREAM)?;
+            }
+            Some(_) | None => {}
+        }
+        self.shared.write_to_compound_file(&mut compound, options)?;
+        Ok(compound)
+    }
+
+    fn to_bytes_streaming_document(&self, options: SaveOptions) -> Result<Vec<u8>> {
+        let ready = self.write_ready_layout(options)?;
+        let compound = ready.compound_for_managed_streaming(options)?;
+        let document_writer = PptDocumentStreamWriter(&ready.document);
+        let document_len = ready.document.serialized_len()?;
+        let pictures_writer = ready.pictures.as_deref().map(PptPicturesStreamWriter);
+        let mut stream_overrides = Vec::with_capacity(2);
+        stream_overrides.push(CfbStreamOverride::new(
+            Path::new(DOCUMENT_STREAM),
+            document_len,
+            &document_writer,
+        ));
+        if let Some(pictures_writer) = pictures_writer.as_ref() {
+            stream_overrides.push(CfbStreamOverride::new(
+                Path::new(PICTURES_STREAM),
+                pictures_writer.0.serialized_len()?,
+                pictures_writer,
+            ));
+        }
+        compound.to_bytes_with_stream_overrides(&stream_overrides)
+    }
+
+    fn write_streaming_document(&self, writer: impl Write, options: SaveOptions) -> Result<()> {
+        let ready = self.write_ready_layout(options)?;
+        let compound = ready.compound_for_managed_streaming(options)?;
+        let document_writer = PptDocumentStreamWriter(&ready.document);
+        let document_len = ready.document.serialized_len()?;
+        let pictures_writer = ready.pictures.as_deref().map(PptPicturesStreamWriter);
+        let mut stream_overrides = Vec::with_capacity(2);
+        stream_overrides.push(CfbStreamOverride::new(
+            Path::new(DOCUMENT_STREAM),
+            document_len,
+            &document_writer,
+        ));
+        if let Some(pictures_writer) = pictures_writer.as_ref() {
+            stream_overrides.push(CfbStreamOverride::new(
+                Path::new(PICTURES_STREAM),
+                pictures_writer.0.serialized_len()?,
+                pictures_writer,
+            ));
+        }
+        compound.write_to_with_stream_overrides(&stream_overrides, writer)
+    }
+
+    fn to_compound_file_with_managed_streams(
+        &self,
+        options: SaveOptions,
+        streams: PptManagedStreams,
+    ) -> Result<CompoundFile> {
+        let mut compound = self.compound_file.clone();
+        compound.overwrite_stream(DOCUMENT_STREAM, streams.document)?;
+        compound.overwrite_stream(CURRENT_USER_STREAM, streams.current_user)?;
+        sync_optional_stream(&mut compound, PICTURES_STREAM, streams.pictures.map(Ok))?;
         self.shared.write_to_compound_file(&mut compound, options)?;
         Ok(compound)
     }
@@ -765,12 +1009,33 @@ impl PptFile {
     }
 
     pub fn to_bytes_with_options(&self, options: SaveOptions) -> Result<Vec<u8>> {
-        self.to_compound_file_with_options(options)?.to_bytes()
+        self.to_bytes_streaming_document(options)
     }
 
     pub fn to_bytes_with_history_strategy(&self, strategy: PptHistoryStrategy) -> Result<Vec<u8>> {
         self.to_compound_file_with_history_strategy(strategy)?
             .to_bytes()
+    }
+
+    pub fn write_to(&self, writer: impl Write) -> Result<()> {
+        self.write_to_with_options(writer, SaveOptions::default())
+    }
+
+    pub fn write_to_preserving_compatibility(&self, writer: impl Write) -> Result<()> {
+        self.write_to_with_options(writer, SaveOptions::preserving_compatibility())
+    }
+
+    pub fn write_to_with_options(&self, writer: impl Write, options: SaveOptions) -> Result<()> {
+        self.write_streaming_document(writer, options)
+    }
+
+    pub fn write_to_with_history_strategy(
+        &self,
+        writer: impl Write,
+        strategy: PptHistoryStrategy,
+    ) -> Result<()> {
+        self.to_compound_file_with_history_strategy(strategy)?
+            .write_to(writer)
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
@@ -782,7 +1047,8 @@ impl PptFile {
     }
 
     pub fn save_with_options(&self, path: impl AsRef<Path>, options: SaveOptions) -> Result<()> {
-        self.to_compound_file_with_options(options)?.save(path)
+        self.write_streaming_document(std::io::sink(), options)?;
+        self.write_streaming_document(std::fs::File::create(path)?, options)
     }
 
     pub fn save_with_history_strategy(
@@ -790,14 +1056,14 @@ impl PptFile {
         path: impl AsRef<Path>,
         strategy: PptHistoryStrategy,
     ) -> Result<()> {
-        self.to_compound_file_with_history_strategy(strategy)?
-            .save(path)
+        let compound = self.to_compound_file_with_history_strategy(strategy)?;
+        compound.write_to(std::fs::File::create(path)?)
     }
 }
 
 fn source_to_current_pictures_layout(
-    source: &Option<PicturesStream>,
-    current: &Option<PicturesStream>,
+    source: Option<&PicturesStream>,
+    current: Option<&PicturesStream>,
 ) -> Result<Option<OfficeArtBStoreDelayLayout>> {
     let (source, current) = match (source, current) {
         (None, None) => return Ok(None),
@@ -1383,15 +1649,54 @@ mod tests {
         let compound = compound_with_document(document_with_minimal_chain(Vec::new()));
         let file = PptFile::from_compound_file(compound).unwrap();
         assert_eq!(file.document.records.records.len(), 3);
-        let reopened = PptFile::from_bytes(&file.to_bytes().unwrap()).unwrap();
+        let direct = file.to_bytes().unwrap();
+        assert_eq!(direct, file.to_compound_file().unwrap().to_bytes().unwrap());
+        let mut streamed = Vec::new();
+        file.write_to(&mut streamed).unwrap();
+        assert_eq!(streamed, direct);
+        let reopened = PptFile::from_bytes(&direct).unwrap();
         assert_eq!(reopened.document, file.document);
+    }
+
+    #[test]
+    fn file_root_clone_shares_document_until_explicit_mutation() {
+        let compound = compound_with_document(document_with_minimal_chain(Vec::new()));
+        let file = PptFile::from_compound_file(compound).unwrap();
+        let mut cloned = file.clone();
+        assert!(Arc::ptr_eq(&file.document, &cloned.document));
+        assert!(Arc::ptr_eq(&file.current_user, &cloned.current_user));
+        assert!(file.has_current_managed_layout());
+        assert!(cloned.has_current_managed_layout());
+
+        Arc::make_mut(&mut cloned.document).records.records[0]
+            .header
+            .instance = 7;
+        assert_eq!(file.document.records.records[0].header.instance, 0);
+        assert_eq!(cloned.document.records.records[0].header.instance, 7);
+        assert!(!Arc::ptr_eq(&file.document, &cloned.document));
+        assert!(!cloned.has_current_managed_layout());
+
+        let CurrentUserData::Parsed(current_user) =
+            &mut Arc::make_mut(&mut cloned.current_user).data
+        else {
+            unreachable!()
+        };
+        current_user.unused = 9;
+        let CurrentUserData::Parsed(original_current_user) = &file.current_user.data else {
+            unreachable!()
+        };
+        assert_eq!(original_current_user.unused, 0);
+        assert!(!Arc::ptr_eq(&file.current_user, &cloned.current_user));
+        assert!(!cloned.has_current_managed_layout());
     }
 
     #[test]
     fn file_root_relayouts_variable_records_and_incremental_save_references() {
         let compound = compound_with_document(document_with_minimal_chain(Vec::new()));
         let mut file = PptFile::from_compound_file(compound).unwrap();
-        let PptRecordData::Container(value) = &mut file.document.records.records[0].data else {
+        assert!(file.has_current_managed_layout());
+        let document = Arc::make_mut(&mut file.document);
+        let PptRecordData::Container(value) = &mut document.records.records[0].data else {
             unreachable!()
         };
         value.records.push(PptRecord {
@@ -1407,8 +1712,7 @@ mod tests {
                 body: vec![1, 2, 3, 4, 5],
             }),
         });
-        let PptRecordData::PersistDirectory(value) = &mut file.document.records.records[1].data
-        else {
+        let PptRecordData::PersistDirectory(value) = &mut document.records.records[1].data else {
             unreachable!()
         };
         value.entries.push(super::super::PersistDirectoryEntry {
@@ -1417,7 +1721,8 @@ mod tests {
         });
 
         let mut invalid = file.clone();
-        let PptRecordData::PersistDirectory(value) = &mut invalid.document.records.records[1].data
+        let PptRecordData::PersistDirectory(value) =
+            &mut Arc::make_mut(&mut invalid.document).records.records[1].data
         else {
             unreachable!()
         };
@@ -1426,7 +1731,9 @@ mod tests {
         assert!(invalid.relayout().is_err());
         assert_eq!(invalid, unchanged_after_failure);
 
+        assert!(!file.has_current_managed_layout());
         file.relayout().unwrap();
+        assert!(file.has_current_managed_layout());
         assert_eq!(file.document.records.records[0].header.declared_length, 69);
         assert_eq!(file.document.records.records[1].offset, 77);
         assert_eq!(file.document.records.records[1].header.declared_length, 16);
@@ -1470,9 +1777,9 @@ mod tests {
         let second_blip = bitmap_blip(vec![3]);
         let old_second_offset = first_blip.header.declared_length + 8;
         let second_size = second_blip.header.declared_length + 8;
-        file.pictures = Some(PicturesStream::Complete(OfficeArtBStoreDelay {
+        file.pictures = Some(Arc::new(PicturesStream::Complete(OfficeArtBStoreDelay {
             records: vec![first_blip, second_blip],
-        }));
+        })));
 
         let fbse = OfficeArtFbse {
             win32_blip_type: 6,
@@ -1510,7 +1817,9 @@ mod tests {
         };
         let mut dead_fbse_record = fbse_record.clone();
         dead_fbse_record.offset = 120;
-        let PptRecordData::Container(document) = &mut file.document.records.records[0].data else {
+        let PptRecordData::Container(document) =
+            &mut Arc::make_mut(&mut file.document).records.records[0].data
+        else {
             unreachable!()
         };
         document.records.push(PptRecord {
@@ -1526,9 +1835,15 @@ mod tests {
                 trailing_header_bytes: Vec::new(),
             }),
         });
-        file.document.records.records.push(dead_fbse_record);
+        Arc::make_mut(&mut file.document)
+            .records
+            .records
+            .push(dead_fbse_record);
 
-        let Some(PicturesStream::Complete(pictures)) = &mut file.pictures else {
+        let Some(pictures) = &mut file.pictures else {
+            unreachable!()
+        };
+        let PicturesStream::Complete(pictures) = Arc::make_mut(pictures) else {
             unreachable!()
         };
         let OfficeArtRecordData::BitmapBlip(first) = &mut pictures.records[0].data else {
@@ -1547,7 +1862,8 @@ mod tests {
         data.extend_from_slice(&[7, 8]);
 
         let mut invalid = file.clone();
-        let PptRecordData::Container(document) = &mut invalid.document.records.records[0].data
+        let PptRecordData::Container(document) =
+            &mut Arc::make_mut(&mut invalid.document).records.records[0].data
         else {
             unreachable!()
         };
@@ -1567,7 +1883,7 @@ mod tests {
         assert_eq!(invalid, unchanged);
 
         file.relayout().unwrap();
-        let Some(PicturesStream::Complete(pictures)) = &file.pictures else {
+        let Some(PicturesStream::Complete(pictures)) = file.pictures.as_deref() else {
             unreachable!()
         };
         assert_eq!(pictures.records[0].header.declared_length, 22);
@@ -1599,11 +1915,20 @@ mod tests {
         assert_eq!(dead_fbse.delay_offset, new_second_offset);
         assert_eq!(dead_fbse.declared_blip_size, second_size + 2);
 
-        let mut reopened = PptFile::from_bytes(&file.to_bytes().unwrap()).unwrap();
+        let direct = file.to_bytes().unwrap();
+        let materialized = file.to_compound_file().unwrap().to_bytes().unwrap();
+        assert_eq!(direct, materialized);
+        let mut streamed = Vec::new();
+        file.write_to(&mut streamed).unwrap();
+        assert_eq!(streamed, direct);
+        let mut reopened = PptFile::from_bytes(&direct).unwrap();
         assert_eq!(reopened.document, file.document);
         assert_eq!(reopened.pictures, file.pictures);
 
-        let Some(PicturesStream::Complete(pictures)) = &mut reopened.pictures else {
+        let Some(pictures) = &mut reopened.pictures else {
+            unreachable!()
+        };
+        let PicturesStream::Complete(pictures) = Arc::make_mut(pictures) else {
             unreachable!()
         };
         let OfficeArtRecordData::BitmapBlip(first) = &mut pictures.records[0].data else {
@@ -1637,7 +1962,7 @@ mod tests {
                 .document
                 .reference
                 .record_index;
-            let record = &mut file.document.records.records[record_index];
+            let record = &mut Arc::make_mut(&mut file.document).records.records[record_index];
             let PptRecordData::Container(children) = &mut record.data else {
                 unreachable!()
             };
@@ -1892,7 +2217,7 @@ mod tests {
         assert!(PptFile::from_compound_file(compound.clone()).is_err());
         let outcome = PptFile::from_compound_file_compatible(compound).unwrap();
         assert!(matches!(
-            outcome.value.pictures,
+            outcome.value.pictures.as_deref(),
             Some(PicturesStream::Partial(_))
         ));
         assert_eq!(outcome.diagnostics.len(), 1);

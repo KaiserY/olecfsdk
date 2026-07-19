@@ -149,12 +149,13 @@ impl OfficeArtRecordHeader {
     }
 
     fn append_to(self, bytes: &mut Vec<u8>) -> Result<()> {
-        let mut encoded = [0u8; HEADER_LEN];
-        {
-            let mut writer = Writer::new(Cursor::new(encoded.as_mut_slice()));
-            self.write_to(&mut writer)?;
-        }
-        bytes.extend_from_slice(&encoded);
+        self.emit_to(bytes)?;
+        Ok(())
+    }
+
+    fn emit_to(self, writer: &mut dyn Write) -> Result<()> {
+        let mut writer = Writer::new(&mut *writer);
+        self.write_to(&mut writer)?;
         Ok(())
     }
 }
@@ -856,11 +857,15 @@ impl OfficeArtStream {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        for record in &self.records {
-            record.write(&mut bytes)?;
-        }
-        Ok(bytes)
+        encode_complete_records(&self.records)
+    }
+
+    pub(crate) fn serialized_len(&self) -> Result<usize> {
+        complete_records_encoded_len(&self.records)
+    }
+
+    pub(crate) fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+        write_complete_records(&self.records, writer)
     }
 
     /// Recomputes every complete OfficeArt record length from the typed tree.
@@ -1613,10 +1618,15 @@ impl OfficeArtBStoreDelay {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        OfficeArtStream {
-            records: self.records.clone(),
-        }
-        .to_bytes()
+        encode_complete_records(&self.records)
+    }
+
+    pub(crate) fn serialized_len(&self) -> Result<usize> {
+        complete_records_encoded_len(&self.records)
+    }
+
+    pub(crate) fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+        write_complete_records(&self.records, writer)
     }
 
     /// Recomputes file-block sizes and returns the old-to-new `foDelay`
@@ -2085,6 +2095,27 @@ impl OfficeArtIncompleteRecordData {
 }
 
 impl OfficeArtRecord {
+    fn direct_children(&self) -> Result<Option<&[OfficeArtRecord]>> {
+        match &self.data {
+            OfficeArtRecordData::Container(children) => {
+                if self.header.version != 0x0f {
+                    return Err(Error::invalid(0, "OfficeArt container version is not 0xF"));
+                }
+                Ok(Some(children))
+            }
+            OfficeArtRecordData::CompatibilityContainer(children) => {
+                if self.header.version == 0x0f {
+                    return Err(Error::invalid(
+                        0,
+                        "OfficeArt compatibility container uses standard recVer 0xF",
+                    ));
+                }
+                Ok(Some(children))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Recomputes this record's payload length from its typed descendants.
     pub fn relayout(&mut self) -> Result<()> {
         match &mut self.data {
@@ -2148,27 +2179,30 @@ impl OfficeArtRecord {
             }
             _ => {}
         }
-        let payload = self.payload_bytes()?;
-        self.header.declared_length = u32::try_from(payload.len())
+        let payload_len = if let Some(children) = self.direct_children()? {
+            complete_records_encoded_len(children)?
+        } else {
+            self.payload_bytes()?.len()
+        };
+        self.header.declared_length = u32::try_from(payload_len)
             .map_err(|_| Error::Limit("OfficeArt record payload exceeds u32".into()))?;
         Ok(())
     }
 
-    fn payload_bytes(&self) -> Result<Vec<u8>> {
+    fn write_payload(&self, payload: &mut Vec<u8>) -> Result<()> {
         if self.header.version > 0x0f || self.header.instance > 0x0fff {
             return Err(Error::invalid(
                 0,
                 "OfficeArt header bit fields exceed their width",
             ));
         }
-        let mut payload = Vec::new();
         match &self.data {
             OfficeArtRecordData::Container(children) => {
                 if self.header.version != 0x0f {
                     return Err(Error::invalid(0, "OfficeArt container version is not 0xF"));
                 }
                 for child in children {
-                    child.write(&mut payload)?;
+                    child.write(payload)?;
                 }
             }
             OfficeArtRecordData::CompatibilityContainer(children) => {
@@ -2179,7 +2213,7 @@ impl OfficeArtRecord {
                     ));
                 }
                 for child in children {
-                    child.write(&mut payload)?;
+                    child.write(payload)?;
                 }
             }
             OfficeArtRecordData::Atom(value) => {
@@ -2191,34 +2225,34 @@ impl OfficeArtRecord {
                 }
                 payload.extend_from_slice(value);
             }
-            OfficeArtRecordData::ArcRule(value) => value.write(&mut payload),
-            OfficeArtRecordData::CalloutRule(value) => value.write(&mut payload),
+            OfficeArtRecordData::ArcRule(value) => value.write(payload),
+            OfficeArtRecordData::CalloutRule(value) => value.write(payload),
             OfficeArtRecordData::ChildAnchor(value) | OfficeArtRecordData::GroupShape(value) => {
-                value.write(&mut payload)
+                value.write(payload)
             }
-            OfficeArtRecordData::ClientAnchor(value) => value.write(&mut payload),
+            OfficeArtRecordData::ClientAnchor(value) => value.write(payload),
             OfficeArtRecordData::ClientMarker(_) => {}
             OfficeArtRecordData::ColorMru(colors) => {
                 for color in colors {
                     payload.extend_from_slice(&color.0.to_le_bytes());
                 }
             }
-            OfficeArtRecordData::ConnectorRule(value) => value.write(&mut payload),
-            OfficeArtRecordData::BitmapBlip(value) => value.write(&mut payload)?,
-            OfficeArtRecordData::Drawing(value) => value.write(&mut payload),
-            OfficeArtRecordData::DggBlock(value) => value.write(&mut payload)?,
+            OfficeArtRecordData::ConnectorRule(value) => value.write(payload),
+            OfficeArtRecordData::BitmapBlip(value) => value.write(payload)?,
+            OfficeArtRecordData::Drawing(value) => value.write(payload),
+            OfficeArtRecordData::DggBlock(value) => value.write(payload)?,
             OfficeArtRecordData::EmptyCompatibilityAtom => {}
-            OfficeArtRecordData::Fbse(value) => value.write(&mut payload)?,
+            OfficeArtRecordData::Fbse(value) => value.write(payload)?,
             OfficeArtRecordData::Frit(values) => {
                 for value in values {
-                    value.write(&mut payload);
+                    value.write(payload);
                 }
             }
-            OfficeArtRecordData::IncompletePropertyTable(value) => value.write(&mut payload)?,
-            OfficeArtRecordData::MetafileBlip(value) => value.write(&mut payload)?,
-            OfficeArtRecordData::PropertyTable(value) => value.write(&mut payload)?,
-            OfficeArtRecordData::Shape(value) => value.write(&mut payload),
-            OfficeArtRecordData::SoftMakerNativeProperties(value) => value.write(&mut payload)?,
+            OfficeArtRecordData::IncompletePropertyTable(value) => value.write(payload)?,
+            OfficeArtRecordData::MetafileBlip(value) => value.write(payload)?,
+            OfficeArtRecordData::PropertyTable(value) => value.write(payload)?,
+            OfficeArtRecordData::Shape(value) => value.write(payload),
+            OfficeArtRecordData::SoftMakerNativeProperties(value) => value.write(payload)?,
             OfficeArtRecordData::SplitMenuColors(colors) => {
                 for color in colors {
                     payload.extend_from_slice(&color.to_le_bytes());
@@ -2233,21 +2267,129 @@ impl OfficeArtRecord {
                 payload.extend_from_slice(&value.story_index.to_le_bytes());
             }
         }
+        Ok(())
+    }
+
+    pub(crate) fn payload_bytes(&self) -> Result<Vec<u8>> {
+        let capacity = usize::try_from(self.header.declared_length)
+            .map_err(|_| Error::Limit("OfficeArt record length exceeds usize".into()))?;
+        let mut payload = Vec::with_capacity(capacity);
+        self.write_payload(&mut payload)?;
         Ok(payload)
     }
 
     fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
-        let payload = self.payload_bytes()?;
-        if usize::try_from(self.header.declared_length).ok() != Some(payload.len()) {
+        let record_start = bytes.len();
+        self.header.append_to(bytes)?;
+        let payload_start = bytes.len();
+        if let Err(error) = self.write_payload(bytes) {
+            bytes.truncate(record_start);
+            return Err(error);
+        }
+        let payload_len = bytes.len() - payload_start;
+        if usize::try_from(self.header.declared_length).ok() != Some(payload_len) {
+            bytes.truncate(record_start);
             return Err(Error::invalid(
                 0,
                 "OfficeArt declared length does not match payload",
             ));
         }
-        self.header.append_to(bytes)?;
-        bytes.extend_from_slice(&payload);
         Ok(())
     }
+
+    fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+        if self.header.version > 0x0f || self.header.instance > 0x0fff {
+            return Err(Error::invalid(
+                0,
+                "OfficeArt header bit fields exceed their width",
+            ));
+        }
+        self.header.emit_to(writer)?;
+        let mut payload = CountingWriter::new(writer);
+        match &self.data {
+            OfficeArtRecordData::Container(children) => {
+                if self.header.version != 0x0f {
+                    return Err(Error::invalid(0, "OfficeArt container version is not 0xF"));
+                }
+                write_complete_records(children, &mut payload)?;
+            }
+            OfficeArtRecordData::CompatibilityContainer(children) => {
+                if self.header.version == 0x0f {
+                    return Err(Error::invalid(
+                        0,
+                        "OfficeArt compatibility container uses standard recVer 0xF",
+                    ));
+                }
+                write_complete_records(children, &mut payload)?;
+            }
+            OfficeArtRecordData::Atom(value) => payload.write_all(value)?,
+            OfficeArtRecordData::BitmapBlip(value) => value.write_to(&mut payload)?,
+            OfficeArtRecordData::MetafileBlip(value) => value.write_to(&mut payload)?,
+            OfficeArtRecordData::Fbse(value) => value.write_to(&mut payload)?,
+            _ => {
+                let body = self.payload_bytes()?;
+                payload.write_all(&body)?;
+            }
+        }
+        let expected = usize::try_from(self.header.declared_length)
+            .map_err(|_| Error::Limit("OfficeArt record length exceeds usize".into()))?;
+        if payload.written != expected {
+            return Err(Error::invalid(
+                0,
+                "OfficeArt declared length does not match payload",
+            ));
+        }
+        Ok(())
+    }
+}
+
+struct CountingWriter<'a> {
+    inner: &'a mut dyn Write,
+    written: usize,
+}
+
+impl<'a> CountingWriter<'a> {
+    fn new(inner: &'a mut dyn Write) -> Self {
+        Self { inner, written: 0 }
+    }
+}
+
+impl Write for CountingWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(bytes)?;
+        self.written = self.written.saturating_add(written);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn complete_records_encoded_len(records: &[OfficeArtRecord]) -> Result<usize> {
+    records.iter().try_fold(0usize, |length, record| {
+        let payload_len = usize::try_from(record.header.declared_length)
+            .map_err(|_| Error::Limit("OfficeArt record length exceeds usize".into()))?;
+        length
+            .checked_add(HEADER_LEN)
+            .and_then(|length| length.checked_add(payload_len))
+            .ok_or_else(|| Error::Limit("OfficeArt stream length overflow".into()))
+    })
+}
+
+fn encode_complete_records(records: &[OfficeArtRecord]) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(complete_records_encoded_len(records)?);
+    for record in records {
+        record.write(&mut bytes)?;
+    }
+    Ok(bytes)
+}
+
+fn write_complete_records(records: &[OfficeArtRecord], writer: &mut dyn Write) -> Result<()> {
+    for record in records {
+        record.write_to(writer)?;
+    }
+    Ok(())
 }
 
 fn record_instance_from_len(len: usize, structure: &str) -> Result<u16> {
@@ -2671,14 +2813,19 @@ impl OfficeArtBitmapBlip {
     }
 
     fn write(&self, payload: &mut Vec<u8>) -> Result<()> {
-        payload.extend_from_slice(&self.uid1);
+        self.write_to(payload)
+    }
+
+    fn write_to(&self, payload: &mut dyn Write) -> Result<()> {
+        payload.write_all(&self.uid1)?;
         if let Some(uid2) = self.uid2 {
-            payload.extend_from_slice(&uid2);
+            payload.write_all(&uid2)?;
         }
-        payload.push(self.tag);
+        payload.write_all(&[self.tag])?;
         match &self.file_data {
-            OfficeArtBitmapData::Dib(encoded) => payload.extend_from_slice(encoded),
-            OfficeArtBitmapData::Encoded(encoded) => payload.extend_from_slice(encoded),
+            OfficeArtBitmapData::Dib(encoded) | OfficeArtBitmapData::Encoded(encoded) => {
+                payload.write_all(encoded)?;
+            }
         }
         Ok(())
     }
@@ -2730,20 +2877,24 @@ impl OfficeArtMetafileBlip {
     }
 
     fn write(&self, payload: &mut Vec<u8>) -> Result<()> {
-        payload.extend_from_slice(&self.uid1);
+        self.write_to(payload)
+    }
+
+    fn write_to(&self, payload: &mut dyn Write) -> Result<()> {
+        payload.write_all(&self.uid1)?;
         if let Some(uid2) = self.uid2 {
-            payload.extend_from_slice(&uid2);
+            payload.write_all(&uid2)?;
         }
-        self.metafile_header.write(payload);
+        self.metafile_header.write_to(payload)?;
         match &self.file_data {
             OfficeArtMetafileData::Emf(data)
             | OfficeArtMetafileData::Wmf(data)
             | OfficeArtMetafileData::Pict(data) => {
-                write_typed_metafile(payload, data, self.metafile_header.compression)?
+                write_typed_metafile_to(payload, data, self.metafile_header.compression)?
             }
             OfficeArtMetafileData::Opaque {
                 original_encoded, ..
-            } => payload.extend_from_slice(original_encoded),
+            } => payload.write_all(original_encoded)?,
         }
         Ok(())
     }
@@ -2803,19 +2954,27 @@ fn write_typed_metafile(
     data: &OfficeArtMetafileBytes,
     compression: u8,
 ) -> Result<()> {
+    write_typed_metafile_to(payload, data, compression)
+}
+
+fn write_typed_metafile_to(
+    payload: &mut dyn Write,
+    data: &OfficeArtMetafileBytes,
+    compression: u8,
+) -> Result<()> {
     if data.is_unchanged() {
-        payload.extend_from_slice(data.original_encoded());
+        payload.write_all(data.original_encoded())?;
         return Ok(());
     }
     match compression {
         0x00 => {
-            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            let mut encoder = ZlibEncoder::new(&mut *payload, Compression::default());
             encoder.write_all(data.decoded())?;
-            payload.extend_from_slice(&encoder.finish()?);
+            encoder.finish()?;
             Ok(())
         }
         0xfe => {
-            payload.extend_from_slice(data.decoded());
+            payload.write_all(data.decoded())?;
             Ok(())
         }
         _ => Err(Error::invalid(
@@ -2850,17 +3009,17 @@ impl OfficeArtMetafileHeader {
         })
     }
 
-    fn write(&self, payload: &mut Vec<u8>) {
-        payload.extend_from_slice(&self.uncompressed_size.to_le_bytes());
-        payload.extend_from_slice(&self.bounds.left.to_le_bytes());
-        payload.extend_from_slice(&self.bounds.top.to_le_bytes());
-        payload.extend_from_slice(&self.bounds.right.to_le_bytes());
-        payload.extend_from_slice(&self.bounds.bottom.to_le_bytes());
-        payload.extend_from_slice(&self.render_size.x.to_le_bytes());
-        payload.extend_from_slice(&self.render_size.y.to_le_bytes());
-        payload.extend_from_slice(&self.saved_size.to_le_bytes());
-        payload.push(self.compression);
-        payload.push(self.filter);
+    fn write_to(&self, payload: &mut dyn Write) -> Result<()> {
+        payload.write_all(&self.uncompressed_size.to_le_bytes())?;
+        payload.write_all(&self.bounds.left.to_le_bytes())?;
+        payload.write_all(&self.bounds.top.to_le_bytes())?;
+        payload.write_all(&self.bounds.right.to_le_bytes())?;
+        payload.write_all(&self.bounds.bottom.to_le_bytes())?;
+        payload.write_all(&self.render_size.x.to_le_bytes())?;
+        payload.write_all(&self.render_size.y.to_le_bytes())?;
+        payload.write_all(&self.saved_size.to_le_bytes())?;
+        payload.write_all(&[self.compression, self.filter])?;
+        Ok(())
     }
 }
 
@@ -2928,6 +3087,10 @@ impl OfficeArtFbse {
     }
 
     fn write(&self, payload: &mut Vec<u8>) -> Result<()> {
+        self.write_to(payload)
+    }
+
+    fn write_to(&self, payload: &mut dyn Write) -> Result<()> {
         let name_length = self
             .name_data
             .len()
@@ -2936,24 +3099,25 @@ impl OfficeArtFbse {
         if usize::from(self.declared_name_length) != name_length {
             return Err(Error::invalid(0, "OfficeArt FBSE name length mismatch"));
         }
-        payload.push(self.win32_blip_type);
-        payload.push(self.macos_blip_type);
-        payload.extend_from_slice(&self.uid);
-        payload.extend_from_slice(&self.tag.to_le_bytes());
-        payload.extend_from_slice(&self.declared_blip_size.to_le_bytes());
-        payload.extend_from_slice(&self.reference_count.to_le_bytes());
-        payload.extend_from_slice(&self.delay_offset.to_le_bytes());
-        payload.push(self.unused1);
-        payload.push(self.declared_name_length);
-        payload.push(self.unused2);
-        payload.push(self.unused3);
+        payload.write_all(&[self.win32_blip_type, self.macos_blip_type])?;
+        payload.write_all(&self.uid)?;
+        payload.write_all(&self.tag.to_le_bytes())?;
+        payload.write_all(&self.declared_blip_size.to_le_bytes())?;
+        payload.write_all(&self.reference_count.to_le_bytes())?;
+        payload.write_all(&self.delay_offset.to_le_bytes())?;
+        payload.write_all(&[
+            self.unused1,
+            self.declared_name_length,
+            self.unused2,
+            self.unused3,
+        ])?;
         for unit in &self.name_data {
-            payload.extend_from_slice(&unit.to_le_bytes());
+            payload.write_all(&unit.to_le_bytes())?;
         }
         if let Some(blip) = &self.embedded_blip {
-            blip.write(payload)?;
+            blip.write_to(payload)?;
         }
-        payload.extend_from_slice(&self.trailing);
+        payload.write_all(&self.trailing)?;
         Ok(())
     }
 }

@@ -37,6 +37,12 @@ pub enum FormulaTokenData {
         extended_opcode: u8,
         name_index: u32,
     },
+    /// One of the natural-language formula tokens encoded as PtgElf*.
+    NaturalLanguage {
+        /// Exact extended Ptg discriminator following the 0x18 opcode.
+        extended_opcode: u8,
+        value: FormulaNaturalLanguageToken,
+    },
     Attribute {
         options: u8,
         data: u16,
@@ -80,6 +86,10 @@ pub enum FormulaTokenData {
     },
     MemError {
         reserved: u32,
+        byte_count: u16,
+    },
+    MemNoMem {
+        unused: u32,
         byte_count: u16,
     },
     MemFunction {
@@ -127,6 +137,51 @@ pub enum FormulaTokenData {
         reserved0: u32,
         reserved1: u32,
     },
+}
+
+/// Typed payload shared by the MS-XLS PtgElf* natural-language formula tokens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FormulaNaturalLanguageToken {
+    /// PtgElfLel or PtgElfRadicalLel.
+    DeletedLabel {
+        label_index: u16,
+        /// Bit 0 is fQuoted; the remaining bits are reserved and retained.
+        flags: u16,
+    },
+    /// A single-cell label location.
+    Location(FormulaElfLocation),
+    /// A multiple-cell label whose locations are stored in RgbExtra.
+    MultipleCell {
+        /// Undefined wire value retained exactly as required by MS-XLS.
+        unused: u32,
+        extra: Option<FormulaElfExtra>,
+    },
+}
+
+/// RgceElfLoc: the row and packed ColElfU value of a natural-language label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FormulaElfLocation {
+    pub row: u16,
+    /// Low 14 bits are the column, bit 14 is fQuoted, and bit 15 is fRelative.
+    pub column: u16,
+}
+
+/// PtgExtraElf data associated with a multiple-cell PtgElf* token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormulaElfExtra {
+    /// Reserved bit 30 from the count word, retained for compatible round-trip.
+    pub reserved: bool,
+    /// fRel (bit 31) from the count word.
+    pub relative: bool,
+    pub locations: Vec<FormulaElfExtraLocation>,
+}
+
+/// RgceElfLocExtra: a row and packed ColRelU value in PtgExtraElf.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FormulaElfExtraLocation {
+    pub row: u16,
+    /// Low 14 bits are the column; the high two relative bits are retained.
+    pub column: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,7 +289,43 @@ impl FormulaTokenStream {
             .filter(|token| match &token.data {
                 FormulaTokenData::Array { values, .. } => values.is_none(),
                 FormulaTokenData::MemArea { extra, .. } => extra.is_none(),
+                FormulaTokenData::NaturalLanguage {
+                    value: FormulaNaturalLanguageToken::MultipleCell { extra, .. },
+                    ..
+                } => extra.is_none(),
                 _ => false,
+            })
+            .count()
+    }
+
+    /// Counts parsed tokens whose reserved bits or bounded values violate
+    /// the MS-XLS Ptg grammar while retaining their exact wire values.
+    pub fn nonconforming_token_count(&self) -> usize {
+        self.tokens
+            .iter()
+            .filter(|token| {
+                token.opcode & 0x80 != 0
+                    || matches!(token.data, FormulaTokenData::UnknownZero)
+                    || match &token.data {
+                        FormulaTokenData::NaturalLanguage { value, .. } => match value {
+                            FormulaNaturalLanguageToken::DeletedLabel { flags, .. } => {
+                                flags & !1 != 0
+                            }
+                            FormulaNaturalLanguageToken::Location(location) => {
+                                location.column & 0x3fff > 0x00ff
+                            }
+                            FormulaNaturalLanguageToken::MultipleCell { extra, .. } => {
+                                extra.as_ref().is_some_and(|extra| {
+                                    extra.reserved
+                                        || extra
+                                            .locations
+                                            .iter()
+                                            .any(|location| location.column & 0x3fff > 0x00ff)
+                                })
+                            }
+                        },
+                        _ => false,
+                    }
             })
             .count()
     }
@@ -250,6 +341,10 @@ impl FormulaTokenStream {
                 FormulaTokenData::MemArea { extra, .. } => {
                     FormulaMemExtra::read(bytes, &mut cursor).map(|value| *extra = Some(value))
                 }
+                FormulaTokenData::NaturalLanguage {
+                    value: FormulaNaturalLanguageToken::MultipleCell { extra, .. },
+                    ..
+                } => FormulaElfExtra::read(bytes, &mut cursor).map(|value| *extra = Some(value)),
                 _ => continue,
             };
             match result {
@@ -272,6 +367,15 @@ impl FormulaTokenStream {
                     values.write(&mut bytes)?;
                 }
                 FormulaTokenData::MemArea { extra, .. } => {
+                    let Some(extra) = extra else {
+                        break;
+                    };
+                    extra.write(&mut bytes)?;
+                }
+                FormulaTokenData::NaturalLanguage {
+                    value: FormulaNaturalLanguageToken::MultipleCell { extra, .. },
+                    ..
+                } => {
                     let Some(extra) = extra else {
                         break;
                     };
@@ -318,12 +422,33 @@ impl FormulaTokenData {
                 }
                 0x18 => {
                     let extended_opcode = take_u8(bytes, cursor)?;
-                    if extended_opcode != 0x1d {
-                        return Ok(None);
-                    }
-                    Self::PivotName {
-                        extended_opcode,
-                        name_index: take_u32(bytes, cursor)?,
+                    match extended_opcode {
+                        0x01 | 0x10 => Self::NaturalLanguage {
+                            extended_opcode,
+                            value: FormulaNaturalLanguageToken::DeletedLabel {
+                                label_index: take_u16(bytes, cursor)?,
+                                flags: take_u16(bytes, cursor)?,
+                            },
+                        },
+                        0x02 | 0x03 | 0x06 | 0x07 | 0x0a => Self::NaturalLanguage {
+                            extended_opcode,
+                            value: FormulaNaturalLanguageToken::Location(FormulaElfLocation {
+                                row: take_u16(bytes, cursor)?,
+                                column: take_u16(bytes, cursor)?,
+                            }),
+                        },
+                        0x0b | 0x0d | 0x0f => Self::NaturalLanguage {
+                            extended_opcode,
+                            value: FormulaNaturalLanguageToken::MultipleCell {
+                                unused: take_u32(bytes, cursor)?,
+                                extra: None,
+                            },
+                        },
+                        0x1d => Self::PivotName {
+                            extended_opcode,
+                            name_index: take_u32(bytes, cursor)?,
+                        },
+                        _ => return Ok(None),
                     }
                 }
                 0x19 => {
@@ -388,6 +513,10 @@ impl FormulaTokenData {
             },
             0x27 => Self::MemError {
                 reserved: take_u32(bytes, cursor)?,
+                byte_count: take_u16(bytes, cursor)?,
+            },
+            0x28 => Self::MemNoMem {
+                unused: take_u32(bytes, cursor)?,
                 byte_count: take_u16(bytes, cursor)?,
             },
             0x29 => Self::MemFunction {
@@ -496,6 +625,44 @@ impl FormulaToken {
                 bytes.push(*extended_opcode);
                 put_u32(bytes, *name_index);
             }
+            FormulaTokenData::NaturalLanguage {
+                extended_opcode,
+                value,
+            } => {
+                let valid = matches!(
+                    (extended_opcode, value),
+                    (
+                        0x01 | 0x10,
+                        FormulaNaturalLanguageToken::DeletedLabel { .. }
+                    ) | (
+                        0x02 | 0x03 | 0x06 | 0x07 | 0x0a,
+                        FormulaNaturalLanguageToken::Location(_)
+                    ) | (
+                        0x0b | 0x0d | 0x0f,
+                        FormulaNaturalLanguageToken::MultipleCell { .. }
+                    )
+                );
+                if !valid {
+                    return Err(Error::invalid(
+                        0,
+                        "PtgElf extended opcode does not match its typed payload",
+                    ));
+                }
+                bytes.push(*extended_opcode);
+                match value {
+                    FormulaNaturalLanguageToken::DeletedLabel { label_index, flags } => {
+                        put_u16(bytes, *label_index);
+                        put_u16(bytes, *flags);
+                    }
+                    FormulaNaturalLanguageToken::Location(value) => {
+                        put_u16(bytes, value.row);
+                        put_u16(bytes, value.column);
+                    }
+                    FormulaNaturalLanguageToken::MultipleCell { unused, .. } => {
+                        put_u32(bytes, *unused);
+                    }
+                }
+            }
             FormulaTokenData::Attribute {
                 options,
                 data,
@@ -572,6 +739,10 @@ impl FormulaToken {
                 ..
             } => {
                 put_u32(bytes, *reserved);
+                put_u16(bytes, *byte_count);
+            }
+            FormulaTokenData::MemNoMem { unused, byte_count } => {
+                put_u32(bytes, *unused);
                 put_u16(bytes, *byte_count);
             }
             FormulaTokenData::ReferenceError { reserved } => put_u32(bytes, *reserved),
@@ -856,6 +1027,57 @@ impl FormulaMemExtra {
     }
 }
 
+impl FormulaElfExtra {
+    fn read(bytes: &[u8], cursor: &mut usize) -> Result<Self> {
+        let header = take_u32(bytes, cursor)?;
+        let count = usize::try_from(header & 0x3fff_ffff)
+            .map_err(|_| Error::Limit("PtgExtraElf location count exceeds usize".into()))?;
+        if count == 0 {
+            return Err(Error::invalid(
+                (*cursor - 4) as u64,
+                "PtgExtraElf location count is zero",
+            ));
+        }
+        if count > bytes.len().saturating_sub(*cursor) / 4 {
+            return Err(Error::invalid(
+                *cursor as u64,
+                "PtgExtraElf location count exceeds bounded extra data",
+            ));
+        }
+        let mut locations = Vec::with_capacity(count);
+        for _ in 0..count {
+            locations.push(FormulaElfExtraLocation {
+                row: take_u16(bytes, cursor)?,
+                column: take_u16(bytes, cursor)?,
+            });
+        }
+        Ok(Self {
+            reserved: header & 0x4000_0000 != 0,
+            relative: header & 0x8000_0000 != 0,
+            locations,
+        })
+    }
+
+    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        if self.locations.is_empty() || self.locations.len() > 0x3fff_ffff {
+            return Err(Error::invalid(
+                0,
+                "PtgExtraElf location count is outside 1..=0x3FFFFFFF",
+            ));
+        }
+        let mut header = u32::try_from(self.locations.len())
+            .map_err(|_| Error::Limit("PtgExtraElf location count exceeds u32".into()))?;
+        header |= u32::from(self.reserved) << 30;
+        header |= u32::from(self.relative) << 31;
+        put_u32(bytes, header);
+        for location in &self.locations {
+            put_u16(bytes, location.row);
+            put_u16(bytes, location.column);
+        }
+        Ok(())
+    }
+}
+
 fn take<'a>(bytes: &'a [u8], cursor: &mut usize, len: usize) -> Result<&'a [u8]> {
     let end = cursor
         .checked_add(len)
@@ -928,10 +1150,48 @@ mod tests {
 
     #[test]
     fn unsupported_token_is_a_bounded_tail() {
-        let parsed = FormulaTokenStream::from_bytes(&[0x1e, 7, 0, 0x18, 1, 2]).unwrap();
+        let parsed = FormulaTokenStream::from_bytes(&[0x1e, 7, 0, 0x18, 4, 2]).unwrap();
         assert_eq!(parsed.tokens.len(), 1);
-        assert_eq!(parsed.unparsed_tail, [0x18, 1, 2]);
-        assert_eq!(parsed.to_bytes().unwrap(), [0x1e, 7, 0, 0x18, 1, 2]);
+        assert_eq!(parsed.unparsed_tail, [0x18, 4, 2]);
+        assert_eq!(parsed.to_bytes().unwrap(), [0x1e, 7, 0, 0x18, 4, 2]);
+    }
+
+    #[test]
+    fn natural_language_and_mem_no_mem_tokens_are_fully_typed() {
+        let rgce = [
+            0x18, 0x03, 5, 0, 7, 0, // PtgElfCol with RgceElfLoc
+            0x18, 0x0d, 0xaa, 0xbb, 0xcc, 0xdd, // PtgElfColS
+            0x68, 1, 2, 3, 4, 9, 0, // value-class PtgMemNoMem
+        ];
+        let rgcb = [
+            2, 0, 0, 0x80, // two locations with fRel
+            1, 0, 2, 0, // first RgceElfLocExtra
+            3, 0, 4, 0, // second RgceElfLocExtra
+        ];
+        let mut parsed = FormulaTokenStream::from_bytes(&rgce).unwrap();
+        assert!(parsed.unparsed_tail.is_empty());
+        assert_eq!(parsed.missing_extra_count(), 1);
+        assert!(parsed.parse_extra_data(&rgcb).unwrap().is_empty());
+        assert_eq!(parsed.missing_extra_count(), 0);
+        assert_eq!(parsed.to_bytes().unwrap(), rgce);
+        assert_eq!(parsed.extra_data_to_bytes().unwrap(), rgcb);
+        assert!(matches!(
+            parsed.tokens[0].data,
+            FormulaTokenData::NaturalLanguage {
+                extended_opcode: 0x03,
+                value: FormulaNaturalLanguageToken::Location(FormulaElfLocation {
+                    row: 5,
+                    column: 7,
+                }),
+            }
+        ));
+        assert!(matches!(
+            parsed.tokens[2].data,
+            FormulaTokenData::MemNoMem {
+                unused: 0x0403_0201,
+                byte_count: 9,
+            }
+        ));
     }
 
     #[test]

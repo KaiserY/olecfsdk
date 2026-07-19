@@ -1,8 +1,10 @@
 use std::{
+    fmt,
     io::{Cursor, Read, Write},
     ops::Deref,
+    ops::Range,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use crate::{
@@ -31,6 +33,22 @@ pub use owned_stream::OwnedCfbStream;
 pub use reader::{CfbReadStream, CfbStreamMut, CompoundFileReader, EntryInfo};
 pub use sector::{CfbReadAt, MiniSectorId, SectorId};
 
+pub(crate) trait CfbStreamWriter {
+    fn write_to(&self, writer: &mut dyn Write) -> Result<()>;
+}
+
+pub(crate) struct CfbStreamOverride<'a> {
+    path: &'a Path,
+    len: usize,
+    writer: &'a dyn CfbStreamWriter,
+}
+
+impl<'a> CfbStreamOverride<'a> {
+    pub(crate) fn new(path: &'a Path, len: usize, writer: &'a dyn CfbStreamWriter) -> Self {
+        Self { path, len, writer }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Version {
     V3,
@@ -44,29 +62,166 @@ pub enum EntryKind {
     Stream,
 }
 
-/// Clone-on-write bytes for one fully materialized CFB stream.
+/// Clone-on-write bytes for one CFB stream.
 ///
-/// Cloning this value shares the immutable allocation. Mutable
-/// [`CompoundFile`] APIs detach only the stream being changed.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CfbStreamData(Arc<Vec<u8>>);
+/// Parsed streams may borrow one or more ranges from a shared CFB image. A
+/// contiguous stream remains zero-copy; a fragmented stream is assembled once
+/// on first access. Mutable [`CompoundFile`] APIs detach only the stream being
+/// changed.
+#[derive(Clone)]
+pub struct CfbStreamData(Arc<CfbStreamBacking>);
+
+enum CfbStreamBacking {
+    Owned(Vec<u8>),
+    Archived {
+        source: Arc<Vec<u8>>,
+        ranges: Box<[Range<usize>]>,
+        len: usize,
+        materialized: OnceLock<Vec<u8>>,
+    },
+}
 
 impl CfbStreamData {
-    /// Borrows the materialized stream as bytes.
+    pub(crate) fn archived(
+        source: Arc<Vec<u8>>,
+        ranges: Vec<Range<usize>>,
+        len: usize,
+    ) -> Result<Self> {
+        let archived_len = ranges.iter().try_fold(0usize, |total, range| {
+            if range.start > range.end || range.end > source.len() {
+                return Err(Error::invalid(
+                    0,
+                    "archived CFB stream range is outside its source",
+                ));
+            }
+            total
+                .checked_add(range.len())
+                .ok_or_else(|| Error::Limit("archived CFB stream length overflow".into()))
+        })?;
+        if archived_len != len {
+            return Err(Error::invalid(
+                0,
+                "archived CFB stream ranges do not match its logical length",
+            ));
+        }
+        Ok(Self(Arc::new(CfbStreamBacking::Archived {
+            source,
+            ranges: ranges.into_boxed_slice(),
+            len,
+            materialized: OnceLock::new(),
+        })))
+    }
+
+    /// Borrows the stream as bytes, materializing a fragmented archived stream
+    /// at most once.
     pub fn as_slice(&self) -> &[u8] {
-        self.0.as_slice()
+        match self.0.as_ref() {
+            CfbStreamBacking::Owned(bytes) => bytes,
+            CfbStreamBacking::Archived {
+                source,
+                ranges,
+                len,
+                materialized,
+            } => {
+                if ranges.is_empty() {
+                    return &[];
+                }
+                if ranges.len() == 1 {
+                    return &source[ranges[0].clone()];
+                }
+                materialized.get_or_init(|| {
+                    let mut bytes = Vec::with_capacity(*len);
+                    for range in ranges.iter() {
+                        bytes.extend_from_slice(&source[range.clone()]);
+                    }
+                    bytes
+                })
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self.0.as_ref() {
+            CfbStreamBacking::Owned(bytes) => bytes.len(),
+            CfbStreamBacking::Archived { len, .. } => *len,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub(crate) fn write_to(&self, writer: &mut impl Write) -> Result<()> {
+        match self.0.as_ref() {
+            CfbStreamBacking::Owned(bytes) => writer.write_all(bytes)?,
+            CfbStreamBacking::Archived { source, ranges, .. } => {
+                for range in ranges.iter() {
+                    writer.write_all(&source[range.clone()])?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Returns mutable bytes, copying only when another clone shares them.
     pub fn to_mut(&mut self) -> &mut Vec<u8> {
-        Arc::make_mut(&mut self.0)
+        let can_mutate_owned = Arc::get_mut(&mut self.0)
+            .is_some_and(|backing| matches!(backing, CfbStreamBacking::Owned(_)));
+        if !can_mutate_owned {
+            let bytes = self.as_slice().to_vec();
+            self.0 = Arc::new(CfbStreamBacking::Owned(bytes));
+        }
+        let CfbStreamBacking::Owned(bytes) =
+            Arc::get_mut(&mut self.0).expect("detached CFB stream backing is uniquely owned")
+        else {
+            unreachable!("detached CFB stream backing is owned")
+        };
+        bytes
     }
 
     /// Unwraps uniquely owned bytes or copies them when they remain shared.
     pub fn into_vec(self) -> Vec<u8> {
-        Arc::try_unwrap(self.0).unwrap_or_else(|shared| shared.as_ref().clone())
+        match Arc::try_unwrap(self.0) {
+            Ok(CfbStreamBacking::Owned(bytes)) => bytes,
+            Ok(CfbStreamBacking::Archived {
+                source,
+                ranges,
+                len,
+                materialized,
+            }) => materialized.into_inner().unwrap_or_else(|| {
+                let mut bytes = Vec::with_capacity(len);
+                for range in ranges.iter() {
+                    bytes.extend_from_slice(&source[range.clone()]);
+                }
+                bytes
+            }),
+            Err(shared) => CfbStreamData(shared).as_slice().to_vec(),
+        }
     }
 }
+
+impl Default for CfbStreamData {
+    fn default() -> Self {
+        Vec::new().into()
+    }
+}
+
+impl fmt::Debug for CfbStreamData {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("CfbStreamData")
+            .field(&self.as_slice())
+            .finish()
+    }
+}
+
+impl PartialEq for CfbStreamData {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for CfbStreamData {}
 
 impl Deref for CfbStreamData {
     type Target = [u8];
@@ -84,7 +239,7 @@ impl AsRef<[u8]> for CfbStreamData {
 
 impl From<Vec<u8>> for CfbStreamData {
     fn from(value: Vec<u8>) -> Self {
-        Self(Arc::new(value))
+        Self(Arc::new(CfbStreamBacking::Owned(value)))
     }
 }
 
@@ -141,19 +296,19 @@ impl Entry {
 pub struct CompoundFile {
     version: Version,
     header: Header,
-    difat: Difat,
-    fat: Fat,
-    mini_fat: MiniFat,
-    directory: Directory,
-    entries: Vec<Entry>,
+    difat: Arc<Difat>,
+    fat: Arc<Fat>,
+    mini_fat: Arc<MiniFat>,
+    directory: Arc<Directory>,
+    entries: Arc<Vec<Entry>>,
     header_padding_is_zero: bool,
-    unallocated_sectors: Vec<Vec<u8>>,
-    trailing_data: Vec<u8>,
+    unallocated_sectors: Arc<Vec<Vec<u8>>>,
+    trailing_data: Arc<Vec<u8>>,
 }
 
 impl CompoundFile {
     pub fn new(version: Version) -> Result<Self> {
-        Self::from_bytes(&writer::write_empty_compound(version)?)
+        Self::from_vec(writer::write_empty_compound(version)?)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
@@ -171,6 +326,24 @@ impl CompoundFile {
     }
 
     pub fn from_bytes_with_limits(bytes: &[u8], limits: Limits) -> Result<Self> {
+        Self::from_shared_archive_with_limits(Arc::new(bytes.to_vec()), limits)
+    }
+
+    /// Parses an owned CFB image without first copying its complete byte
+    /// buffer. Stream payloads retain archived ranges from this shared image.
+    pub fn from_vec(bytes: Vec<u8>) -> Result<Self> {
+        Self::from_vec_with_limits(bytes, Limits::default())
+    }
+
+    pub fn from_vec_with_limits(bytes: Vec<u8>, limits: Limits) -> Result<Self> {
+        Self::from_shared_archive_with_limits(Arc::new(bytes), limits)
+    }
+
+    pub(crate) fn from_shared_archive_with_limits(
+        archive: Arc<Vec<u8>>,
+        limits: Limits,
+    ) -> Result<Self> {
+        let bytes = archive.as_slice();
         if bytes.len() as u64 > limits.max_file_size {
             return Err(Error::Limit(format!(
                 "file length {} exceeds {}",
@@ -203,8 +376,15 @@ impl CompoundFile {
             limits,
         )?;
         let version = header.version();
-        let entries =
-            stream::read_entries(&header, &fat, &mini_fat, &directory, &mut sectors, limits)?;
+        let entries = stream::read_entries_archived(
+            &header,
+            &fat,
+            &mini_fat,
+            &directory,
+            &mut sectors,
+            &archive,
+            limits,
+        )?;
         let mut unallocated_sectors = Vec::new();
         let mut unallocated_bytes = 0usize;
         for index in 0..sectors.sector_count() {
@@ -231,14 +411,14 @@ impl CompoundFile {
         Ok(Self {
             version,
             header,
-            difat,
-            fat,
-            mini_fat,
-            directory,
-            entries,
+            difat: Arc::new(difat),
+            fat: Arc::new(fat),
+            mini_fat: Arc::new(mini_fat),
+            directory: Arc::new(directory),
+            entries: Arc::new(entries),
             header_padding_is_zero,
-            unallocated_sectors,
-            trailing_data,
+            unallocated_sectors: Arc::new(unallocated_sectors),
+            trailing_data: Arc::new(trailing_data),
         })
     }
 
@@ -262,7 +442,7 @@ impl CompoundFile {
                 limits.max_file_size
             )));
         }
-        Self::from_bytes_with_limits(&bytes, limits)
+        Self::from_vec_with_limits(bytes, limits)
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -384,7 +564,7 @@ impl CompoundFile {
         if !self.entries[index].is_stream() {
             return None;
         }
-        Some(self.entries[index].data.to_mut())
+        Some(Arc::make_mut(&mut self.entries)[index].data.to_mut())
     }
     /// Opens a fully materialized stream for `Read + Write + Seek` and `set_len` edits.
     pub fn open_stream_mut(&mut self, path: impl AsRef<Path>) -> Result<OwnedCfbStream<'_>> {
@@ -392,15 +572,16 @@ impl CompoundFile {
         if !self.entries[index].is_stream() {
             return Err(Error::invalid(0, "CFB entry is not a stream"));
         }
+        let version = self.version;
         Ok(OwnedCfbStream::new(
-            self.entries[index].data.to_mut(),
-            self.version,
+            Arc::make_mut(&mut self.entries)[index].data.to_mut(),
+            version,
         ))
     }
     pub fn replace_stream(&mut self, path: impl AsRef<Path>, data: Vec<u8>) -> Result<Vec<u8>> {
         let path = path.as_ref();
         let index = self.required_entry_index(path)?;
-        let entry = &mut self.entries[index];
+        let entry = &mut Arc::make_mut(&mut self.entries)[index];
         if !entry.is_stream() {
             return Err(Error::invalid(
                 0,
@@ -418,7 +599,7 @@ impl CompoundFile {
     pub(crate) fn overwrite_stream(&mut self, path: impl AsRef<Path>, data: Vec<u8>) -> Result<()> {
         let path = path.as_ref();
         let index = self.required_entry_index(path)?;
-        let entry = &mut self.entries[index];
+        let entry = &mut Arc::make_mut(&mut self.entries)[index];
         if !entry.is_stream() {
             return Err(Error::invalid(
                 0,
@@ -437,7 +618,7 @@ impl CompoundFile {
         let path = path.as_ref();
         match self.entry_index(path) {
             Some(index) if self.entries[index].is_stream() => Ok(Some(replace_stream_data(
-                &mut self.entries[index].data,
+                &mut Arc::make_mut(&mut self.entries)[index].data,
                 data,
             ))),
             Some(index) => Err(Error::invalid(
@@ -458,7 +639,7 @@ impl CompoundFile {
         let path = path.as_ref();
         match self.entry_index(path) {
             Some(index) if self.entries[index].is_stream() => {
-                self.entries[index].data = data.into();
+                Arc::make_mut(&mut self.entries)[index].data = data.into();
                 Ok(())
             }
             Some(index) => Err(Error::invalid(
@@ -479,7 +660,7 @@ impl CompoundFile {
     ) -> Result<Guid> {
         let path = path.as_ref();
         let index = self.required_entry_index(path)?;
-        let entry = &mut self.entries[index];
+        let entry = &mut Arc::make_mut(&mut self.entries)[index];
         if !entry.is_storage() {
             return Err(Error::invalid(
                 0,
@@ -491,7 +672,10 @@ impl CompoundFile {
 
     pub fn replace_state_bits(&mut self, path: impl AsRef<Path>, bits: u32) -> Result<u32> {
         let index = self.required_entry_index(path.as_ref())?;
-        Ok(std::mem::replace(&mut self.entries[index].state_bits, bits))
+        Ok(std::mem::replace(
+            &mut Arc::make_mut(&mut self.entries)[index].state_bits,
+            bits,
+        ))
     }
 
     pub fn replace_creation_time(
@@ -506,7 +690,10 @@ impl CompoundFile {
                 "CFB creation time is writable only for non-root storage entries",
             ));
         }
-        Ok(std::mem::replace(&mut self.entries[index].created, time))
+        Ok(std::mem::replace(
+            &mut Arc::make_mut(&mut self.entries)[index].created,
+            time,
+        ))
     }
 
     pub fn replace_modified_time(
@@ -521,7 +708,10 @@ impl CompoundFile {
                 "CFB stream modified time must remain zero",
             ));
         }
-        Ok(std::mem::replace(&mut self.entries[index].modified, time))
+        Ok(std::mem::replace(
+            &mut Arc::make_mut(&mut self.entries)[index].modified,
+            time,
+        ))
     }
 
     pub fn create_storage(&mut self, path: impl AsRef<Path>) -> Result<()> {
@@ -580,7 +770,8 @@ impl CompoundFile {
             ));
         }
         let new_path = parent.join(new_name);
-        for entry in &mut self.entries {
+        let entries = Arc::make_mut(&mut self.entries);
+        for entry in entries.iter_mut() {
             let Ok(suffix) = entry.path.strip_prefix(&old_path) else {
                 continue;
             };
@@ -590,7 +781,7 @@ impl CompoundFile {
                 new_path.join(suffix)
             };
         }
-        self.entries[index].name = new_name.to_owned();
+        entries[index].name = new_name.to_owned();
         Ok(())
     }
 
@@ -611,7 +802,7 @@ impl CompoundFile {
                 format!("CFB storage {} is not empty", path.display()),
             ));
         }
-        Ok(self.entries.remove(index))
+        Ok(Arc::make_mut(&mut self.entries).remove(index))
     }
 
     pub fn remove_stream(&mut self, path: impl AsRef<Path>) -> Result<Entry> {
@@ -639,7 +830,8 @@ impl CompoundFile {
         let remove_root = self.entries[index].kind != EntryKind::Root;
         let mut removed = Vec::new();
         let mut kept = Vec::with_capacity(self.entries.len());
-        for entry in self.entries.drain(..) {
+        let entries = Arc::make_mut(&mut self.entries);
+        for entry in entries.drain(..) {
             let matches = entry.path.starts_with(&root) && (remove_root || entry.path != root);
             if matches {
                 removed.push(entry);
@@ -647,7 +839,7 @@ impl CompoundFile {
                 kept.push(entry);
             }
         }
-        self.entries = kept;
+        *entries = kept;
         removed.sort_by(|left, right| {
             right
                 .path
@@ -694,7 +886,7 @@ impl CompoundFile {
             ));
         }
         let entry_path = parent_entry.path.join(&name);
-        self.entries.push(Entry {
+        Arc::make_mut(&mut self.entries).push(Entry {
             path: entry_path,
             name,
             kind,
@@ -708,8 +900,34 @@ impl CompoundFile {
     }
 
     fn entry_index(&self, path: &Path) -> Option<usize> {
-        let names = name::path_components(path)?;
-        self.entry_index_from_components(&names)
+        let root = self
+            .entries
+            .iter()
+            .position(|entry| entry.kind == EntryKind::Root)?;
+        let mut current = root;
+        for component in path.components() {
+            match component {
+                std::path::Component::Prefix(_) => return None,
+                std::path::Component::RootDir => current = root,
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    if current == root {
+                        return None;
+                    }
+                    let parent = self.entries[current].path.parent()?;
+                    current = self.entries.iter().position(|entry| entry.path == parent)?;
+                }
+                std::path::Component::Normal(requested) => {
+                    let requested = requested.to_str()?;
+                    let parent = self.entries[current].path.as_path();
+                    current = self.entries.iter().position(|entry| {
+                        entry.path.parent() == Some(parent)
+                            && name::names_equal(&entry.name, requested)
+                    })?;
+                }
+            }
+        }
+        Some(current)
     }
 
     fn entry_index_from_components(&self, names: &[String]) -> Option<usize> {
@@ -744,6 +962,57 @@ impl CompoundFile {
 
     pub fn write_to(&self, mut writer: impl Write) -> Result<()> {
         writer::write_compound_to(self, &mut writer)
+    }
+
+    pub(crate) fn write_to_with_stream_overrides(
+        &self,
+        overrides: &[CfbStreamOverride<'_>],
+        mut writer: impl Write,
+    ) -> Result<()> {
+        let overrides = self.resolve_stream_overrides(overrides)?;
+        writer::write_compound_to_with_overrides(self, &overrides, &mut writer)
+    }
+
+    pub(crate) fn to_bytes_with_stream_overrides(
+        &self,
+        overrides: &[CfbStreamOverride<'_>],
+    ) -> Result<Vec<u8>> {
+        let overrides = self.resolve_stream_overrides(overrides)?;
+        writer::write_compound_with_overrides(self, &overrides)
+    }
+
+    fn resolve_stream_overrides<'a>(
+        &'a self,
+        overrides: &'a [CfbStreamOverride<'a>],
+    ) -> Result<Vec<CfbStreamOverride<'a>>> {
+        overrides
+            .iter()
+            .map(|stream_override| {
+                let entry = self.entry(stream_override.path).ok_or_else(|| {
+                    Error::invalid(
+                        0,
+                        format!(
+                            "CFB stream override {} does not exist",
+                            stream_override.path.display()
+                        ),
+                    )
+                })?;
+                if entry.kind != EntryKind::Stream {
+                    return Err(Error::invalid(
+                        0,
+                        format!(
+                            "CFB stream override {} is not a stream",
+                            stream_override.path.display()
+                        ),
+                    ));
+                }
+                Ok(CfbStreamOverride::new(
+                    &entry.path,
+                    stream_override.len,
+                    stream_override.writer,
+                ))
+            })
+            .collect()
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
@@ -830,6 +1099,46 @@ mod tests {
 
     use super::*;
 
+    struct TestStreamWriter(Vec<u8>);
+
+    impl CfbStreamWriter for TestStreamWriter {
+        fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+            writer.write_all(&self.0)?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn streaming_overrides_drive_layout_and_enforce_exact_lengths() {
+        let mut compound = CompoundFile::new(Version::V3).unwrap();
+        compound.create_stream("/mInI", vec![1]).unwrap();
+        compound.create_stream("/Regular", vec![2; 4096]).unwrap();
+        let mini = TestStreamWriter(vec![3; 127]);
+        let regular = TestStreamWriter(vec![4; 8193]);
+        let overrides = [
+            CfbStreamOverride::new(Path::new("/Mini"), mini.0.len(), &mini),
+            CfbStreamOverride::new(Path::new("/Regular"), regular.0.len(), &regular),
+        ];
+
+        let bytes = compound.to_bytes_with_stream_overrides(&overrides).unwrap();
+        let reopened = CompoundFile::from_bytes(&bytes).unwrap();
+        assert_eq!(reopened.stream("/Mini"), Some(mini.0.as_slice()));
+        assert_eq!(reopened.stream("/Regular"), Some(regular.0.as_slice()));
+
+        let under = [CfbStreamOverride::new(
+            Path::new("/Mini"),
+            mini.0.len() + 1,
+            &mini,
+        )];
+        assert!(compound.to_bytes_with_stream_overrides(&under).is_err());
+        let over = [CfbStreamOverride::new(
+            Path::new("/Mini"),
+            mini.0.len() - 1,
+            &mini,
+        )];
+        assert!(compound.to_bytes_with_stream_overrides(&over).is_err());
+    }
+
     #[test]
     fn empty_compound_file_round_trips() {
         for version in [Version::V3, Version::V4] {
@@ -908,17 +1217,104 @@ mod tests {
         source.create_stream("/Data", vec![0x31; 65_537]).unwrap();
         let mut cloned = source.clone();
 
+        assert!(Arc::ptr_eq(&source.entries, &cloned.entries));
         assert!(Arc::ptr_eq(
             &source.entry("/Data").unwrap().data.0,
             &cloned.entry("/Data").unwrap().data.0,
         ));
         cloned.stream_mut("/Data").unwrap()[0] = 0x52;
+        assert!(!Arc::ptr_eq(&source.entries, &cloned.entries));
         assert_eq!(source.stream("/Data").unwrap()[0], 0x31);
         assert_eq!(cloned.stream("/Data").unwrap()[0], 0x52);
         assert!(!Arc::ptr_eq(
             &source.entry("/Data").unwrap().data.0,
             &cloned.entry("/Data").unwrap().data.0,
         ));
+    }
+
+    #[test]
+    fn archived_streams_borrow_contiguous_ranges_and_materialize_fragments_once() {
+        let source = Arc::new((0u8..16).collect::<Vec<_>>());
+        let contiguous =
+            CfbStreamData::archived(Arc::clone(&source), std::iter::once(3..11).collect(), 8)
+                .unwrap();
+        let CfbStreamBacking::Archived {
+            ranges,
+            materialized,
+            ..
+        } = contiguous.0.as_ref()
+        else {
+            panic!("stream should retain archived backing")
+        };
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], 3..11);
+        assert!(materialized.get().is_none());
+        assert_eq!(contiguous.as_slice(), &source[3..11]);
+        assert!(materialized.get().is_none());
+
+        let mut fragmented =
+            CfbStreamData::archived(Arc::clone(&source), vec![1..3, 7..10], 5).unwrap();
+        let shared = fragmented.clone();
+        assert_eq!(fragmented.as_slice(), [1, 2, 7, 8, 9]);
+        let CfbStreamBacking::Archived { materialized, .. } = fragmented.0.as_ref() else {
+            panic!("stream should retain archived backing")
+        };
+        assert_eq!(
+            materialized.get().map(Vec::as_slice),
+            Some([1, 2, 7, 8, 9].as_slice())
+        );
+        assert!(Arc::ptr_eq(&fragmented.0, &shared.0));
+
+        fragmented.to_mut()[0] = 0xff;
+        assert_eq!(fragmented.as_slice(), [0xff, 2, 7, 8, 9]);
+        assert_eq!(shared.as_slice(), [1, 2, 7, 8, 9]);
+        assert!(!Arc::ptr_eq(&fragmented.0, &shared.0));
+    }
+
+    #[test]
+    fn owned_parser_retains_regular_stream_ranges_from_the_shared_image() {
+        let mut source = CompoundFile::new(Version::V3).unwrap();
+        source.create_stream("/Data", vec![0x41; 65_537]).unwrap();
+        let parsed = CompoundFile::from_vec(source.to_bytes().unwrap()).unwrap();
+        let data = &parsed.entry("/Data").unwrap().data;
+        let CfbStreamBacking::Archived {
+            ranges,
+            materialized,
+            ..
+        } = data.0.as_ref()
+        else {
+            panic!("parsed stream should retain archived backing")
+        };
+        assert_eq!(ranges.len(), 1);
+        assert!(materialized.get().is_none());
+        assert_eq!(data.as_slice(), [0x41; 65_537]);
+        assert!(materialized.get().is_none());
+    }
+
+    #[test]
+    fn streaming_writer_preserves_fragmented_archives_without_materializing_them() {
+        let mut compound = CompoundFile::new(Version::V3).unwrap();
+        compound.create_stream("/Data", Vec::new()).unwrap();
+        let source = Arc::new(vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        let data = CfbStreamData::archived(Arc::clone(&source), vec![0..2, 4..6], 4).unwrap();
+        Arc::make_mut(&mut compound.entries)
+            .iter_mut()
+            .find(|entry| entry.path == Path::new("/Data"))
+            .unwrap()
+            .data = data.clone();
+
+        let mut output = Vec::new();
+        compound.write_to(&mut output).unwrap();
+        let CfbStreamBacking::Archived { materialized, .. } = data.0.as_ref() else {
+            panic!("stream should retain archived backing")
+        };
+        assert!(materialized.get().is_none());
+        assert_eq!(
+            CompoundFile::from_bytes_strict(&output)
+                .unwrap()
+                .stream("/Data"),
+            Some([0x11, 0x22, 0x55, 0x66].as_slice())
+        );
     }
 
     #[test]
@@ -1051,7 +1447,7 @@ mod tests {
         assert!(parsed.logical_eq(&reopened));
 
         let mut many = CompoundFile::new(Version::V3).unwrap();
-        many.unallocated_sectors = vec![vec![0x6b; 512]; 130];
+        many.unallocated_sectors = Arc::new(vec![vec![0x6b; 512]; 130]);
         let output = many.to_bytes().unwrap();
         let reopened = CompoundFile::from_bytes_strict(&output).unwrap();
         assert_eq!(reopened.unallocated_sectors().len(), 130);

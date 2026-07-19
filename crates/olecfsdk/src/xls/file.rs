@@ -9,13 +9,15 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::Write,
     ops::Range,
     path::Path,
+    sync::Arc,
 };
 
 use crate::{
     Error, Result,
-    cfb::{CompoundFile, Entry, EntryKind},
+    cfb::{CfbStreamOverride, CfbStreamWriter, CompoundFile, Entry, EntryKind},
     common::Guid,
     forms::ParentControlStorageModel,
     io::{BinaryFormat, SdkEnumValue},
@@ -23,7 +25,7 @@ use crate::{
     office_art::{OfficeArtDrawingGraph, OfficeArtStream},
     parse::{
         ParseDiagnostic, ParseDiagnosticCode, ParseOptions, ParseOutcome, SpecificationReference,
-        compound_from_bytes, compound_from_path, compound_outcome,
+        compound_from_bytes, compound_from_path, compound_from_vec, compound_outcome,
     },
     save::SaveOptions,
     shared_content::{
@@ -33,23 +35,23 @@ use crate::{
 
 use super::{
     ArrayRecord, BCUsrsRecord, BiffConstant, BiffRecord, BiffRecordData, BiffStream,
-    BiffUnicodeString, BlankRecord, BoolErrRecord, BoolErrValue, BoundSheet8Record, CUsrRecord,
-    CbUsrRecord, CellErrorCode, CellHeader, CellRange, ColInfoRecord, DevModeW, ExtSstRecord,
-    ExternNameBody, ExternNameRecord, ExternSheetReference, FeatureHeaderData, FileLockRecord,
-    FontRecord, FormatRecord, FormulaCachedResult, FormulaRecord, FormulaTokenData, FormulaTokens,
-    HyperlinkMoniker, HyperlinkObject, HyperlinkRecord, LabelRecord, LabelSstRecord,
-    MergeCellsRecord, MsoDrawingData, MsoDrawingHostData, MsoDrawingHostRecord, MsoDrawingRecord,
-    MulBlankRecord, MulRkCell, MulRkRecord, NameRecord, NameValue, NoteRecord, NumberRecord,
-    ObjCommonData, ObjFormulaData, ObjPictureFlags, ObjPictureFormula, ObjRecord, PivotCacheStream,
-    PlsRecord, PrinterSettings, RevisionLogStream, RkRecord, RowRecord, RrAutoFmtRecord,
-    RrFormatRecord, RrInsertShRecord, RrTabIdRecord, Rrd, RrdChgCellRecord, RrdConflictRecord,
-    RrdDefNameRecord, RrdHeadRecord, RrdInfoRecord, RrdInsDelRecord, RrdMoveRecord,
-    RrdRenSheetRecord, RrdTqsifRecord, RrdUserViewRecord, SharedFormulaRecord,
-    ShortXlUnicodeString, SstCompletion, SstRecord, SstString, StringValueRecord, SupBookLink,
-    SupBookRecord, SupBookSheetName, SxStreamIdRecord, SxViewRecord, SxVsRecord, TableRecord,
-    TxoRecord, UserBViewRecord, UserNamesStream, UserSViewBeginChartRecord, UserSViewBeginRecord,
-    UserSViewEndRecord, UsrChkRecord, UsrExclRecord, UsrInfoRecord, XctRecord, XfRecord,
-    XlStringCharacters,
+    BiffStreamWritePlan, BiffUnicodeString, BlankRecord, BoolErrRecord, BoolErrValue,
+    BoundSheet8Record, CUsrRecord, CbUsrRecord, CellErrorCode, CellHeader, CellRange,
+    ColInfoRecord, DevModeW, ExtSstRecord, ExternNameBody, ExternNameRecord, ExternSheetReference,
+    FeatureHeaderData, FileLockRecord, FontRecord, FormatRecord, FormulaCachedResult,
+    FormulaRecord, FormulaTokenData, FormulaTokenStream, FormulaTokens, HyperlinkMoniker,
+    HyperlinkObject, HyperlinkRecord, LabelRecord, LabelSstRecord, MergeCellsRecord,
+    MsoDrawingData, MsoDrawingHostData, MsoDrawingHostRecord, MsoDrawingRecord, MulBlankRecord,
+    MulRkCell, MulRkRecord, NameRecord, NameValue, NoteRecord, NumberRecord, ObjCommonData,
+    ObjFormulaData, ObjPictureFlags, ObjPictureFormula, ObjRecord, PivotCacheStream, PlsRecord,
+    PrinterSettings, RevisionLogStream, RkRecord, RowRecord, RrAutoFmtRecord, RrFormatRecord,
+    RrInsertShRecord, RrTabIdRecord, Rrd, RrdChgCellRecord, RrdConflictRecord, RrdDefNameRecord,
+    RrdHeadRecord, RrdInfoRecord, RrdInsDelRecord, RrdMoveRecord, RrdRenSheetRecord,
+    RrdTqsifRecord, RrdUserViewRecord, SharedFormulaRecord, ShortXlUnicodeString, SstCompletion,
+    SstRecord, SstString, StringValueRecord, SupBookLink, SupBookRecord, SupBookSheetName,
+    SxStreamIdRecord, SxViewRecord, SxVsRecord, TableRecord, TxoRecord, UserBViewRecord,
+    UserNamesStream, UserSViewBeginChartRecord, UserSViewBeginRecord, UserSViewEndRecord,
+    UsrChkRecord, UsrExclRecord, UsrInfoRecord, XctRecord, XfRecord, XlStringCharacters,
 };
 
 const WORKBOOK_STREAM: &str = "/Workbook";
@@ -109,18 +111,27 @@ pub struct XlsFile {
     compound_file: CompoundFile,
     pub shared: OfficeSharedContent,
     /// Every root BIFF workbook stream. Some compatibility files contain both
-    /// the modern `Workbook` name and the legacy `Book` name.
-    pub workbooks: Vec<XlsWorkbookStream>,
-    pub pivot_caches: Vec<XlsPivotCache>,
-    pub revision_log: Option<XlsRevisionLog>,
-    pub user_names: Option<XlsUserNames>,
+    /// the modern `Workbook` name and the legacy `Book` name. Clones share
+    /// this collection; use [`Arc::make_mut`] before direct collection edits.
+    pub workbooks: Arc<Vec<XlsWorkbookStream>>,
+    /// Clone-shared pivot-cache stream collection, detached on mutation with
+    /// [`Arc::make_mut`].
+    pub pivot_caches: Arc<Vec<XlsPivotCache>>,
+    /// Clone-shared standalone revision stream; detach with [`Arc::make_mut`]
+    /// before direct edits.
+    pub revision_log: Option<Arc<XlsRevisionLog>>,
+    /// Clone-shared shared-workbook user stream; detach with [`Arc::make_mut`]
+    /// before direct edits.
+    pub user_names: Option<Arc<XlsUserNames>>,
 }
 
 /// A named root BIFF stream and its full record/substream tree.
 #[derive(Clone, Debug)]
 pub struct XlsWorkbookStream {
     pub name: XlsStreamName,
-    pub tree: BiffWorkbookTree,
+    /// Clone-shared BIFF record tree. Call [`Arc::make_mut`] before direct
+    /// field edits; transactional SDK methods detach it automatically.
+    pub tree: Arc<BiffWorkbookTree>,
     sheet_ids: Vec<XlsSheetId>,
 }
 
@@ -4652,50 +4663,10 @@ fn name_value_eq_ascii(value: &NameValue, expected: &[u8]) -> bool {
 
 impl BiffWorkbookTree {
     pub fn from_stream(stream: BiffStream) -> Result<Self> {
-        let mut roots = Vec::new();
-        let mut stack = Vec::<OpenSubstream>::new();
-        let mut covered = vec![false; stream.records.len()];
-        for (index, record) in stream.records.iter().enumerate() {
-            match &record.data {
-                BiffRecordData::Bof(bof) => stack.push(OpenSubstream {
-                    kind: BiffSubstreamKind::from_document_type(bof.document_type),
-                    start: index,
-                    children: Vec::new(),
-                }),
-                BiffRecordData::LegacyBof { .. } => stack.push(OpenSubstream {
-                    kind: BiffSubstreamKind::Compatibility(0xffff),
-                    start: index,
-                    children: Vec::new(),
-                }),
-                BiffRecordData::Eof => {
-                    let open = stack.pop().ok_or_else(|| {
-                        Error::invalid(record.offset.into(), "BIFF EOF has no matching BOF")
-                    })?;
-                    covered[open.start..=index].fill(true);
-                    let node = BiffSubstreamNode {
-                        kind: open.kind,
-                        record_range: open.start..index + 1,
-                        children: open.children,
-                    };
-                    if let Some(parent) = stack.last_mut() {
-                        parent.children.push(node);
-                    } else {
-                        roots.push(node);
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Some(open) = stack.last() {
-            return Err(Error::invalid(
-                stream.records[open.start].offset.into(),
-                "BIFF BOF has no matching EOF",
-            ));
-        }
-        let outside_substream_ranges = matching_ranges(&covered, false);
+        let (substreams, outside_substream_ranges) = index_biff_substreams(&stream)?;
         Ok(Self {
             stream,
-            substreams: roots,
+            substreams,
             outside_substream_ranges,
         })
     }
@@ -4710,18 +4681,22 @@ impl BiffWorkbookTree {
 
     /// Rebuilds the BOF/EOF tree after inserting, removing, or moving records.
     pub fn reindex(&mut self) -> Result<()> {
-        let indexed = Self::from_stream(self.stream.clone())?;
-        self.substreams = indexed.substreams;
-        self.outside_substream_ranges = indexed.outside_substream_ranges;
+        let (substreams, outside_substream_ranges) = index_biff_substreams(&self.stream)?;
+        self.substreams = substreams;
+        self.outside_substream_ranges = outside_substream_ranges;
         Ok(())
+    }
+
+    fn relayout_in_place(&mut self, preserve_invalid_references: bool) -> Result<()> {
+        self.stream.relayout_in_place(preserve_invalid_references)?;
+        self.reindex()
     }
 
     /// Rebuilds physical BIFF positions, specification file pointers, and the
     /// BOF/EOF substream index after record-tree edits.
     pub fn relayout(&mut self) -> Result<()> {
         let mut rebuilt = self.clone();
-        rebuilt.stream.relayout()?;
-        rebuilt.reindex()?;
+        rebuilt.relayout_in_place(false)?;
         *self = rebuilt;
         Ok(())
     }
@@ -4730,8 +4705,7 @@ impl BiffWorkbookTree {
     /// reference fields that cannot be relocated unambiguously.
     pub fn relayout_preserving_compatibility(&mut self) -> Result<()> {
         let mut rebuilt = self.clone();
-        rebuilt.stream.relayout_preserving_compatibility()?;
-        rebuilt.reindex()?;
+        rebuilt.relayout_in_place(true)?;
         *self = rebuilt;
         Ok(())
     }
@@ -4793,16 +4767,72 @@ impl BiffWorkbookTree {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let mut tree = self.clone();
-        tree.relayout()?;
-        tree.stream.to_bytes()
+        index_biff_substreams(&self.stream)?;
+        self.stream.to_bytes()
     }
 
     pub fn to_bytes_preserving_compatibility(&self) -> Result<Vec<u8>> {
-        let mut tree = self.clone();
-        tree.relayout_preserving_compatibility()?;
-        tree.stream.to_bytes_preserving_compatibility()
+        index_biff_substreams(&self.stream)?;
+        self.stream.to_bytes_preserving_compatibility()
     }
+
+    fn write_plan(&self, preserve_compatibility: bool) -> Result<BiffStreamWritePlan<'_>> {
+        index_biff_substreams(&self.stream)?;
+        self.stream.write_plan(preserve_compatibility)
+    }
+}
+
+impl CfbStreamWriter for BiffStreamWritePlan<'_> {
+    fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+        BiffStreamWritePlan::write_to(self, writer)
+    }
+}
+
+fn index_biff_substreams(
+    stream: &BiffStream,
+) -> Result<(Vec<BiffSubstreamNode>, Vec<Range<usize>>)> {
+    let mut roots = Vec::new();
+    let mut stack = Vec::<OpenSubstream>::new();
+    let mut covered = vec![false; stream.records.len()];
+    for (index, record) in stream.records.iter().enumerate() {
+        match &record.data {
+            BiffRecordData::Bof(bof) => stack.push(OpenSubstream {
+                kind: BiffSubstreamKind::from_document_type(bof.document_type),
+                start: index,
+                children: Vec::new(),
+            }),
+            BiffRecordData::LegacyBof { .. } => stack.push(OpenSubstream {
+                kind: BiffSubstreamKind::Compatibility(0xffff),
+                start: index,
+                children: Vec::new(),
+            }),
+            BiffRecordData::Eof => {
+                let open = stack.pop().ok_or_else(|| {
+                    Error::invalid(record.offset.into(), "BIFF EOF has no matching BOF")
+                })?;
+                covered[open.start..=index].fill(true);
+                let node = BiffSubstreamNode {
+                    kind: open.kind,
+                    record_range: open.start..index + 1,
+                    children: open.children,
+                };
+                if let Some(parent) = stack.last_mut() {
+                    parent.children.push(node);
+                } else {
+                    roots.push(node);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(open) = stack.last() {
+        return Err(Error::invalid(
+            stream.records[open.start].offset.into(),
+            "BIFF BOF has no matching EOF",
+        ));
+    }
+    let outside_substream_ranges = matching_ranges(&covered, false);
+    Ok((roots, outside_substream_ranges))
 }
 
 impl PartialEq for XlsWorkbookStream {
@@ -4872,7 +4902,7 @@ impl XlsWorkbookStream {
         };
         Ok(Self {
             name,
-            tree,
+            tree: tree.into(),
             sheet_ids,
         })
     }
@@ -5710,10 +5740,6 @@ fn reorder_bound_sheet_records(
             "BoundSheet8 collection does not match the workbook identity table",
         ));
     }
-    let old_records = record_indices
-        .iter()
-        .map(|&index| workbook.tree.stream.records[index].clone())
-        .collect::<Vec<_>>();
     let old_positions = workbook
         .sheet_ids
         .iter()
@@ -5721,10 +5747,22 @@ fn reorder_bound_sheet_records(
         .enumerate()
         .map(|(position, id)| (id, position))
         .collect::<BTreeMap<_, _>>();
+    let tree = Arc::make_mut(&mut workbook.tree);
+    let mut old_at_slot = (0..record_indices.len()).collect::<Vec<_>>();
+    let mut slot_of_old = old_at_slot.clone();
     for (new_position, id) in order.iter().copied().enumerate() {
         let old_position = old_positions[&id];
-        workbook.tree.stream.records[record_indices[new_position]] =
-            old_records[old_position].clone();
+        let current_position = slot_of_old[old_position];
+        if current_position == new_position {
+            continue;
+        }
+        tree.stream.records.swap(
+            record_indices[new_position],
+            record_indices[current_position],
+        );
+        old_at_slot.swap(new_position, current_position);
+        slot_of_old[old_at_slot[new_position]] = new_position;
+        slot_of_old[old_at_slot[current_position]] = current_position;
     }
     workbook.sheet_ids.clone_from_slice(order);
     Ok(())
@@ -5787,18 +5825,22 @@ impl XlsFile {
             .first()
             .is_some_and(|identity| identity.sheet_ordinal().is_some());
         let old_to_new = sheet_permutation(&old_ids, order)?;
+        let workbooks = Arc::make_mut(&mut rebuilt.workbooks);
         remap_workbook_sheet_positions(
-            &mut rebuilt.workbooks[workbook_index].tree.stream.records,
+            &mut Arc::make_mut(&mut workbooks[workbook_index].tree)
+                .stream
+                .records,
             &old_to_new,
             preserve_compatibility,
         )?;
-        reorder_bound_sheet_records(&mut rebuilt.workbooks[workbook_index], order)?;
+        reorder_bound_sheet_records(&mut workbooks[workbook_index], order)?;
         if uses_sheet_ordinals {
-            rebuilt.workbooks[workbook_index].sheet_ids = (0..order.len())
+            workbooks[workbook_index].sheet_ids = (0..order.len())
                 .map(XlsSheetId::from_sheet_ordinal)
                 .collect::<Result<Vec<_>>>()?;
         }
-        if let Some(XlsRevisionLog::Parsed(log)) = &mut rebuilt.revision_log {
+        if let Some(XlsRevisionLog::Parsed(log)) = rebuilt.revision_log.as_mut().map(Arc::make_mut)
+        {
             for record in &mut log.records {
                 if let BiffRecordData::RrTabId(value) = &mut record.data {
                     reorder_rr_tab_id(value, &old_to_new, u64::from(record.offset))?;
@@ -5806,13 +5848,12 @@ impl XlsFile {
             }
         }
         if preserve_compatibility {
-            rebuilt.workbooks[workbook_index]
-                .tree
+            Arc::make_mut(&mut workbooks[workbook_index].tree)
                 .relayout_preserving_compatibility()?;
-            rebuilt.workbooks[workbook_index].relationships_compatible()?;
+            workbooks[workbook_index].relationships_compatible()?;
         } else {
-            rebuilt.workbooks[workbook_index].tree.relayout()?;
-            rebuilt.workbooks[workbook_index].relationships()?;
+            Arc::make_mut(&mut workbooks[workbook_index].tree).relayout()?;
+            workbooks[workbook_index].relationships()?;
         }
         *self = rebuilt;
         Ok(())
@@ -5942,19 +5983,22 @@ impl XlsFile {
                 "BoundSheet8 sheet name must be unique ignoring case",
             ));
         }
-        let value =
-            match &mut rebuilt.workbooks[workbook_index].tree.stream.records[record_index].data {
-                BiffRecordData::BoundSheet8(value)
-                | BiffRecordData::BoundSheet8Compatibility { value, .. } => value,
-                _ => unreachable!("sheet identity points to BoundSheet8"),
-            };
+        let workbooks = Arc::make_mut(&mut rebuilt.workbooks);
+        let value = match &mut Arc::make_mut(&mut workbooks[workbook_index].tree)
+            .stream
+            .records[record_index]
+            .data
+        {
+            BiffRecordData::BoundSheet8(value)
+            | BiffRecordData::BoundSheet8Compatibility { value, .. } => value,
+            _ => unreachable!("sheet identity points to BoundSheet8"),
+        };
         value.name = name;
         if preserve_compatibility {
-            rebuilt.workbooks[workbook_index]
-                .tree
+            Arc::make_mut(&mut workbooks[workbook_index].tree)
                 .relayout_preserving_compatibility()?;
         } else {
-            rebuilt.workbooks[workbook_index].tree.relayout()?;
+            Arc::make_mut(&mut workbooks[workbook_index].tree).relayout()?;
         }
         *self = rebuilt;
         Ok(())
@@ -6056,8 +6100,12 @@ impl XlsFile {
             | XlsCellMutationTarget::MulRk { record, .. }
             | XlsCellMutationTarget::MulBlank { record, .. } => record,
         };
+        let workbooks = Arc::make_mut(&mut rebuilt.workbooks);
         let cell = match (
-            &mut rebuilt.workbooks[workbook_index].tree.stream.records[record_index].data,
+            &mut Arc::make_mut(&mut workbooks[workbook_index].tree)
+                .stream
+                .records[record_index]
+                .data,
             target,
         ) {
             (BiffRecordData::Formula(value), XlsCellMutationTarget::Record(_)) => {
@@ -6092,13 +6140,12 @@ impl XlsFile {
         };
         let result = edit(cell)?;
         if preserve_compatibility {
-            rebuilt.workbooks[workbook_index]
-                .tree
+            Arc::make_mut(&mut workbooks[workbook_index].tree)
                 .relayout_preserving_compatibility()?;
-            rebuilt.workbooks[workbook_index].relationships_compatible()?;
+            workbooks[workbook_index].relationships_compatible()?;
         } else {
-            rebuilt.workbooks[workbook_index].tree.relayout()?;
-            rebuilt.workbooks[workbook_index].relationships()?;
+            Arc::make_mut(&mut workbooks[workbook_index].tree).relayout()?;
+            workbooks[workbook_index].relationships()?;
         }
         *self = rebuilt;
         Ok(result)
@@ -6315,7 +6362,7 @@ impl XlsFile {
     /// Starts zero-copy navigation at the standalone Revision Stream.
     pub fn revision_stream_view(&self) -> Result<Option<XlsRevisionStreamView<'_>>> {
         self.revision_log
-            .as_ref()
+            .as_deref()
             .and_then(XlsRevisionLog::stream)
             .map(RevisionLogStream::relationships)
             .transpose()
@@ -6323,7 +6370,7 @@ impl XlsFile {
 
     pub fn revision_stream_view_compatible(&self) -> Result<Option<XlsRevisionStreamView<'_>>> {
         self.revision_log
-            .as_ref()
+            .as_deref()
             .and_then(XlsRevisionLog::stream)
             .map(RevisionLogStream::relationships_compatible)
             .transpose()
@@ -6433,7 +6480,7 @@ impl XlsFile {
     /// Starts zero-copy navigation at the standalone shared-workbook user log.
     pub fn user_log_view(&self) -> Result<Option<XlsUserLogView<'_>>> {
         self.user_names
-            .as_ref()
+            .as_deref()
             .and_then(XlsUserNames::stream)
             .map(UserNamesStream::relationships)
             .transpose()
@@ -6441,7 +6488,7 @@ impl XlsFile {
 
     pub fn user_log_view_compatible(&self) -> Result<Option<XlsUserLogView<'_>>> {
         self.user_names
-            .as_ref()
+            .as_deref()
             .and_then(XlsUserNames::stream)
             .map(UserNamesStream::relationships_compatible)
             .transpose()
@@ -6488,6 +6535,27 @@ impl XlsFile {
         Self::from_compound_outcome(compound, options)
     }
 
+    /// Consumes a complete CFB image without copying its full archive buffer.
+    pub fn from_vec(bytes: Vec<u8>) -> Result<Self> {
+        Ok(Self::from_vec_with_options(bytes, ParseOptions::default())?.into_value())
+    }
+
+    pub fn from_vec_compatible(bytes: Vec<u8>) -> Result<ParseOutcome<Self>> {
+        Self::from_vec_with_options(bytes, ParseOptions::compatible(Limits::default()))
+    }
+
+    pub fn from_vec_with_limits(bytes: Vec<u8>, limits: Limits) -> Result<Self> {
+        Ok(Self::from_vec_with_options(bytes, ParseOptions::strict(limits))?.into_value())
+    }
+
+    pub fn from_vec_with_options(
+        bytes: Vec<u8>,
+        options: ParseOptions,
+    ) -> Result<ParseOutcome<Self>> {
+        let compound = compound_from_vec(bytes, options, BinaryFormat::Xls)?;
+        Self::from_compound_outcome(compound, options)
+    }
+
     /// Consumes an owned CFB and parses its managed streams in strict mode.
     pub fn from_compound_file(compound_file: CompoundFile) -> Result<Self> {
         Ok(
@@ -6527,18 +6595,19 @@ impl XlsFile {
     /// callers edit the public Rust record trees.
     pub fn relayout(&mut self) -> Result<()> {
         let mut rebuilt = self.clone();
-        for workbook in &mut rebuilt.workbooks {
-            workbook.tree.relayout()?;
+        for workbook in Arc::make_mut(&mut rebuilt.workbooks) {
+            Arc::make_mut(&mut workbook.tree).relayout()?;
         }
-        for cache in &mut rebuilt.pivot_caches {
+        for cache in Arc::make_mut(&mut rebuilt.pivot_caches) {
             if let XlsPivotCache::Parsed { stream, .. } = cache {
                 stream.relayout()?;
             }
         }
-        if let Some(XlsRevisionLog::Parsed(log)) = &mut rebuilt.revision_log {
+        if let Some(XlsRevisionLog::Parsed(log)) = rebuilt.revision_log.as_mut().map(Arc::make_mut)
+        {
             log.relayout()?;
         }
-        if let Some(XlsUserNames::Parsed(users)) = &mut rebuilt.user_names {
+        if let Some(XlsUserNames::Parsed(users)) = rebuilt.user_names.as_mut().map(Arc::make_mut) {
             users.relayout()?;
         }
         *self = rebuilt;
@@ -6804,10 +6873,10 @@ impl XlsFile {
             Self {
                 compound_file,
                 shared: shared.value,
-                workbooks,
-                pivot_caches,
-                revision_log,
-                user_names,
+                workbooks: Arc::new(workbooks),
+                pivot_caches: Arc::new(pivot_caches),
+                revision_log: revision_log.map(Arc::new),
+                user_names: user_names.map(Arc::new),
             },
             diagnostics,
         ))
@@ -6852,6 +6921,14 @@ impl XlsFile {
 
     /// Rebuilds managed BIFF streams under the requested compatibility policy.
     pub fn to_compound_file_with_options(&self, options: SaveOptions) -> Result<CompoundFile> {
+        self.build_compound_file(options, true)
+    }
+
+    fn build_compound_file(
+        &self,
+        options: SaveOptions,
+        materialize_workbooks: bool,
+    ) -> Result<CompoundFile> {
         if self.workbooks.is_empty() {
             return Err(Error::invalid(0, "XLS file has no BIFF workbook stream"));
         }
@@ -6871,19 +6948,23 @@ impl XlsFile {
             ));
         }
         if !options.preserves_compatibility() {
-            for workbook in &self.workbooks {
+            for workbook in self.workbooks.iter() {
                 audit_workbook(workbook, true, &mut Vec::new())?;
             }
         }
         let mut compound = self.compound_file.clone();
         for name in [XlsStreamName::Workbook, XlsStreamName::Book] {
             if let Some(workbook) = self.workbooks.iter().find(|workbook| workbook.name == name) {
-                let bytes = if options.preserves_compatibility() {
-                    workbook.tree.to_bytes_preserving_compatibility()?
-                } else {
-                    workbook.tree.to_bytes()?
-                };
-                compound.upsert_stream(name.path(), bytes)?;
+                if materialize_workbooks {
+                    let bytes = if options.preserves_compatibility() {
+                        workbook.tree.to_bytes_preserving_compatibility()?
+                    } else {
+                        workbook.tree.to_bytes()?
+                    };
+                    compound.upsert_stream(name.path(), bytes)?;
+                } else if !compound.is_stream(name.path()) {
+                    compound.upsert_stream(name.path(), Vec::new())?;
+                }
             } else if compound.is_stream(name.path()) {
                 compound.remove_stream(name.path())?;
             }
@@ -6910,7 +6991,7 @@ impl XlsFile {
         {
             compound.create_storage(format!("/{PIVOT_CACHE_STORAGE_NAME}"))?;
         }
-        for cache in &self.pivot_caches {
+        for cache in self.pivot_caches.iter() {
             let path = format!("/{PIVOT_CACHE_STORAGE_NAME}/{:04X}", cache.stream_id());
             let bytes = match cache {
                 XlsPivotCache::Parsed { stream, .. } => stream.to_bytes()?,
@@ -6924,7 +7005,7 @@ impl XlsFile {
             };
             compound.upsert_stream(path, bytes)?;
         }
-        match &self.revision_log {
+        match self.revision_log.as_deref() {
             Some(XlsRevisionLog::Parsed(log)) => {
                 if !options.preserves_compatibility() {
                     log.validate()?;
@@ -6946,7 +7027,7 @@ impl XlsFile {
             }
             None => {}
         }
-        match &self.user_names {
+        match self.user_names.as_deref() {
             Some(XlsUserNames::Parsed(users)) => {
                 if !options.preserves_compatibility() {
                     users.validate()?;
@@ -6971,6 +7052,50 @@ impl XlsFile {
         Ok(compound)
     }
 
+    fn workbook_write_plans(
+        &self,
+        preserve_compatibility: bool,
+    ) -> Result<Vec<(XlsStreamName, BiffStreamWritePlan<'_>)>> {
+        self.workbooks
+            .iter()
+            .map(|workbook| {
+                Ok((
+                    workbook.name,
+                    workbook.tree.write_plan(preserve_compatibility)?,
+                ))
+            })
+            .collect()
+    }
+
+    fn workbook_stream_overrides<'a>(
+        plans: &'a [(XlsStreamName, BiffStreamWritePlan<'a>)],
+    ) -> Result<Vec<CfbStreamOverride<'a>>> {
+        plans
+            .iter()
+            .map(|(name, plan)| {
+                Ok(CfbStreamOverride::new(
+                    Path::new(name.path()),
+                    plan.encoded_len()?,
+                    plan,
+                ))
+            })
+            .collect()
+    }
+
+    fn to_bytes_streaming_workbooks(&self, options: SaveOptions) -> Result<Vec<u8>> {
+        let compound = self.build_compound_file(options, false)?;
+        let plans = self.workbook_write_plans(options.preserves_compatibility())?;
+        let overrides = Self::workbook_stream_overrides(&plans)?;
+        compound.to_bytes_with_stream_overrides(&overrides)
+    }
+
+    fn write_streaming_workbooks(&self, writer: impl Write, options: SaveOptions) -> Result<()> {
+        let compound = self.build_compound_file(options, false)?;
+        let plans = self.workbook_write_plans(options.preserves_compatibility())?;
+        let overrides = Self::workbook_stream_overrides(&plans)?;
+        compound.write_to_with_stream_overrides(&overrides, writer)
+    }
+
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         self.to_bytes_with_options(SaveOptions::default())
     }
@@ -6980,7 +7105,19 @@ impl XlsFile {
     }
 
     pub fn to_bytes_with_options(&self, options: SaveOptions) -> Result<Vec<u8>> {
-        self.to_compound_file_with_options(options)?.to_bytes()
+        self.to_bytes_streaming_workbooks(options)
+    }
+
+    pub fn write_to(&self, writer: impl Write) -> Result<()> {
+        self.write_to_with_options(writer, SaveOptions::default())
+    }
+
+    pub fn write_to_preserving_compatibility(&self, writer: impl Write) -> Result<()> {
+        self.write_to_with_options(writer, SaveOptions::preserving_compatibility())
+    }
+
+    pub fn write_to_with_options(&self, writer: impl Write, options: SaveOptions) -> Result<()> {
+        self.write_streaming_workbooks(writer, options)
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
@@ -6992,7 +7129,8 @@ impl XlsFile {
     }
 
     pub fn save_with_options(&self, path: impl AsRef<Path>, options: SaveOptions) -> Result<()> {
-        self.to_compound_file_with_options(options)?.save(path)
+        self.write_streaming_workbooks(std::io::sink(), options)?;
+        self.write_streaming_workbooks(std::fs::File::create(path)?, options)
     }
 }
 
@@ -7137,77 +7275,74 @@ fn audit_workbook(
                 audit_bof(workbook, record, value, strict, diagnostics)?;
             }
             BiffRecordData::Formula(value) | BiffRecordData::Formula4Compatibility(value) => {
-                audit_missing_formula_extra(
+                audit_formula_streams(
                     workbook,
                     record,
-                    value.tokens.rgce.missing_extra_count(),
+                    [&value.tokens.rgce],
                     strict,
                     diagnostics,
                     "Formula",
                     "2.4.127",
                 )?;
             }
-            BiffRecordData::SharedFormula(value) => audit_missing_formula_extra(
+            BiffRecordData::SharedFormula(value) => audit_formula_streams(
                 workbook,
                 record,
-                value.tokens.rgce.missing_extra_count(),
+                [&value.tokens.rgce],
                 strict,
                 diagnostics,
                 "ShrFmla",
                 "2.4.260",
             )?,
-            BiffRecordData::Array(value) => audit_missing_formula_extra(
+            BiffRecordData::Array(value) => audit_formula_streams(
                 workbook,
                 record,
-                value.tokens.rgce.missing_extra_count(),
+                [&value.tokens.rgce],
                 strict,
                 diagnostics,
                 "Array",
                 "2.4.4",
             )?,
-            BiffRecordData::DataValidation(value) => audit_missing_formula_extra(
+            BiffRecordData::DataValidation(value) => audit_formula_streams(
                 workbook,
                 record,
-                value.formula1.tokens.missing_extra_count()
-                    + value.formula2.tokens.missing_extra_count(),
+                [&value.formula1.tokens, &value.formula2.tokens],
                 strict,
                 diagnostics,
                 "Dv",
                 "2.4.95",
             )?,
-            BiffRecordData::ConditionalFormatting(value) => audit_missing_formula_extra(
+            BiffRecordData::ConditionalFormatting(value) => audit_formula_streams(
                 workbook,
                 record,
-                value.formula1.missing_extra_count() + value.formula2.missing_extra_count(),
+                [&value.formula1, &value.formula2],
                 strict,
                 diagnostics,
                 "CF",
                 "2.4.42",
             )?,
-            BiffRecordData::ConditionalFormatting12(value) => audit_missing_formula_extra(
+            BiffRecordData::ConditionalFormatting12(value) => audit_formula_streams(
                 workbook,
                 record,
-                value.formula1.missing_extra_count()
-                    + value.formula2.missing_extra_count()
-                    + value.active_formula.missing_extra_count(),
+                [&value.formula1, &value.formula2, &value.active_formula],
                 strict,
                 diagnostics,
                 "CF12",
                 "2.4.43",
             )?,
-            BiffRecordData::Name(value) => audit_missing_formula_extra(
+            BiffRecordData::Name(value) => audit_formula_streams(
                 workbook,
                 record,
-                value.formula.missing_extra_count(),
+                [&value.formula],
                 strict,
                 diagnostics,
                 "Lbl",
                 "2.4.150",
             )?,
-            BiffRecordData::ChartLinkedData(value) => audit_missing_formula_extra(
+            BiffRecordData::ChartLinkedData(value) => audit_formula_streams(
                 workbook,
                 record,
-                value.formula.missing_extra_count(),
+                [&value.formula],
                 strict,
                 diagnostics,
                 "BRAI",
@@ -7563,15 +7698,48 @@ fn audit_workbook_topology(
     Ok(())
 }
 
-fn audit_missing_formula_extra(
+fn audit_formula_streams<'a>(
     workbook: &XlsWorkbookStream,
     record: &BiffRecord,
-    missing_extra_count: usize,
+    formulas: impl IntoIterator<Item = &'a FormulaTokenStream>,
     strict: bool,
     diagnostics: &mut Vec<ParseDiagnostic>,
     structure: &'static str,
     section: &'static str,
 ) -> Result<()> {
+    let mut unparsed_bytes = 0usize;
+    let mut missing_extra_count = 0usize;
+    let mut nonconforming_token_count = 0usize;
+    for formula in formulas {
+        unparsed_bytes = unparsed_bytes.saturating_add(formula.unparsed_tail.len());
+        missing_extra_count = missing_extra_count.saturating_add(formula.missing_extra_count());
+        nonconforming_token_count =
+            nonconforming_token_count.saturating_add(formula.nonconforming_token_count());
+    }
+    if unparsed_bytes != 0 {
+        report_record_issue(
+            workbook,
+            record,
+            strict,
+            diagnostics,
+            xls_issue(ParseDiagnosticCode::NonconformingRecord, structure, section),
+            format!(
+                "formula contains {unparsed_bytes} bytes beginning with an unknown or reserved Ptg opcode"
+            ),
+        )?;
+    }
+    if nonconforming_token_count != 0 {
+        report_record_issue(
+            workbook,
+            record,
+            strict,
+            diagnostics,
+            xls_issue(ParseDiagnosticCode::NonconformingRecord, structure, section),
+            format!(
+                "formula contains {nonconforming_token_count} Ptg token(s) with a reserved opcode, reserved bit, or out-of-range natural-language cell reference"
+            ),
+        )?;
+    }
     if missing_extra_count == 0 {
         return Ok(());
     }
@@ -8266,6 +8434,56 @@ mod tests {
     }
 
     #[test]
+    fn bound_sheet_reorder_permutates_record_slots_without_record_clones() {
+        let bound_sheet = |offset, name: &str| {
+            record(
+                offset,
+                BiffRecordData::BoundSheet8(BoundSheet8Record {
+                    sheet_bof_offset: 100,
+                    state: 0,
+                    sheet_type: 0,
+                    name: ShortXlUnicodeString::new(name),
+                }),
+            )
+        };
+        let mut workbook = XlsWorkbookStream::from_tree(
+            XlsStreamName::Workbook,
+            BiffWorkbookTree::from_stream(BiffStream {
+                records: vec![
+                    record(0, BiffRecordData::Bof(bof(0x0005))),
+                    bound_sheet(20, "A"),
+                    bound_sheet(40, "B"),
+                    bound_sheet(60, "C"),
+                    record(80, BiffRecordData::Eof),
+                ],
+                trailing_padding: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let order = [
+            workbook.sheet_ids[2],
+            workbook.sheet_ids[0],
+            workbook.sheet_ids[1],
+        ];
+
+        reorder_bound_sheet_records(&mut workbook, &order).unwrap();
+
+        let names = workbook
+            .tree
+            .stream
+            .records
+            .iter()
+            .filter_map(|record| match &record.data {
+                BiffRecordData::BoundSheet8(value) => Some(value.name.value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["C", "A", "B"]);
+        assert_eq!(workbook.sheet_ids, order);
+    }
+
+    #[test]
     fn invalid_revision_stream_is_preserved_only_in_compatible_mode() {
         let mut compound = CompoundFile::new(Version::V3).unwrap();
         compound
@@ -8278,8 +8496,8 @@ mod tests {
         assert!(XlsFile::from_compound_file(compound.clone()).is_err());
         let outcome = XlsFile::from_compound_file_compatible(compound).unwrap();
         assert!(matches!(
-            outcome.value.revision_log,
-            Some(XlsRevisionLog::Compatibility { ref bytes, .. }) if bytes == &[1, 2, 3]
+            outcome.value.revision_log.as_deref(),
+            Some(XlsRevisionLog::Compatibility { bytes, .. }) if bytes == &[1, 2, 3]
         ));
         assert_eq!(outcome.diagnostics.len(), 1);
         assert_eq!(
@@ -8311,6 +8529,13 @@ mod tests {
             .to_compound_file_preserving_compatibility()
             .unwrap();
         assert_eq!(
+            outcome
+                .value
+                .to_bytes_with_options(SaveOptions::preserving_compatibility())
+                .unwrap(),
+            preserved.to_bytes().unwrap()
+        );
+        assert_eq!(
             preserved.stream(super::super::REVISION_LOG_STREAM_PATH),
             Some([1, 2, 3].as_slice())
         );
@@ -8328,6 +8553,11 @@ mod tests {
         assert_eq!(file.workbooks[0].name, XlsStreamName::Workbook);
         let rebuilt = file.to_compound_file().unwrap();
         assert_eq!(rebuilt.entry("/Workbook").unwrap().name, "WORKBOOK");
+        let direct = file.to_bytes().unwrap();
+        assert_eq!(direct, rebuilt.to_bytes().unwrap());
+        let mut streamed = Vec::new();
+        file.write_to(&mut streamed).unwrap();
+        assert_eq!(streamed, direct);
     }
 
     #[test]
@@ -8449,7 +8679,9 @@ mod tests {
             BiffWorkbookTree::from_bytes(&workbook_bytes()).unwrap(),
         )
         .unwrap();
-        let BiffRecordData::Bof(value) = &mut workbook.tree.stream.records[0].data else {
+        let BiffRecordData::Bof(value) =
+            &mut Arc::make_mut(&mut workbook.tree).stream.records[0].data
+        else {
             panic!("first record is not BOF");
         };
         value.build_year = 0;
@@ -8462,6 +8694,25 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].structure, "BOF");
         assert_eq!(diagnostics[0].specification.section, "2.4.21");
+    }
+
+    #[test]
+    fn workbook_clone_shares_record_tree_until_explicit_mutation() {
+        let workbook = XlsWorkbookStream::from_tree(
+            XlsStreamName::Workbook,
+            BiffWorkbookTree::from_bytes(&workbook_bytes()).unwrap(),
+        )
+        .unwrap();
+        let mut cloned = workbook.clone();
+        assert!(Arc::ptr_eq(&workbook.tree, &cloned.tree));
+
+        Arc::make_mut(&mut cloned.tree)
+            .stream
+            .trailing_padding
+            .push(0xff);
+        assert!(workbook.tree.stream.trailing_padding.is_empty());
+        assert_eq!(cloned.tree.stream.trailing_padding, [0xff]);
+        assert!(!Arc::ptr_eq(&workbook.tree, &cloned.tree));
     }
 
     #[test]
@@ -8634,6 +8885,60 @@ mod tests {
             ParseDiagnosticCode::TruncatedRecord
         );
         assert_eq!(outcome.diagnostics[0].specification.section, "2.4.127");
+        assert!(outcome.value.to_compound_file().is_err());
+        assert!(
+            outcome
+                .value
+                .to_compound_file_preserving_compatibility()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn unknown_formula_ptg_tail_requires_explicit_compatibility() {
+        let formula = FormulaRecord {
+            cell: CellHeader {
+                row: 0,
+                column: 0,
+                format_index: 0,
+            },
+            cached_result: FormulaCachedResult::NumberBits(0),
+            flags: 0,
+            calculation_chain_id: 0,
+            tokens: FormulaTokens {
+                rgce: FormulaTokenStream::from_bytes(&[0x1e, 7, 0, 0x18, 0x04, 0]).unwrap(),
+                rgcb_tail: Vec::new(),
+            },
+        };
+        let bytes = BiffStream {
+            records: vec![
+                record(0, BiffRecordData::Bof(bof(0x0005))),
+                record(20, BiffRecordData::Formula(formula)),
+                record(54, BiffRecordData::Eof),
+                record(58, BiffRecordData::Bof(bof(0x0010))),
+                record(78, BiffRecordData::Eof),
+            ],
+            trailing_padding: Vec::new(),
+        }
+        .to_bytes()
+        .unwrap();
+        let mut compound = CompoundFile::new(Version::V3).unwrap();
+        compound
+            .create_or_replace_stream(WORKBOOK_STREAM, bytes)
+            .unwrap();
+
+        assert!(XlsFile::from_compound_file(compound.clone()).is_err());
+        let outcome = XlsFile::from_compound_file_compatible(compound).unwrap();
+        assert_eq!(outcome.diagnostics.len(), 1);
+        assert_eq!(
+            outcome.diagnostics[0].code,
+            ParseDiagnosticCode::NonconformingRecord
+        );
+        assert!(
+            outcome.diagnostics[0]
+                .message
+                .contains("unknown or reserved Ptg")
+        );
         assert!(outcome.value.to_compound_file().is_err());
         assert!(
             outcome
