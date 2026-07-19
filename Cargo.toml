@@ -11,7 +11,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/KaiserY/olecfsdk"
 documentation = "https://docs.rs/olecfsdk"
 description = "Typed Rust SDK for Microsoft Office compound binary file formats"
-keywords = ["office", "ole", "cfb", "doc", "xls"]
+keywords = ["office", "ppt", "cfb", "doc", "xls"]
 categories = ["parser-implementations"]
 readme = "README.md"
 

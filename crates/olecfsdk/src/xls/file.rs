@@ -29,13 +29,14 @@ use crate::{
     },
     save::SaveOptions,
     shared_content::{
-        OfficeFormsMutation, OfficeHostKind, OfficeSharedContent, OfficeVbaModuleMutation,
+        OfficeFormsMutation, OfficeHostKind, OfficePropertySetKind, OfficeSharedContent,
+        OfficeVbaModuleMutation,
     },
 };
 
 use super::{
-    ArrayRecord, BCUsrsRecord, BiffConstant, BiffRecord, BiffRecordData, BiffStream,
-    BiffStreamWritePlan, BiffUnicodeString, BlankRecord, BoolErrRecord, BoolErrValue,
+    ArrayRecord, BCUsrsRecord, BOOK_STREAM_PATH, BiffConstant, BiffRecord, BiffRecordData,
+    BiffStream, BiffStreamWritePlan, BiffUnicodeString, BlankRecord, BoolErrRecord, BoolErrValue,
     BoundSheet8Record, CUsrRecord, CbUsrRecord, CellErrorCode, CellHeader, CellRange,
     ColInfoRecord, DevModeW, ExtSstRecord, ExternNameBody, ExternNameRecord, ExternSheetReference,
     FeatureHeaderData, FileLockRecord, FontRecord, FormatRecord, FormulaCachedResult,
@@ -43,20 +44,18 @@ use super::{
     HyperlinkObject, HyperlinkRecord, LabelRecord, LabelSstRecord, MergeCellsRecord,
     MsoDrawingData, MsoDrawingHostData, MsoDrawingHostRecord, MsoDrawingRecord, MulBlankRecord,
     MulRkCell, MulRkRecord, NameRecord, NameValue, NoteRecord, NumberRecord, ObjCommonData,
-    ObjFormulaData, ObjPictureFlags, ObjPictureFormula, ObjRecord, PivotCacheStream, PlsRecord,
-    PrinterSettings, RevisionLogStream, RkRecord, RowRecord, RrAutoFmtRecord, RrFormatRecord,
-    RrInsertShRecord, RrTabIdRecord, Rrd, RrdChgCellRecord, RrdConflictRecord, RrdDefNameRecord,
-    RrdHeadRecord, RrdInfoRecord, RrdInsDelRecord, RrdMoveRecord, RrdRenSheetRecord,
-    RrdTqsifRecord, RrdUserViewRecord, SharedFormulaRecord, ShortXlUnicodeString, SstCompletion,
-    SstRecord, SstString, StringValueRecord, SupBookLink, SupBookRecord, SupBookSheetName,
-    SxStreamIdRecord, SxViewRecord, SxVsRecord, TableRecord, TxoRecord, UserBViewRecord,
-    UserNamesStream, UserSViewBeginChartRecord, UserSViewBeginRecord, UserSViewEndRecord,
-    UsrChkRecord, UsrExclRecord, UsrInfoRecord, XctRecord, XfRecord, XlStringCharacters,
+    ObjFormulaData, ObjPictureFlags, ObjPictureFormula, ObjRecord, PIVOT_CACHE_STORAGE_NAME,
+    PIVOT_CACHE_STORAGE_PATH, PivotCacheStream, PlsRecord, PrinterSettings,
+    REVISION_LOG_STREAM_NAME, RevisionLogStream, RkRecord, RowRecord, RrAutoFmtRecord,
+    RrFormatRecord, RrInsertShRecord, RrTabIdRecord, Rrd, RrdChgCellRecord, RrdConflictRecord,
+    RrdDefNameRecord, RrdHeadRecord, RrdInfoRecord, RrdInsDelRecord, RrdMoveRecord,
+    RrdRenSheetRecord, RrdTqsifRecord, RrdUserViewRecord, SharedFormulaRecord,
+    ShortXlUnicodeString, SstCompletion, SstRecord, SstString, StringValueRecord, SupBookLink,
+    SupBookRecord, SupBookSheetName, SxStreamIdRecord, SxViewRecord, SxVsRecord, TableRecord,
+    TxoRecord, USER_NAMES_STREAM_NAME, UserBViewRecord, UserNamesStream, UserSViewBeginChartRecord,
+    UserSViewBeginRecord, UserSViewEndRecord, UsrChkRecord, UsrExclRecord, UsrInfoRecord,
+    WORKBOOK_STREAM_PATH, XctRecord, XfRecord, XlStringCharacters,
 };
-
-const WORKBOOK_STREAM: &str = "/Workbook";
-const BOOK_STREAM: &str = "/Book";
-const PIVOT_CACHE_STORAGE_NAME: &str = "_SX_DB_CUR";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XlsStreamName {
@@ -65,10 +64,17 @@ pub enum XlsStreamName {
 }
 
 impl XlsStreamName {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Workbook => "Workbook",
+            Self::Book => "Book",
+        }
+    }
+
     pub const fn path(self) -> &'static str {
         match self {
-            Self::Workbook => WORKBOOK_STREAM,
-            Self::Book => BOOK_STREAM,
+            Self::Workbook => WORKBOOK_STREAM_PATH,
+            Self::Book => BOOK_STREAM_PATH,
         }
     }
 }
@@ -6986,10 +6992,8 @@ impl XlsFile {
         for path in source_pivot_streams {
             compound.remove_stream(path)?;
         }
-        if !self.pivot_caches.is_empty()
-            && !compound.is_storage(format!("/{PIVOT_CACHE_STORAGE_NAME}"))
-        {
-            compound.create_storage(format!("/{PIVOT_CACHE_STORAGE_NAME}"))?;
+        if !self.pivot_caches.is_empty() && !compound.is_storage(PIVOT_CACHE_STORAGE_PATH) {
+            compound.create_storage(PIVOT_CACHE_STORAGE_PATH)?;
         }
         for cache in self.pivot_caches.iter() {
             let path = format!("/{PIVOT_CACHE_STORAGE_NAME}/{:04X}", cache.stream_id());
@@ -7175,7 +7179,9 @@ fn classify_root_xls_entry(name: &str) -> XlsFileEntryRole {
         XlsFileEntryRole::ControlStream
     } else if name.eq_ignore_ascii_case("\u{6}DataSpaces") {
         XlsFileEntryRole::DataSpacesStorage
-    } else if name.eq_ignore_ascii_case("\u{5}DocumentSummaryInformation") {
+    } else if name
+        .eq_ignore_ascii_case(OfficePropertySetKind::DocumentSummaryInformation.stream_name())
+    {
         XlsFileEntryRole::DocumentSummaryInformationStream
     } else if name.eq_ignore_ascii_case("encryption") {
         XlsFileEntryRole::EncryptionStream
@@ -7191,21 +7197,21 @@ fn classify_root_xls_entry(name: &str) -> XlsFileEntryRole {
         XlsFileEntryRole::PivotCacheStorage
     } else if name.eq_ignore_ascii_case("\u{9}DRMContent") {
         XlsFileEntryRole::ProtectedContentStream
-    } else if name.eq_ignore_ascii_case("Revision Log") {
+    } else if name.eq_ignore_ascii_case(REVISION_LOG_STREAM_NAME) {
         XlsFileEntryRole::RevisionStream
     } else if name.eq_ignore_ascii_case("_signatures") {
         XlsFileEntryRole::SignaturesStream
-    } else if name.eq_ignore_ascii_case("\u{5}SummaryInformation") {
+    } else if name.eq_ignore_ascii_case(OfficePropertySetKind::SummaryInformation.stream_name()) {
         XlsFileEntryRole::SummaryInformationStream
-    } else if name.eq_ignore_ascii_case("User Names") {
+    } else if name.eq_ignore_ascii_case(USER_NAMES_STREAM_NAME) {
         XlsFileEntryRole::UserNamesStream
-    } else if name.eq_ignore_ascii_case("_VBA_PROJECT_CUR") {
+    } else if name.eq_ignore_ascii_case(crate::vba::XLS_VBA_PROJECT_STORAGE_NAME) {
         XlsFileEntryRole::VbaStorage
     } else if name.eq_ignore_ascii_case("\u{9}DRMViewerContent") {
         XlsFileEntryRole::ViewerContentStream
-    } else if name.eq_ignore_ascii_case("Workbook") {
+    } else if name.eq_ignore_ascii_case(XlsStreamName::Workbook.name()) {
         XlsFileEntryRole::WorkbookStream(XlsStreamName::Workbook)
-    } else if name.eq_ignore_ascii_case("Book") {
+    } else if name.eq_ignore_ascii_case(XlsStreamName::Book.name()) {
         XlsFileEntryRole::WorkbookStream(XlsStreamName::Book)
     } else if name.eq_ignore_ascii_case("_xmlsignatures") {
         XlsFileEntryRole::XmlSignaturesStorage
@@ -8487,7 +8493,7 @@ mod tests {
     fn invalid_revision_stream_is_preserved_only_in_compatible_mode() {
         let mut compound = CompoundFile::new(Version::V3).unwrap();
         compound
-            .create_or_replace_stream(WORKBOOK_STREAM, workbook_bytes())
+            .create_or_replace_stream(WORKBOOK_STREAM_PATH, workbook_bytes())
             .unwrap();
         compound
             .create_or_replace_stream(super::super::REVISION_LOG_STREAM_PATH, vec![1, 2, 3])
@@ -8564,7 +8570,7 @@ mod tests {
     fn storages_and_streams_use_ms_xls_roles_without_copying_entries() {
         let mut compound = CompoundFile::new(Version::V3).unwrap();
         compound
-            .create_or_replace_stream(WORKBOOK_STREAM, workbook_bytes())
+            .create_or_replace_stream(WORKBOOK_STREAM_PATH, workbook_bytes())
             .unwrap();
         compound.create_storage("/_SX_DB_CUR").unwrap();
         compound
@@ -8608,7 +8614,7 @@ mod tests {
     fn storages_and_streams_separate_strict_validation_from_compatibility() {
         let mut compound = CompoundFile::new(Version::V3).unwrap();
         compound
-            .create_or_replace_stream(WORKBOOK_STREAM, workbook_bytes())
+            .create_or_replace_stream(WORKBOOK_STREAM_PATH, workbook_bytes())
             .unwrap();
         compound.create_storage("/Ctls").unwrap();
         compound.create_storage("/_SX_DB_CUR").unwrap();
@@ -8636,7 +8642,7 @@ mod tests {
     fn workbook_name_and_substream_cardinality_use_compatible_diagnostics() {
         let mut legacy_name = CompoundFile::new(Version::V3).unwrap();
         legacy_name
-            .create_or_replace_stream(BOOK_STREAM, workbook_bytes())
+            .create_or_replace_stream(BOOK_STREAM_PATH, workbook_bytes())
             .unwrap();
         assert!(XlsFile::from_compound_file(legacy_name.clone()).is_err());
         let outcome = XlsFile::from_compound_file_compatible(legacy_name).unwrap();
@@ -8662,7 +8668,7 @@ mod tests {
         .unwrap();
         let mut invalid_topology = CompoundFile::new(Version::V3).unwrap();
         invalid_topology
-            .create_or_replace_stream(WORKBOOK_STREAM, sheet_only)
+            .create_or_replace_stream(WORKBOOK_STREAM_PATH, sheet_only)
             .unwrap();
         assert!(XlsFile::from_compound_file(invalid_topology.clone()).is_err());
         let outcome = XlsFile::from_compound_file_compatible(invalid_topology).unwrap();
@@ -8874,7 +8880,7 @@ mod tests {
         .unwrap();
         let mut compound = CompoundFile::new(Version::V3).unwrap();
         compound
-            .create_or_replace_stream(WORKBOOK_STREAM, bytes)
+            .create_or_replace_stream(WORKBOOK_STREAM_PATH, bytes)
             .unwrap();
 
         assert!(XlsFile::from_compound_file(compound.clone()).is_err());
@@ -8924,7 +8930,7 @@ mod tests {
         .unwrap();
         let mut compound = CompoundFile::new(Version::V3).unwrap();
         compound
-            .create_or_replace_stream(WORKBOOK_STREAM, bytes)
+            .create_or_replace_stream(WORKBOOK_STREAM_PATH, bytes)
             .unwrap();
 
         assert!(XlsFile::from_compound_file(compound.clone()).is_err());

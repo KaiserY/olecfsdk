@@ -42,29 +42,26 @@ use super::{
     AnnotationBookmarkInfo, AnnotationBookmarks, AnnotationExtendedData, AnnotationOwners,
     AnnotationPost10, AnnotationReference, AnnotationReferenceTable, AssociatedStrings,
     AutoCaptionDefinitions, AutoSummaryRangeTable, BookmarkStart, Bookmarks, CaptionDefinitions,
-    ChpxFkp, ChpxFkpRun, Clx, CommandCustomizations, CpOnlyTable, DocOfficeArtContent,
-    DocumentProperties, EmbeddedFontTable, ExternalFileNameTable, Fib, FibBaseFlags, FibFcLcb,
-    FieldDocumentPart, FieldTable, FkpPageNumber, FontTable, FormatConsistencyBookmarks,
-    FrameAndListRecords, GrammarCheckerCookieTable, GrammarCookieStore, GrammarOptionSets,
-    GrammarStateTable, GrpPrl, HeaderTextTable, KnownSprm, LanguageDetectionStateTable,
-    LegacyGrammarCheckerCookieTable, LegacyGrammarOptionSets, ListDefinitions, ListNamesTable,
-    ListOverrides, ListStyleTemplates, MailMergeState, NilPicfAndBinData, NilPicfFieldType,
-    NoteReferenceTable, OfficeDataSource, OleControlInfos, OleObjectDescriptor, PapxFkp,
+    ChpxFkp, ChpxFkpRun, Clx, CommandCustomizations, CpOnlyTable, DATA_STREAM_PATH,
+    DocOfficeArtContent, DocumentProperties, EmbeddedFontTable, ExternalFileNameTable, Fib,
+    FibBaseFlags, FibFcLcb, FieldDocumentPart, FieldTable, FkpPageNumber, FontTable,
+    FormatConsistencyBookmarks, FrameAndListRecords, GrammarCheckerCookieTable, GrammarCookieStore,
+    GrammarOptionSets, GrammarStateTable, GrpPrl, HeaderTextTable, KnownSprm,
+    LanguageDetectionStateTable, LegacyGrammarCheckerCookieTable, LegacyGrammarOptionSets,
+    ListDefinitions, ListNamesTable, ListOverrides, ListStyleTemplates, MailMergeState,
+    NilPicfAndBinData, NilPicfFieldType, NoteReferenceTable, OBJECT_INFO_STREAM_NAME,
+    OBJECT_POOL_STORAGE_PATH, OfficeDataSource, OleControlInfos, OleObjectDescriptor, PapxFkp,
     PapxFkpRun, ParagraphGroupProperties, Pcd, PicfAndOfficeArtData, PlcBte, PlcfSed, PrcData,
     PrinterDriverInfo, PrivateFieldType, Prm, RangeProtection, RepairBookmarks, RevisionAuthors,
     RevisionMessageThreading, RevisionSaveIdTable, SaveHistory, SelectionState, Sepx, ShapeAnchor,
     ShapeAnchorTable, SmartTagBookmarks, SmartTagData, SmartTagRecognizerStateTable,
     SpellingStateTable, SprmGroup, SprmKind, SprmOperand, StructuredTagBookmarks,
-    StructuredTagType, StyleFormatting, StyleSheet, SubdocumentTable, TableCharacterCacheTable,
-    TextPiece, TextPieceCharacters, TextPieceEncoding, TextboxBreak, TextboxBreakTable,
-    TextboxDocumentPart, TextboxStory, TextboxStoryChain, TextboxStoryTable, UserInputMethods,
-    UserVariables, XmlSchemaReferences, XmlTransformPath,
+    StructuredTagType, StyleFormatting, StyleSheet, SubdocumentTable, TABLE0_STREAM_PATH,
+    TABLE1_STREAM_PATH, TableCharacterCacheTable, TextPiece, TextPieceCharacters,
+    TextPieceEncoding, TextboxBreak, TextboxBreakTable, TextboxDocumentPart, TextboxStory,
+    TextboxStoryChain, TextboxStoryTable, UserInputMethods, UserVariables,
+    WORD_DOCUMENT_STREAM_PATH, XmlSchemaReferences, XmlTransformPath,
 };
-
-const WORD_DOCUMENT_STREAM: &str = "/WordDocument";
-const TABLE0_STREAM: &str = "/0Table";
-const TABLE1_STREAM: &str = "/1Table";
-const DATA_STREAM: &str = "/Data";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocTableStreamName {
@@ -75,8 +72,8 @@ pub enum DocTableStreamName {
 impl DocTableStreamName {
     pub const fn path(self) -> &'static str {
         match self {
-            Self::Table0 => TABLE0_STREAM,
-            Self::Table1 => TABLE1_STREAM,
+            Self::Table0 => TABLE0_STREAM_PATH,
+            Self::Table1 => TABLE1_STREAM_PATH,
         }
     }
 }
@@ -4654,7 +4651,7 @@ impl DocFile {
             mut diagnostics,
         } = compound;
         let limits = options.limits;
-        let word_data = required_stream_data(&compound_file, WORD_DOCUMENT_STREAM)?;
+        let word_data = required_stream_data(&compound_file, WORD_DOCUMENT_STREAM_PATH)?;
         let word_bytes = word_data.clone();
         ensure_stream_limit("WordDocument", &word_bytes, limits)?;
         let fib = Fib::from_word_document(&word_bytes)?;
@@ -5252,7 +5249,7 @@ impl DocFile {
             physical_bytes: table_data,
         };
         let source_data = compound_file
-            .entry(DATA_STREAM)
+            .entry(DATA_STREAM_PATH)
             .filter(|entry| entry.is_stream())
             .map(|entry| entry.data.clone());
         let source_data_stream_present = source_data.is_some();
@@ -6150,11 +6147,11 @@ impl DocFile {
 
         let mut compound = self.compound_file.clone();
         match data_plan.as_ref() {
-            Some(_) if !compound.is_stream(DATA_STREAM) => {
-                compound.upsert_stream(DATA_STREAM, Vec::new())?;
+            Some(_) if !compound.is_stream(DATA_STREAM_PATH) => {
+                compound.upsert_stream(DATA_STREAM_PATH, Vec::new())?;
             }
-            None if compound.is_stream(DATA_STREAM) => {
-                compound.remove_stream(DATA_STREAM)?;
+            None if compound.is_stream(DATA_STREAM_PATH) => {
+                compound.remove_stream(DATA_STREAM_PATH)?;
             }
             Some(_) | None => {}
         }
@@ -8840,7 +8837,7 @@ fn parse_text_pieces(
             diagnostics.push(ParseDiagnostic::warning(
                 ParseDiagnosticCode::NonconformingRecord,
                 BinaryFormat::Doc,
-                Some("WordDocument"),
+                Some(WORD_DOCUMENT_STREAM_PATH),
                 Some(u64::from(value.file_offset)),
                 "PlcPcd",
                 SpecificationReference {
@@ -8860,7 +8857,7 @@ fn parse_object_pool(
     options: ParseOptions,
     diagnostics: &mut Vec<ParseDiagnostic>,
 ) -> Result<Option<DocObjectPoolStorage>> {
-    let Some(pool) = compound.entry("/ObjectPool") else {
+    let Some(pool) = compound.entry(OBJECT_POOL_STORAGE_PATH) else {
         return Ok(None);
     };
     if !pool.is_storage() {
@@ -8890,10 +8887,9 @@ fn parse_object_pool(
             .map(|candidate| candidate.path.clone())
             .collect::<Vec<_>>();
         entry_paths.sort();
-        let descriptor_entry = compound
-            .children(&entry.path)?
-            .into_iter()
-            .find(|child| child.is_stream() && child.name.eq_ignore_ascii_case("\u{3}ObjInfo"));
+        let descriptor_entry = compound.children(&entry.path)?.into_iter().find(|child| {
+            child.is_stream() && child.name.eq_ignore_ascii_case(OBJECT_INFO_STREAM_NAME)
+        });
         let Some(descriptor_entry) = descriptor_entry else {
             let error = Error::invalid(0, "embedded object storage has no ObjInfo stream");
             if options.is_strict() {
@@ -9726,7 +9722,7 @@ fn report_data_compatibility(diagnostics: &mut Vec<ParseDiagnostic>, offset: u64
     diagnostics.push(ParseDiagnostic::warning(
         ParseDiagnosticCode::InvalidReference,
         BinaryFormat::Doc,
-        Some(DATA_STREAM),
+        Some(DATA_STREAM_PATH),
         Some(offset),
         "Data Stream",
         SpecificationReference {
@@ -9762,7 +9758,7 @@ fn validate_object_pool_links(
     object_pool: Option<&DocObjectPoolStorage>,
 ) -> Result<()> {
     let physical_pool = compound
-        .entry("/ObjectPool")
+        .entry(OBJECT_POOL_STORAGE_PATH)
         .filter(|entry| entry.is_storage());
     if physical_pool.map(|entry| &entry.path) != object_pool.map(|pool| &pool.path) {
         return Err(Error::invalid(0, "DOC ObjectPool root link changed"));
@@ -9780,7 +9776,7 @@ fn validate_object_pool_links(
         physical_storage_paths.push(entry.path.clone());
         let Some(descriptor_entry) = compound.children(&entry.path)?.into_iter().find(|child| {
             child.is_stream()
-                && child.name.eq_ignore_ascii_case("\u{3}ObjInfo")
+                && child.name.eq_ignore_ascii_case(OBJECT_INFO_STREAM_NAME)
                 && OleObjectDescriptor::from_bytes(&child.data).is_ok()
         }) else {
             continue;
@@ -11897,7 +11893,7 @@ impl DocCompoundWritePlan<'_> {
     fn stream_overrides(&self) -> Vec<CfbStreamOverride<'_>> {
         let mut overrides = Vec::with_capacity(3);
         overrides.push(CfbStreamOverride::new(
-            Path::new(WORD_DOCUMENT_STREAM),
+            Path::new(WORD_DOCUMENT_STREAM_PATH),
             self.word.output_len(),
             &self.word,
         ));
@@ -11908,7 +11904,7 @@ impl DocCompoundWritePlan<'_> {
         ));
         if let Some(data) = &self.data {
             overrides.push(CfbStreamOverride::new(
-                Path::new(DATA_STREAM),
+                Path::new(DATA_STREAM_PATH),
                 data.output_len(),
                 data,
             ));
@@ -11934,10 +11930,10 @@ impl DocCompoundWritePlan<'_> {
             table,
             data,
         } = self;
-        compound.overwrite_stream(WORD_DOCUMENT_STREAM, word.into_bytes()?)?;
+        compound.overwrite_stream(WORD_DOCUMENT_STREAM_PATH, word.into_bytes()?)?;
         compound.overwrite_stream(table_path, table.into_bytes()?)?;
         if let Some(data) = data {
-            compound.upsert_stream(DATA_STREAM, data.into_bytes()?)?;
+            compound.upsert_stream(DATA_STREAM_PATH, data.into_bytes()?)?;
         }
         Ok(compound)
     }

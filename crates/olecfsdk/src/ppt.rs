@@ -33,6 +33,12 @@ const MAX_RECORD_DEPTH: usize = 256;
 
 pub const USER_EDIT_ATOM: u16 = 0x0ff5;
 pub const CURRENT_USER_ATOM: u16 = 0x0ff6;
+/// Absolute CFB path of the required MS-PPT presentation stream.
+pub const POWERPOINT_DOCUMENT_STREAM_PATH: &str = "/PowerPoint Document";
+/// Absolute CFB path of the required MS-PPT current-user stream.
+pub const CURRENT_USER_STREAM_PATH: &str = "/Current User";
+/// Absolute CFB path of the optional MS-PPT pictures stream.
+pub const PICTURES_STREAM_PATH: &str = "/Pictures";
 pub const DOCUMENT_CONTAINER: u16 = 0x03e8;
 pub const SLIDE_CONTAINER: u16 = 0x03ee;
 pub const NOTES_CONTAINER: u16 = 0x03f0;
@@ -4102,7 +4108,7 @@ impl PowerPointDocument {
                     diagnostics.push(ParseDiagnostic::warning(
                         ParseDiagnosticCode::NonconformingRecord,
                         BinaryFormat::Ppt,
-                        Some("/PowerPoint Document"),
+                        Some(POWERPOINT_DOCUMENT_STREAM_PATH),
                         Some(vba_info_atom_record.offset),
                         "VBAInfoAtom",
                         SpecificationReference {
@@ -4121,7 +4127,7 @@ impl PowerPointDocument {
                         diagnostics.push(ParseDiagnostic::warning(
                             ParseDiagnosticCode::InvalidReference,
                             BinaryFormat::Ppt,
-                            Some("/PowerPoint Document"),
+                            Some(POWERPOINT_DOCUMENT_STREAM_PATH),
                             Some(vba_info_atom_record.offset),
                             "VBAInfoAtom.persistIdRef",
                             SpecificationReference {
@@ -4570,7 +4576,7 @@ fn push_live_presentation_diagnostic(
     diagnostics.push(ParseDiagnostic::warning(
         code,
         BinaryFormat::Ppt,
-        Some("/PowerPoint Document"),
+        Some(POWERPOINT_DOCUMENT_STREAM_PATH),
         Some(offset),
         structure,
         SpecificationReference {

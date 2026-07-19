@@ -46,6 +46,19 @@ use crate::{
 };
 
 pub const WORD97_FILE_IDENTIFIER: u16 = 0xa5ec;
+
+/// Absolute CFB path of the required MS-DOC `WordDocument` stream.
+pub const WORD_DOCUMENT_STREAM_PATH: &str = "/WordDocument";
+/// Absolute CFB path of the MS-DOC table stream selected when `fWhichTblStm` is clear.
+pub const TABLE0_STREAM_PATH: &str = "/0Table";
+/// Absolute CFB path of the MS-DOC table stream selected when `fWhichTblStm` is set.
+pub const TABLE1_STREAM_PATH: &str = "/1Table";
+/// Absolute CFB path of the optional MS-DOC `Data` stream.
+pub const DATA_STREAM_PATH: &str = "/Data";
+/// Absolute CFB path of the optional MS-DOC `ObjectPool` storage.
+pub const OBJECT_POOL_STORAGE_PATH: &str = "/ObjectPool";
+/// Fixed leaf name of an embedded object's required descriptor stream.
+pub const OBJECT_INFO_STREAM_NAME: &str = "\u{3}ObjInfo";
 pub const FIB_FC_LCB_CLX_INDEX: usize = 33;
 pub const FIB_FC_LCB_GRP_XST_ATN_OWNERS_INDEX: usize = 36;
 pub const FIB_FC_LCB_STTBF_ATN_BKMK_INDEX: usize = 37;

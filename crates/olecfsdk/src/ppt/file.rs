@@ -30,14 +30,11 @@ use crate::{
 };
 
 use super::{
-    BinaryTagData, CurrentUserData, CurrentUserStream, ExternalStorageAtom, PersistObjectDirectory,
-    PicturesStream, PowerPointDocument, PptLivePresentation, PptLiveTextBodyMut, PptRecord,
-    PptRecordData, PptRecordSequence, PptSlideId,
+    BinaryTagData, CURRENT_USER_STREAM_PATH, CurrentUserData, CurrentUserStream,
+    ExternalStorageAtom, PICTURES_STREAM_PATH, POWERPOINT_DOCUMENT_STREAM_PATH,
+    PersistObjectDirectory, PicturesStream, PowerPointDocument, PptLivePresentation,
+    PptLiveTextBodyMut, PptRecord, PptRecordData, PptRecordSequence, PptSlideId,
 };
-
-const DOCUMENT_STREAM: &str = "/PowerPoint Document";
-const CURRENT_USER_STREAM: &str = "/Current User";
-const PICTURES_STREAM: &str = "/Pictures";
 
 /// Complete typed root for a PowerPoint binary file.
 ///
@@ -136,9 +133,12 @@ impl CfbStreamWriter for PptPicturesStreamWriter<'_> {
 
 impl PptManagedStreams {
     fn matches_source(&self, source: &CompoundFile) -> bool {
-        source.stream(DOCUMENT_STREAM) == Some(self.document.as_slice())
-            && source.stream(CURRENT_USER_STREAM) == Some(self.current_user.as_slice())
-            && match (source.stream(PICTURES_STREAM), self.pictures.as_deref()) {
+        source.stream(POWERPOINT_DOCUMENT_STREAM_PATH) == Some(self.document.as_slice())
+            && source.stream(CURRENT_USER_STREAM_PATH) == Some(self.current_user.as_slice())
+            && match (
+                source.stream(PICTURES_STREAM_PATH),
+                self.pictures.as_deref(),
+            ) {
                 (Some(source), Some(current)) => source == current,
                 (None, None) => true,
                 _ => false,
@@ -609,12 +609,12 @@ impl PptFile {
             mut diagnostics,
         } = compound;
         let document = compound_file
-            .stream(DOCUMENT_STREAM)
+            .stream(POWERPOINT_DOCUMENT_STREAM_PATH)
             .ok_or_else(|| Error::invalid(0, "PowerPoint Document stream is missing"))
             .and_then(|bytes| PowerPointDocument::from_bytes_with_limits(bytes, options.limits))?;
         audit_record_sequence(&document.records, 0, options.is_strict(), &mut diagnostics)?;
         let current_user = compound_file
-            .stream(CURRENT_USER_STREAM)
+            .stream(CURRENT_USER_STREAM_PATH)
             .ok_or_else(|| {
                 Error::invalid(0, "required Current User Stream is missing (MS-PPT 2.1.1)")
             })
@@ -644,7 +644,7 @@ impl PptFile {
                             diagnostics.push(ParseDiagnostic::warning(
                                 ParseDiagnosticCode::InvalidReference,
                                 BinaryFormat::Ppt,
-                                Some(DOCUMENT_STREAM),
+                                Some(POWERPOINT_DOCUMENT_STREAM_PATH),
                                 Some(offset),
                                 "live-record process",
                                 SpecificationReference {
@@ -666,7 +666,7 @@ impl PptFile {
             CurrentUserData::Compatibility(_) => diagnostics.push(ParseDiagnostic::warning(
                 ParseDiagnosticCode::NonconformingRecord,
                 BinaryFormat::Ppt,
-                Some(CURRENT_USER_STREAM),
+                Some(CURRENT_USER_STREAM_PATH),
                 Some(0),
                 "CurrentUserAtom",
                 SpecificationReference {
@@ -684,7 +684,7 @@ impl PptFile {
             CurrentUserData::Truncated(_) => diagnostics.push(ParseDiagnostic::warning(
                 ParseDiagnosticCode::TruncatedRecord,
                 BinaryFormat::Ppt,
-                Some(CURRENT_USER_STREAM),
+                Some(CURRENT_USER_STREAM_PATH),
                 Some(0),
                 "CurrentUserAtom",
                 SpecificationReference {
@@ -695,7 +695,7 @@ impl PptFile {
             )),
         }
         let pictures = compound_file
-            .stream(PICTURES_STREAM)
+            .stream(PICTURES_STREAM_PATH)
             .map(|bytes| PicturesStream::from_bytes_with_limits(bytes, options.limits))
             .transpose()?;
         if let Some(pictures) = &pictures {
@@ -716,7 +716,7 @@ impl PptFile {
                 diagnostics.push(ParseDiagnostic::warning(
                     ParseDiagnosticCode::InvalidStreamPreserved,
                     BinaryFormat::Ppt,
-                    Some(PICTURES_STREAM),
+                    Some(PICTURES_STREAM_PATH),
                     Some(0),
                     "OfficeArtBStoreDelay",
                     SpecificationReference {
@@ -929,13 +929,13 @@ impl PptFile {
     fn compound_for_managed_streaming(&self, options: SaveOptions) -> Result<CompoundFile> {
         self.validate_current_layout(options)?;
         let mut compound = self.compound_file.clone();
-        compound.overwrite_stream(CURRENT_USER_STREAM, self.current_user.to_bytes()?)?;
+        compound.overwrite_stream(CURRENT_USER_STREAM_PATH, self.current_user.to_bytes()?)?;
         match self.pictures.as_deref() {
-            Some(_) if !compound.is_stream(PICTURES_STREAM) => {
-                compound.upsert_stream(PICTURES_STREAM, Vec::new())?;
+            Some(_) if !compound.is_stream(PICTURES_STREAM_PATH) => {
+                compound.upsert_stream(PICTURES_STREAM_PATH, Vec::new())?;
             }
-            None if compound.is_stream(PICTURES_STREAM) => {
-                compound.remove_stream(PICTURES_STREAM)?;
+            None if compound.is_stream(PICTURES_STREAM_PATH) => {
+                compound.remove_stream(PICTURES_STREAM_PATH)?;
             }
             Some(_) | None => {}
         }
@@ -951,13 +951,13 @@ impl PptFile {
         let pictures_writer = ready.pictures.as_deref().map(PptPicturesStreamWriter);
         let mut stream_overrides = Vec::with_capacity(2);
         stream_overrides.push(CfbStreamOverride::new(
-            Path::new(DOCUMENT_STREAM),
+            Path::new(POWERPOINT_DOCUMENT_STREAM_PATH),
             document_len,
             &document_writer,
         ));
         if let Some(pictures_writer) = pictures_writer.as_ref() {
             stream_overrides.push(CfbStreamOverride::new(
-                Path::new(PICTURES_STREAM),
+                Path::new(PICTURES_STREAM_PATH),
                 pictures_writer.0.serialized_len()?,
                 pictures_writer,
             ));
@@ -973,13 +973,13 @@ impl PptFile {
         let pictures_writer = ready.pictures.as_deref().map(PptPicturesStreamWriter);
         let mut stream_overrides = Vec::with_capacity(2);
         stream_overrides.push(CfbStreamOverride::new(
-            Path::new(DOCUMENT_STREAM),
+            Path::new(POWERPOINT_DOCUMENT_STREAM_PATH),
             document_len,
             &document_writer,
         ));
         if let Some(pictures_writer) = pictures_writer.as_ref() {
             stream_overrides.push(CfbStreamOverride::new(
-                Path::new(PICTURES_STREAM),
+                Path::new(PICTURES_STREAM_PATH),
                 pictures_writer.0.serialized_len()?,
                 pictures_writer,
             ));
@@ -993,9 +993,13 @@ impl PptFile {
         streams: PptManagedStreams,
     ) -> Result<CompoundFile> {
         let mut compound = self.compound_file.clone();
-        compound.overwrite_stream(DOCUMENT_STREAM, streams.document)?;
-        compound.overwrite_stream(CURRENT_USER_STREAM, streams.current_user)?;
-        sync_optional_stream(&mut compound, PICTURES_STREAM, streams.pictures.map(Ok))?;
+        compound.overwrite_stream(POWERPOINT_DOCUMENT_STREAM_PATH, streams.document)?;
+        compound.overwrite_stream(CURRENT_USER_STREAM_PATH, streams.current_user)?;
+        sync_optional_stream(
+            &mut compound,
+            PICTURES_STREAM_PATH,
+            streams.pictures.map(Ok),
+        )?;
         self.shared.write_to_compound_file(&mut compound, options)?;
         Ok(compound)
     }
@@ -1226,7 +1230,7 @@ fn report_current_user_issue(
     diagnostics.push(ParseDiagnostic::warning(
         code,
         BinaryFormat::Ppt,
-        Some(CURRENT_USER_STREAM),
+        Some(CURRENT_USER_STREAM_PATH),
         Some(0),
         "CurrentUserAtom",
         SpecificationReference {
@@ -1465,7 +1469,7 @@ fn report_record_issue(
     diagnostics.push(ParseDiagnostic::warning(
         code,
         BinaryFormat::Ppt,
-        Some(DOCUMENT_STREAM),
+        Some(POWERPOINT_DOCUMENT_STREAM_PATH),
         Some(offset),
         structure,
         SpecificationReference {
@@ -1633,11 +1637,11 @@ mod tests {
     fn compound_with_document(document: Vec<u8>) -> CompoundFile {
         let mut compound = CompoundFile::new(Version::V3).unwrap();
         compound
-            .create_or_replace_stream(DOCUMENT_STREAM, document)
+            .create_or_replace_stream(POWERPOINT_DOCUMENT_STREAM_PATH, document)
             .unwrap();
         compound
             .create_or_replace_stream(
-                CURRENT_USER_STREAM,
+                CURRENT_USER_STREAM_PATH,
                 current_user_stream().to_bytes().unwrap(),
             )
             .unwrap();
@@ -2102,7 +2106,9 @@ mod tests {
             PptRecordData::Unknown(_)
         ));
         assert_eq!(
-            file.to_compound_file().unwrap().stream(DOCUMENT_STREAM),
+            file.to_compound_file()
+                .unwrap()
+                .stream(POWERPOINT_DOCUMENT_STREAM_PATH),
             Some(document.as_slice())
         );
     }
@@ -2159,7 +2165,7 @@ mod tests {
             .unwrap();
         let preserved_bytes = CompoundFile::from_bytes(&preserved_bytes).unwrap();
         assert_eq!(
-            preserved_bytes.stream(DOCUMENT_STREAM),
+            preserved_bytes.stream(POWERPOINT_DOCUMENT_STREAM_PATH),
             Some(document.as_slice())
         );
         assert_eq!(
@@ -2167,7 +2173,7 @@ mod tests {
                 .value
                 .to_compound_file_preserving_compatibility()
                 .unwrap()
-                .stream(DOCUMENT_STREAM),
+                .stream(POWERPOINT_DOCUMENT_STREAM_PATH),
             Some(document.as_slice())
         );
     }
@@ -2192,7 +2198,7 @@ mod tests {
                 .value
                 .to_compound_file_preserving_compatibility()
                 .unwrap()
-                .stream(DOCUMENT_STREAM),
+                .stream(POWERPOINT_DOCUMENT_STREAM_PATH),
             Some(document.as_slice())
         );
     }
@@ -2211,7 +2217,7 @@ mod tests {
         pictures.extend_from_slice(&[1, 2, 3]);
         let mut compound = compound_with_document(document_with_minimal_chain(Vec::new()));
         compound
-            .create_or_replace_stream(PICTURES_STREAM, pictures.clone())
+            .create_or_replace_stream(PICTURES_STREAM_PATH, pictures.clone())
             .unwrap();
 
         assert!(PptFile::from_compound_file(compound.clone()).is_err());
@@ -2227,7 +2233,7 @@ mod tests {
         );
         assert_eq!(
             outcome.diagnostics[0].location.path.as_deref(),
-            Some(PICTURES_STREAM)
+            Some(PICTURES_STREAM_PATH)
         );
         assert!(outcome.value.to_compound_file().is_err());
         assert_eq!(
@@ -2235,7 +2241,7 @@ mod tests {
                 .value
                 .to_compound_file_preserving_compatibility()
                 .unwrap()
-                .stream(PICTURES_STREAM),
+                .stream(PICTURES_STREAM_PATH),
             Some(pictures.as_slice())
         );
     }
@@ -2292,7 +2298,7 @@ mod tests {
                 .value
                 .to_compound_file_preserving_compatibility()
                 .unwrap()
-                .stream(DOCUMENT_STREAM),
+                .stream(POWERPOINT_DOCUMENT_STREAM_PATH),
             Some(document.as_slice())
         );
     }
@@ -2328,7 +2334,7 @@ mod tests {
     fn required_current_user_stream_is_not_invented_by_compatibility_mode() {
         let mut compound = CompoundFile::new(Version::V3).unwrap();
         compound
-            .create_or_replace_stream(DOCUMENT_STREAM, Vec::new())
+            .create_or_replace_stream(POWERPOINT_DOCUMENT_STREAM_PATH, Vec::new())
             .unwrap();
         assert!(PptFile::from_compound_file(compound.clone()).is_err());
         assert!(PptFile::from_compound_file_compatible(compound).is_err());
@@ -2338,7 +2344,7 @@ mod tests {
     fn truncated_current_user_is_compatible_only_and_diagnostic() {
         let mut compound = CompoundFile::new(Version::V3).unwrap();
         compound
-            .create_or_replace_stream(DOCUMENT_STREAM, Vec::new())
+            .create_or_replace_stream(POWERPOINT_DOCUMENT_STREAM_PATH, Vec::new())
             .unwrap();
         let mut bytes = Vec::new();
         PptRecordHeader {
@@ -2351,7 +2357,7 @@ mod tests {
         .unwrap();
         bytes.extend_from_slice(&[1, 2, 3]);
         compound
-            .create_or_replace_stream(CURRENT_USER_STREAM, bytes)
+            .create_or_replace_stream(CURRENT_USER_STREAM_PATH, bytes)
             .unwrap();
 
         assert!(PptFile::from_compound_file(compound.clone()).is_err());
@@ -2367,7 +2373,7 @@ mod tests {
         );
         assert_eq!(
             outcome.diagnostics[0].location.path.as_deref(),
-            Some(CURRENT_USER_STREAM)
+            Some(CURRENT_USER_STREAM_PATH)
         );
         assert!(outcome.value.to_compound_file().is_err());
         let preserved = outcome
@@ -2375,8 +2381,8 @@ mod tests {
             .to_compound_file_preserving_compatibility()
             .unwrap();
         assert_eq!(
-            preserved.stream(CURRENT_USER_STREAM),
-            outcome.value.compound_file.stream(CURRENT_USER_STREAM)
+            preserved.stream(CURRENT_USER_STREAM_PATH),
+            outcome.value.compound_file.stream(CURRENT_USER_STREAM_PATH)
         );
     }
 
@@ -2390,7 +2396,7 @@ mod tests {
         atom.release_version = 7;
         let mut compound = compound_with_document(document_with_minimal_chain(Vec::new()));
         compound
-            .replace_stream(CURRENT_USER_STREAM, current.to_bytes().unwrap())
+            .replace_stream(CURRENT_USER_STREAM_PATH, current.to_bytes().unwrap())
             .unwrap();
 
         assert!(PptFile::from_compound_file(compound.clone()).is_err());

@@ -16,7 +16,10 @@ use crate::{
     forms::ParentControlStorageModel,
     io::BinaryFormat,
     property_set::PropertySetStream,
-    vba::{LocatedVbaProject, VbaModuleSourceMutation},
+    vba::{
+        DOC_VBA_PROJECT_STORAGE_NAME, LocatedVbaProject, VBA_STORAGE_NAME, VbaModuleSourceMutation,
+        XLS_VBA_PROJECT_STORAGE_NAME,
+    },
 };
 
 pub const SUMMARY_INFORMATION_STREAM: &str = "/\u{5}SummaryInformation";
@@ -47,7 +50,8 @@ impl OfficePropertySetKind {
         }
     }
 
-    const fn stream_name(self) -> &'static str {
+    /// CFB directory-entry name without its parent path.
+    pub const fn stream_name(self) -> &'static str {
         match self {
             Self::SummaryInformation => "\u{5}SummaryInformation",
             Self::DocumentSummaryInformation => "\u{5}DocumentSummaryInformation",
@@ -481,8 +485,8 @@ fn parse_host_vba_project(
     diagnostics: &mut Vec<ParseDiagnostic>,
 ) -> Result<Option<OfficeVbaProject>> {
     let expected_root_name = match host {
-        Some(OfficeHostKind::Doc) => "Macros",
-        Some(OfficeHostKind::Xls) => "_VBA_PROJECT_CUR",
+        Some(OfficeHostKind::Doc) => DOC_VBA_PROJECT_STORAGE_NAME,
+        Some(OfficeHostKind::Xls) => XLS_VBA_PROJECT_STORAGE_NAME,
         Some(OfficeHostKind::Ppt) | None => return Ok(None),
     };
     let Some(project_root) = compound.entries().iter().find(|entry| {
@@ -495,7 +499,7 @@ fn parse_host_vba_project(
     let vba_storage = compound.entries().iter().find(|entry| {
         entry.kind == EntryKind::Storage
             && entry.path.parent() == Some(project_root.path.as_path())
-            && entry.name.eq_ignore_ascii_case("VBA")
+            && entry.name.eq_ignore_ascii_case(VBA_STORAGE_NAME)
     });
     let parsed = vba_storage
         .ok_or_else(|| Error::invalid(0, "VBA project root has no VBA storage"))

@@ -93,11 +93,11 @@ not hide I/O behind the infallible borrowed-slice API used by an owned
 
 ```rust,no_run
 use std::io::Read;
-use olecfsdk::{Result, cfb::CompoundFileReader};
+use olecfsdk::{Result, cfb::CompoundFileReader, doc::WORD_DOCUMENT_STREAM_PATH};
 
 fn read_prefix(path: &str) -> Result<[u8; 32]> {
     let compound = CompoundFileReader::open(path)?;
-    let mut stream = compound.open_stream("/WordDocument")?;
+    let mut stream = compound.open_stream(WORD_DOCUMENT_STREAM_PATH)?;
     let mut prefix = [0; 32];
     stream.read_exact(&mut prefix)?;
     Ok(prefix)

@@ -22,6 +22,23 @@ use directory::{DirStream, ModuleDescriptor};
 use module::ModuleStream;
 use project::{ProjectLkStream, ProjectStream, ProjectWmStream};
 
+/// Fixed name of the MS-OVBA storage inside a host project storage.
+pub const VBA_STORAGE_NAME: &str = "VBA";
+/// Fixed name of the compressed VBA directory stream.
+pub const VBA_DIRECTORY_STREAM_NAME: &str = "dir";
+/// Fixed name of the version-dependent VBA project cache stream.
+pub const VBA_PROJECT_CACHE_STREAM_NAME: &str = "_VBA_PROJECT";
+/// Fixed name of the textual VBA project stream.
+pub const VBA_PROJECT_STREAM_NAME: &str = "PROJECT";
+/// Fixed name of the VBA module-name map stream.
+pub const VBA_PROJECT_WM_STREAM_NAME: &str = "PROJECTwm";
+/// Fixed name of the optional VBA project licensing stream.
+pub const VBA_PROJECT_LK_STREAM_NAME: &str = "PROJECTlk";
+/// Fixed root storage name used by MS-DOC VBA projects.
+pub const DOC_VBA_PROJECT_STORAGE_NAME: &str = "Macros";
+/// Fixed root storage name used by MS-XLS VBA projects.
+pub const XLS_VBA_PROJECT_STORAGE_NAME: &str = "_VBA_PROJECT_CUR";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VbaProject {
     pub vba_storage_path: PathBuf,
@@ -360,8 +377,8 @@ impl From<VbaProject> for LocatedVbaProject {
         };
         Self {
             identity: VbaProjectCfbIdentity {
-                directory_stream_path: vba_storage_path.join("dir"),
-                project_cache_stream_path: vba_storage_path.join("_VBA_PROJECT"),
+                directory_stream_path: vba_storage_path.join(VBA_DIRECTORY_STREAM_NAME),
+                project_cache_stream_path: vba_storage_path.join(VBA_PROJECT_CACHE_STREAM_NAME),
                 storage_path: vba_storage_path,
                 srp_stream_paths,
                 module_stream_paths,
@@ -378,7 +395,7 @@ impl VbaProject {
         compound_file
             .entries()
             .iter()
-            .any(|entry| entry.is_storage() && entry.name.eq_ignore_ascii_case("VBA"))
+            .any(|entry| entry.is_storage() && entry.name.eq_ignore_ascii_case(VBA_STORAGE_NAME))
     }
 
     pub fn from_compound_file(compound_file: &CompoundFile) -> Result<Self> {
@@ -394,9 +411,10 @@ impl VbaProject {
             .iter()
             .find(|entry| {
                 entry.is_storage()
-                    && entry.name.eq_ignore_ascii_case("VBA")
-                    && child_stream(compound_file, &entry.path, "dir").is_some()
-                    && child_stream(compound_file, &entry.path, "_VBA_PROJECT").is_some()
+                    && entry.name.eq_ignore_ascii_case(VBA_STORAGE_NAME)
+                    && child_stream(compound_file, &entry.path, VBA_DIRECTORY_STREAM_NAME).is_some()
+                    && child_stream(compound_file, &entry.path, VBA_PROJECT_CACHE_STREAM_NAME)
+                        .is_some()
             })
             .ok_or_else(|| Error::invalid(0, "compound file has no VBA storage"))?;
         Self::from_compound_file_at_with_limits(compound_file, &vba_storage.path, limits)
@@ -421,14 +439,19 @@ impl VbaProject {
             .find(|entry| entry.is_storage() && entry.path == vba_storage_path)
             .ok_or_else(|| Error::invalid(0, "compound file has no VBA storage at path"))?;
         let vba_storage_path = vba_storage.path.clone();
-        let directory_entry = child_stream(compound_file, &vba_storage_path, "dir")
-            .ok_or_else(|| Error::invalid(0, "VBA storage has no dir stream"))?;
+        let directory_entry =
+            child_stream(compound_file, &vba_storage_path, VBA_DIRECTORY_STREAM_NAME)
+                .ok_or_else(|| Error::invalid(0, "VBA storage has no dir stream"))?;
         let directory_container =
             CompressedContainer::from_bytes_with_limits(&directory_entry.data, limits)?;
         let directory_bytes = directory_container.decompress()?;
         let directory = DirStream::from_bytes_with_limits(&directory_bytes, limits)?;
-        let cache_entry = child_stream(compound_file, &vba_storage_path, "_VBA_PROJECT")
-            .ok_or_else(|| Error::invalid(0, "VBA storage has no _VBA_PROJECT stream"))?;
+        let cache_entry = child_stream(
+            compound_file,
+            &vba_storage_path,
+            VBA_PROJECT_CACHE_STREAM_NAME,
+        )
+        .ok_or_else(|| Error::invalid(0, "VBA storage has no _VBA_PROJECT stream"))?;
         let cache = VbaProjectStream::from_bytes_with_limits(&cache_entry.data, limits)?;
         let mut srp_streams = Vec::new();
         for entry in compound_file.entries().iter().filter(|entry| {
@@ -453,15 +476,23 @@ impl VbaProject {
         let project_storage_path = vba_storage_path
             .parent()
             .unwrap_or(std::path::Path::new("/"));
-        let project = child_stream(compound_file, project_storage_path, "PROJECT")
+        let project = child_stream(compound_file, project_storage_path, VBA_PROJECT_STREAM_NAME)
             .map(|entry| ProjectStream::from_bytes_with_limits(&entry.data, limits))
             .transpose()?;
-        let project_wm = child_stream(compound_file, project_storage_path, "PROJECTwm")
-            .map(|entry| ProjectWmStream::from_bytes(&entry.data))
-            .transpose()?;
-        let project_lk = child_stream(compound_file, project_storage_path, "PROJECTlk")
-            .map(|entry| ProjectLkStream::from_bytes_with_limits(&entry.data, limits))
-            .transpose()?;
+        let project_wm = child_stream(
+            compound_file,
+            project_storage_path,
+            VBA_PROJECT_WM_STREAM_NAME,
+        )
+        .map(|entry| ProjectWmStream::from_bytes(&entry.data))
+        .transpose()?;
+        let project_lk = child_stream(
+            compound_file,
+            project_storage_path,
+            VBA_PROJECT_LK_STREAM_NAME,
+        )
+        .map(|entry| ProjectLkStream::from_bytes_with_limits(&entry.data, limits))
+        .transpose()?;
         let code_page = CodePage(directory.code_page().unwrap_or(1252));
         let mut modules = Vec::new();
         for descriptor in directory.modules() {

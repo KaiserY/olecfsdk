@@ -437,7 +437,21 @@ pub struct PivotCacheStream {
     pub trailing_padding: Vec<u8>,
 }
 
+/// Absolute CFB path of the canonical BIFF8 workbook stream.
+pub const WORKBOOK_STREAM_PATH: &str = "/Workbook";
+/// Absolute CFB path of the legacy BIFF workbook stream.
+pub const BOOK_STREAM_PATH: &str = "/Book";
+/// Fixed name of the MS-XLS pivot-cache storage.
+pub const PIVOT_CACHE_STORAGE_NAME: &str = "_SX_DB_CUR";
+/// Absolute CFB path of the MS-XLS pivot-cache storage.
+pub const PIVOT_CACHE_STORAGE_PATH: &str = "/_SX_DB_CUR";
+/// Fixed CFB name of the shared-workbook revision stream.
+pub const REVISION_LOG_STREAM_NAME: &str = "Revision Log";
+/// Absolute CFB path of the shared-workbook revision stream.
 pub const REVISION_LOG_STREAM_PATH: &str = "/Revision Log";
+/// Fixed CFB name of the shared-workbook user-names stream.
+pub const USER_NAMES_STREAM_NAME: &str = "User Names";
+/// Absolute CFB path of the shared-workbook user-names stream.
 pub const USER_NAMES_STREAM_PATH: &str = "/User Names";
 
 #[derive(Clone, Debug, PartialEq, Eq)]

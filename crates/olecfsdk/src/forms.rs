@@ -6,6 +6,13 @@ use bitflags::bitflags;
 
 use crate::{Error, Result, cfb::CompoundFile, common::Guid};
 
+/// Fixed leaf name of the MS-OFORMS Form stream in a parent-control storage.
+pub const FORM_STREAM_NAME: &str = "f";
+/// Fixed leaf name of the MS-OFORMS Object stream in a parent-control storage.
+pub const OBJECT_STREAM_NAME: &str = "o";
+/// Fixed leaf name of the MS-OFORMS MultiPage extension stream.
+pub const MULTIPAGE_STREAM_NAME: &str = "x";
+
 bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct MorphDataPropertyMask: u64 {
@@ -2042,12 +2049,12 @@ impl LocatedParentControlStorage {
                     && compound.entries().iter().any(|child| {
                         child.is_stream()
                             && child.path.parent() == Some(entry.path.as_path())
-                            && child.name.eq_ignore_ascii_case("f")
+                            && child.name.eq_ignore_ascii_case(FORM_STREAM_NAME)
                     })
                     && compound.entries().iter().any(|child| {
                         child.is_stream()
                             && child.path.parent() == Some(entry.path.as_path())
-                            && child.name.eq_ignore_ascii_case("o")
+                            && child.name.eq_ignore_ascii_case(OBJECT_STREAM_NAME)
                     })
             })
             .map(|entry| entry.path.clone())
@@ -4150,8 +4157,8 @@ impl ParentControlStorage {
                 format!("MS-OFORMS path {} is not a storage", path.display()),
             ));
         }
-        let form_bytes = required_parent_stream(compound, path, "f")?;
-        let object_bytes = required_parent_stream(compound, path, "o")?;
+        let form_bytes = required_parent_stream(compound, path, FORM_STREAM_NAME)?;
+        let object_bytes = required_parent_stream(compound, path, OBJECT_STREAM_NAME)?;
         let form = FormControl::from_bytes(form_bytes)?;
         let object_stream = FormObjectStream::from_form(&form, object_bytes)?;
 
@@ -4178,7 +4185,7 @@ impl ParentControlStorage {
         }
 
         let multi_page_x = if entry.clsid == Self::MULTI_PAGE_CLASS_ID {
-            let bytes = required_parent_stream(compound, path, "x")?;
+            let bytes = required_parent_stream(compound, path, MULTIPAGE_STREAM_NAME)?;
             let value = MultiPageXStream::from_bytes(bytes)?;
             validate_multi_page_children(&form, &children, &value)?;
             Some(value)
@@ -4245,10 +4252,10 @@ impl ParentControlStorage {
 
         let form_bytes = self.form.to_bytes()?;
         let object_bytes = self.object_stream.to_bytes(&self.form)?;
-        compound.overwrite_stream(self.path.join("f"), form_bytes)?;
-        compound.overwrite_stream(self.path.join("o"), object_bytes)?;
+        compound.overwrite_stream(self.path.join(FORM_STREAM_NAME), form_bytes)?;
+        compound.overwrite_stream(self.path.join(OBJECT_STREAM_NAME), object_bytes)?;
         if let Some(value) = &self.multi_page_x {
-            compound.overwrite_stream(self.path.join("x"), value.to_bytes()?)?;
+            compound.overwrite_stream(self.path.join(MULTIPAGE_STREAM_NAME), value.to_bytes()?)?;
         }
         for child in &self.children {
             child
