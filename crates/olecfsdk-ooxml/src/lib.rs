@@ -18,7 +18,7 @@ pub use doc::{convert_doc, convert_doc_with_options};
 pub use error::{Error, Result};
 pub use ppt::{convert_ppt, convert_ppt_with_options};
 pub use report::{
-    ConversionCode, ConversionIssue, ConversionOptions, ConversionOutput, ConversionReport,
-    Disposition, DispositionCounts, LossPolicy, SourceLocation,
+  ConversionCode, ConversionIssue, ConversionOptions, ConversionOutput, ConversionReport,
+  Disposition, DispositionCounts, LossPolicy, SourceLocation,
 };
 pub use xls::{convert_xls, convert_xls_with_options};
