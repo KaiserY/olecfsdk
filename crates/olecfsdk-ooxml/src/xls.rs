@@ -1,11 +1,11 @@
 use olecfsdk::{
   office_art::{OfficeArtClientAnchor, OfficeArtImageFormat, OfficeArtShapeFlags},
   xls::{
-    BiffSubstreamKind, CellErrorCode, ExtFontScheme, ExtPropertyData, FontAttributes, FontRecord,
-    FormulaOperator, FormulaTokenData, FormulaTokenStream, FullColorExt, SstExtensionData,
-    SstString, XfExtRecord, XfRecord, XlStringCharacters, XlsCellValue, XlsCellValueRef, XlsFile,
-    XlsFormulaCachedValue, XlsFormulaDefinitionRef, XlsFormulaRef, XlsHyperlinkTarget,
-    XlsPictureImageLink, XlsPictureRef, XlsWorkbookView,
+    BiffSubstreamKind, CellErrorCode, ExtFontScheme, ExtPropertyData, ExtRstBody, FontAttributes,
+    FontRecord, FormulaOperator, FormulaTokenData, FormulaTokenStream, FullColorExt,
+    SstExtensionData, SstString, XfExtRecord, XfRecord, XlStringCharacters, XlsCellValue,
+    XlsCellValueRef, XlsFile, XlsFormulaCachedValue, XlsFormulaDefinitionRef, XlsFormulaRef,
+    XlsHyperlinkTarget, XlsPictureImageLink, XlsPictureRef, XlsWorkbookView,
   },
 };
 use ooxmlsdk::{
@@ -679,12 +679,29 @@ fn convert_shared_strings(
       workbook_index: 0,
       string_index,
     };
-    let (item, rich_text_unmapped) = convert_shared_string_item(view, source_string)?;
-    if rich_text_unmapped || !matches!(source_string.extension, SstExtensionData::None) {
+    let (item, rich_text_unmapped, phonetic_text_unmapped, phonetic_compatibility_unmapped) =
+      convert_shared_string_item(view, source_string)?;
+    if rich_text_unmapped {
       unsupported(
         report,
         options,
         ConversionCode::SharedStringRichTextNotMapped,
+        source_location,
+      )?;
+    }
+    if phonetic_text_unmapped {
+      unsupported(
+        report,
+        options,
+        ConversionCode::SharedStringPhoneticTextNotMapped,
+        source_location,
+      )?;
+    }
+    if phonetic_compatibility_unmapped {
+      unsupported(
+        report,
+        options,
+        ConversionCode::SharedStringPhoneticCompatibilityNotMapped,
         source_location,
       )?;
     }
@@ -702,65 +719,241 @@ fn convert_shared_strings(
 fn convert_shared_string_item(
   view: &XlsWorkbookView<'_>,
   source: &SstString,
-) -> Result<(SharedStringItem, bool)> {
+) -> Result<(SharedStringItem, bool, bool, bool)> {
   let code_units = sst_code_units(source);
-  if source.format_runs.is_empty() {
+  let (mut item, rich_text_unmapped) = if source.format_runs.is_empty() {
     let value = String::from_utf16(&code_units).map_err(|_| {
       olecfsdk::Error::invalid(0, "XLS string contains an unpaired UTF-16 surrogate")
     })?;
-    return Ok((
+    (
       SharedStringItem {
         text: Some(Text(xstring(value))),
         ..Default::default()
       },
       false,
-    ));
+    )
+  } else {
+    let mut runs = Vec::with_capacity(source.format_runs.len() + 1);
+    let mut start = 0usize;
+    let mut properties = None;
+    let mut unmapped = false;
+    for format_run in &source.format_runs {
+      let boundary = usize::from(format_run.character_index);
+      if boundary > code_units.len() || boundary < start {
+        unmapped = true;
+        continue;
+      }
+      if boundary > start {
+        runs.push(shared_string_run(
+          &code_units[start..boundary],
+          properties.clone(),
+        )?);
+        start = boundary;
+      }
+      // MS-XLS 2.5.132 says a FormatRun at the string length is undefined
+      // and must be ignored.
+      if boundary == code_units.len() {
+        continue;
+      }
+      properties = match view.font(format_run.font_index) {
+        Some(font) => {
+          let (converted, font_unmapped) = convert_run_properties(font)?;
+          unmapped |= font_unmapped;
+          Some(converted)
+        }
+        None => {
+          unmapped = true;
+          None
+        }
+      };
+    }
+    if start < code_units.len() {
+      runs.push(shared_string_run(&code_units[start..], properties)?);
+    }
+    (
+      SharedStringItem {
+        run: runs,
+        ..Default::default()
+      },
+      unmapped,
+    )
+  };
+  let phonetics = convert_phonetic_extension(view, source, code_units.len())?;
+  item.phonetic_run = phonetics.runs;
+  item.phonetic_properties = phonetics.properties;
+  Ok((
+    item,
+    rich_text_unmapped,
+    phonetics.semantic_unmapped,
+    phonetics.compatibility_unmapped,
+  ))
+}
+
+struct ConvertedPhonetics {
+  runs: Vec<x::PhoneticRun>,
+  properties: Option<x::PhoneticProperties>,
+  semantic_unmapped: bool,
+  compatibility_unmapped: bool,
+}
+
+fn convert_phonetic_extension(
+  view: &XlsWorkbookView<'_>,
+  source: &SstString,
+  base_text_length: usize,
+) -> Result<ConvertedPhonetics> {
+  // MS-XLS 2.5.109 and 2.5.200 define ExtRst/PhRuns; ECMA-376
+  // 18.4.3 and 18.4.6 define the corresponding phoneticPr/rPh values.
+  let SstExtensionData::ExtRst(extension) = &source.extension else {
+    return Ok(ConvertedPhonetics {
+      runs: Vec::new(),
+      properties: None,
+      semantic_unmapped: !matches!(source.extension, SstExtensionData::None),
+      compatibility_unmapped: false,
+    });
+  };
+  let ExtRstBody::Phonetic {
+    declared_data_size: _,
+    font_index,
+    formatting_flags,
+    declared_run_count,
+    declared_character_count,
+    lpwide_character_count,
+    phonetic_text,
+    runs,
+    extra_data_word,
+    inner_trailing,
+    outer_trailing,
+  } = &extension.body
+  else {
+    return Ok(ConvertedPhonetics {
+      runs: Vec::new(),
+      properties: None,
+      semantic_unmapped: true,
+      compatibility_unmapped: false,
+    });
+  };
+
+  let mut semantic_unmapped = extension.reserved != 1
+    || usize::from(*declared_run_count) != runs.len()
+    || usize::from(*declared_character_count) != phonetic_text.len()
+    || declared_character_count != lpwide_character_count;
+  let compatibility_unmapped =
+    extra_data_word.is_some() || !inner_trailing.is_empty() || !outer_trailing.is_empty();
+  let font_id = match font_position(*font_index).filter(|_| view.font(*font_index).is_some()) {
+    Some(position) => u32::try_from(position)
+      .map_err(|_| olecfsdk::Error::Limit("XLS phonetic font index exceeds u32".into()))?,
+    None => {
+      semantic_unmapped = true;
+      0
+    }
+  };
+  let properties = x::PhoneticProperties {
+    font_id,
+    r#type: Some(match formatting_flags.bits() & 0x0003 {
+      0 => x::PhoneticValues::HalfWidthKatakana,
+      1 => x::PhoneticValues::FullWidthKatakana,
+      2 => x::PhoneticValues::Hiragana,
+      _ => x::PhoneticValues::NoConversion,
+    }),
+    alignment: Some(match (formatting_flags.bits() >> 2) & 0x0003 {
+      0 => x::PhoneticAlignmentValues::NoControl,
+      1 => x::PhoneticAlignmentValues::Left,
+      2 => x::PhoneticAlignmentValues::Center,
+      _ => x::PhoneticAlignmentValues::Distributed,
+    }),
+  };
+
+  if phonetic_text.is_empty() {
+    return Ok(ConvertedPhonetics {
+      runs: Vec::new(),
+      properties: Some(properties),
+      semantic_unmapped,
+      compatibility_unmapped,
+    });
+  }
+  if runs.is_empty() {
+    if *declared_run_count != 0 || base_text_length == 0 {
+      return Ok(ConvertedPhonetics {
+        runs: Vec::new(),
+        properties: Some(properties),
+        semantic_unmapped: true,
+        compatibility_unmapped,
+      });
+    }
+    // MS-XLS 2.5.219 says crun=0 still represents one phonetic run.
+    // LibreOffice core's RichString::createPhoneticPortions applies that
+    // implicit run to the entire base string.
+    let Some(text) = String::from_utf16(phonetic_text).ok() else {
+      return Ok(ConvertedPhonetics {
+        runs: Vec::new(),
+        properties: Some(properties),
+        semantic_unmapped: true,
+        compatibility_unmapped,
+      });
+    };
+    let ending_base_index = u32::try_from(base_text_length)
+      .map_err(|_| olecfsdk::Error::Limit("XLS phonetic base text exceeds u32".into()))?;
+    return Ok(ConvertedPhonetics {
+      runs: vec![x::PhoneticRun {
+        base_text_start_index: 0,
+        ending_base_index,
+        text: Box::new(Text(xstring(text))),
+      }],
+      properties: Some(properties),
+      semantic_unmapped,
+      compatibility_unmapped,
+    });
   }
 
-  let mut runs = Vec::with_capacity(source.format_runs.len() + 1);
-  let mut start = 0usize;
-  let mut properties = None;
-  let mut unmapped = false;
-  for format_run in &source.format_runs {
-    let boundary = usize::from(format_run.character_index);
-    if boundary > code_units.len() || boundary < start {
-      unmapped = true;
+  let mut converted = Vec::with_capacity(runs.len());
+  let mut previous_phonetic_start = None;
+  let mut previous_source_start = None;
+  let mut covered_source_characters = 0usize;
+  for (index, run) in runs.iter().enumerate() {
+    let phonetic_start = usize::from(run.phonetic_text_first_character);
+    let phonetic_end = runs.get(index + 1).map_or(phonetic_text.len(), |next| {
+      usize::from(next.phonetic_text_first_character)
+    });
+    let source_start = usize::from(run.source_text_first_character);
+    let source_count = usize::from(run.source_text_character_count);
+    let Some(source_end) = source_start.checked_add(source_count) else {
+      semantic_unmapped = true;
       continue;
-    }
-    if boundary > start {
-      runs.push(shared_string_run(
-        &code_units[start..boundary],
-        properties.clone(),
-      )?);
-      start = boundary;
-    }
-    // MS-XLS 2.5.132 says a FormatRun at the string length is undefined
-    // and must be ignored.
-    if boundary == code_units.len() {
-      continue;
-    }
-    properties = match view.font(format_run.font_index) {
-      Some(font) => {
-        let (converted, font_unmapped) = convert_run_properties(font)?;
-        unmapped |= font_unmapped;
-        Some(converted)
-      }
-      None => {
-        unmapped = true;
-        None
-      }
     };
+    covered_source_characters = covered_source_characters.saturating_add(source_count);
+    if previous_phonetic_start.is_some_and(|previous| previous >= phonetic_start)
+      || previous_source_start.is_some_and(|previous| previous >= source_start)
+      || phonetic_start >= phonetic_end
+      || phonetic_end > phonetic_text.len()
+      || source_start >= source_end
+      || source_end > base_text_length
+    {
+      semantic_unmapped = true;
+      continue;
+    }
+    previous_phonetic_start = Some(phonetic_start);
+    previous_source_start = Some(source_start);
+    let Some(text) = String::from_utf16(&phonetic_text[phonetic_start..phonetic_end]).ok() else {
+      semantic_unmapped = true;
+      continue;
+    };
+    converted.push(x::PhoneticRun {
+      base_text_start_index: u32::try_from(source_start)
+        .map_err(|_| olecfsdk::Error::Limit("XLS phonetic base index exceeds u32".into()))?,
+      ending_base_index: u32::try_from(source_end)
+        .map_err(|_| olecfsdk::Error::Limit("XLS phonetic base index exceeds u32".into()))?,
+      text: Box::new(Text(xstring(text))),
+    });
   }
-  if start < code_units.len() {
-    runs.push(shared_string_run(&code_units[start..], properties)?);
+  if covered_source_characters > base_text_length {
+    semantic_unmapped = true;
   }
-  Ok((
-    SharedStringItem {
-      run: runs,
-      ..Default::default()
-    },
-    unmapped,
-  ))
+  Ok(ConvertedPhonetics {
+    runs: converted,
+    properties: Some(properties),
+    semantic_unmapped,
+    compatibility_unmapped,
+  })
 }
 
 fn sst_code_units(source: &SstString) -> Vec<u16> {

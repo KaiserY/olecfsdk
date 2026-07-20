@@ -2065,8 +2065,18 @@ fn parse_property_set(
     return Err(Error::invalid(0, "invalid OLEPS property set size"));
   }
   let table_end = reader.position()? as usize;
-  let mut table = header.properties;
-  table.sort_by_key(|item| item.offset);
+  let table = header.properties;
+  // [MS-OLEPS] 2.21 PropertySet requires the
+  // PropertyIdentifierAndOffset sequence to be ordered by increasing Offset.
+  if table
+    .windows(2)
+    .any(|pair| pair[0].offset >= pair[1].offset)
+  {
+    return Err(Error::invalid(
+      8,
+      "OLEPS property table offsets are not strictly increasing",
+    ));
+  }
   let mut properties = Vec::with_capacity(table.len());
   for (index, item) in table.iter().enumerate() {
     let start = item.offset as usize;
@@ -2135,6 +2145,42 @@ mod tests {
     assert_eq!(
       typed.to_bytes().unwrap(),
       parsed.property_sets[0].properties[0].raw
+    );
+  }
+
+  #[test]
+  fn out_of_order_property_offsets_are_rejected() {
+    let value = PropertySetStream {
+      version: 0,
+      system_identifier: 0x0002_0005,
+      clsid: [0; 16],
+      property_sets: vec![PropertySet {
+        format_identifier: [0x2a; 16],
+        properties: vec![
+          Property {
+            identifier: 1,
+            offset: 24,
+            raw: vec![0x02, 0, 0, 0, 0xe4, 0x04, 0, 0],
+          },
+          Property {
+            identifier: 2,
+            offset: 32,
+            raw: vec![0x03, 0, 0, 0, 7, 0, 0, 0],
+          },
+        ],
+        prefix_padding: Vec::new(),
+      }],
+      trailing_padding: Vec::new(),
+    };
+    let mut bytes = value.to_bytes().unwrap();
+    // The one-set stream header is 48 bytes and the PropertySet header is 8;
+    // exchange its two 8-byte PropertyIdentifierAndOffset packets.
+    bytes[56..72].rotate_left(8);
+    let error = PropertySetStream::from_bytes(&bytes).unwrap_err();
+    assert!(
+      error
+        .to_string()
+        .contains("property table offsets are not strictly increasing")
     );
   }
 

@@ -162,7 +162,7 @@ with `into_owned` is the explicit full-feature fallback.
 | DOC | Word 97-2003 typed file root, document parts, text/formatting, paragraphs, sections, tables, fields, drawings and managed-stream rebuild |
 | XLS | BIFF8 typed workbook roots, sheets, cells, formulas/cached values, formatting, comments, hyperlinks, drawings and pointer relayout |
 | PPT | PowerPoint 97-2003 typed history/live views, slides, masters, notes, shapes, placeholders, text, pictures and persist relayout |
-| OOXML conversion | Direct typed DOC→DOCX (fields, bookmarks, notes/comments, textboxes, floating shapes/pictures), XLS→XLSX (rich shared strings, comments, and worksheet pictures), and PPT→PPTX (master/layout/notes, tables/media, legacy palette themes and slide transitions); shared OLEPS core properties, explicit loss policy, and source-located diagnostics |
+| OOXML conversion | Direct typed DOC→DOCX (fields, bookmarks, notes/comments, textboxes, floating shapes/pictures), XLS→XLSX (rich and phonetic shared strings, comments, and worksheet pictures), and PPT→PPTX (master/layout/notes, tables/media, legacy palette themes and slide transitions); shared OLEPS core properties, explicit loss policy, and source-located diagnostics |
 | Shared | OLE property sets, VBA, OfficeArt, Forms/ActiveX and host relationships |
 | Compatibility | Explicit diagnostics and preserving save policy; no silent downgrade of known structures |
 

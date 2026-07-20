@@ -228,6 +228,8 @@ pub enum ConversionCode {
   SheetKindNotMapped,
   SheetStateNotMapped,
   SharedStringRichTextNotMapped,
+  SharedStringPhoneticTextNotMapped,
+  SharedStringPhoneticCompatibilityNotMapped,
   CommentFormattingNotMapped,
   CellFormattingNotMapped,
   FormulaNotMapped,
