@@ -7567,6 +7567,7 @@ fn audit_workbook(
   diagnostics: &mut Vec<ParseDiagnostic>,
 ) -> Result<()> {
   audit_workbook_topology(workbook, strict, diagnostics)?;
+  audit_auto_filter_context(workbook, strict, diagnostics)?;
   let biff8 = workbook.tree.stream.is_biff8();
   for record in &workbook.tree.stream.records {
     match &record.data {
@@ -7662,6 +7663,37 @@ fn audit_workbook(
             "iObjectKind is {:#06x}, outside the specified 0x0010..=0x0012 range",
             value.object_kind
           ),
+        )?;
+      }
+      BiffRecordData::Guts(value)
+        if super::validate_guts(value, u64::from(record.offset)).is_err() =>
+      {
+        report_record_issue(
+          workbook,
+          record,
+          strict,
+          diagnostics,
+          xls_issue(ParseDiagnosticCode::NonconformingRecord, "Guts", "2.4.134"),
+          format!(
+            "iLevelRwMac/iLevelColMac values are outside 0 or 2 through 8 ({:#06x}, {:#06x})",
+            value.maximum_row_outline_level, value.maximum_column_outline_level
+          ),
+        )?;
+      }
+      BiffRecordData::PhoneticInfo(value)
+        if super::validate_phonetic_info(value, u64::from(record.offset)).is_err() =>
+      {
+        report_record_issue(
+          workbook,
+          record,
+          strict,
+          diagnostics,
+          xls_issue(
+            ParseDiagnosticCode::NonconformingRecord,
+            "PhoneticInfo",
+            "2.4.192",
+          ),
+          "Phs or SqRef fields violate the FontIndex, range-count, or Ref8 constraints".into(),
         )?;
       }
       BiffRecordData::ExtSst(value) => {
@@ -7807,6 +7839,109 @@ fn audit_workbook(
             format!("SST stopped at string {first_unparsed_string}: {reason}"),
           )?;
         }
+      }
+      _ => {}
+    }
+  }
+  Ok(())
+}
+
+fn audit_auto_filter_context(
+  workbook: &XlsWorkbookStream,
+  strict: bool,
+  diagnostics: &mut Vec<ParseDiagnostic>,
+) -> Result<()> {
+  let mut document_type = None;
+  let mut auto_filter_entries = None;
+  for record in &workbook.tree.stream.records {
+    if let BiffRecordData::Bof(value) = &record.data {
+      document_type = Some(value.document_type);
+      auto_filter_entries = None;
+    }
+    let allowed_substream = matches!(document_type, Some(0x0010 | 0x0040));
+    match &record.data {
+      BiffRecordData::FixedU16 {
+        kind: super::FixedU16RecordKind::AutoFilterInfo,
+        value,
+      } => {
+        let valid_count = (1..=256).contains(value);
+        let unique = auto_filter_entries.is_none();
+        if !allowed_substream || !valid_count || !unique {
+          report_record_issue(
+            workbook,
+            record,
+            strict,
+            diagnostics,
+            xls_issue(
+              ParseDiagnosticCode::NonconformingRecord,
+              "AutoFilterInfo",
+              "2.4.8",
+            ),
+            format!(
+              "cEntries={value} has invalid substream, range, or cardinality (unique={unique})"
+            ),
+          )?;
+        }
+        if allowed_substream && valid_count && unique {
+          auto_filter_entries = Some(*value);
+        }
+      }
+      BiffRecordData::AutoFilter(value) => {
+        if !allowed_substream
+          || auto_filter_entries.is_none_or(|entries| value.entry_index >= entries)
+        {
+          report_record_issue(
+            workbook,
+            record,
+            strict,
+            diagnostics,
+            xls_issue(
+              ParseDiagnosticCode::NonconformingRecord,
+              "AutoFilter",
+              "2.4.6",
+            ),
+            format!(
+              "iEntry={} is outside its worksheet/macro-sheet AutoFilterInfo",
+              value.entry_index
+            ),
+          )?;
+        }
+      }
+      BiffRecordData::AutoFilter12(value) => {
+        if !allowed_substream
+          || value.flags.worksheet
+            && auto_filter_entries.is_none_or(|entries| value.entry_index >= entries)
+        {
+          report_record_issue(
+            workbook,
+            record,
+            strict,
+            diagnostics,
+            xls_issue(
+              ParseDiagnosticCode::NonconformingRecord,
+              "AutoFilter12",
+              "2.4.7",
+            ),
+            format!(
+              "iEntry={} is outside its worksheet/macro-sheet AutoFilterInfo context",
+              value.entry_index
+            ),
+          )?;
+        }
+      }
+      BiffRecordData::SortData(_) if !allowed_substream => {
+        report_record_issue(
+          workbook,
+          record,
+          strict,
+          diagnostics,
+          xls_issue(
+            ParseDiagnosticCode::NonconformingRecord,
+            "SortData",
+            "2.4.264",
+          ),
+          "SortData is outside a worksheet or macro-sheet substream".into(),
+        )?;
       }
       _ => {}
     }
@@ -8195,9 +8330,10 @@ mod tests {
     cfb::Version,
     xls::{
       BiffUnicodeString, BofRecord, BoundSheet8Record, CellHeader, ChartEndObjectRecord,
-      ColInfoReserved, DevModeFields, DevModeWPublic, ExtSstRecord, FontAttributes, FontRecord,
-      FormatRecord, FormulaCachedResult, FormulaRecord, FormulaSpecialCachedResult, FormulaToken,
-      FormulaTokenStream, FormulaTokens, FrtFlags, FrtHeaderOld, IsstInf, NumberRecord,
+      ColInfoReserved, DevModeFields, DevModeWPublic, ExtSstRecord, FixedU16RecordKind,
+      FontAttributes, FontRecord, FormatRecord, FormulaCachedResult, FormulaRecord,
+      FormulaSpecialCachedResult, FormulaToken, FormulaTokenStream, FormulaTokens, FrtFlags,
+      FrtHeaderOld, GutsRecord, IsstInf, NumberRecord, PhoneticFlags, PhoneticInfoRecord,
       ShortXlUnicodeString, SupBookLink, XfRecord, XlStringCharacters,
     },
   };
@@ -8989,6 +9125,66 @@ mod tests {
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].structure, "BOF");
     assert_eq!(diagnostics[0].specification.section, "2.4.21");
+  }
+
+  #[test]
+  fn worksheet_must_fields_use_the_root_strictness_gate() {
+    let mut tree = BiffWorkbookTree::from_bytes(&workbook_bytes()).unwrap();
+    tree.stream.records.insert(
+      3,
+      record(
+        44,
+        BiffRecordData::Guts(GutsRecord {
+          unused1: 0,
+          unused2: 0,
+          maximum_row_outline_level: 1,
+          maximum_column_outline_level: 9,
+        }),
+      ),
+    );
+    tree.stream.records.insert(
+      4,
+      record(
+        56,
+        BiffRecordData::PhoneticInfo(PhoneticInfoRecord {
+          font_index: 4,
+          flags: PhoneticFlags::empty(),
+          range_count: 0,
+          ranges: Vec::new(),
+        }),
+      ),
+    );
+    tree.stream.records.insert(
+      5,
+      record(
+        64,
+        BiffRecordData::FixedU16 {
+          kind: FixedU16RecordKind::AutoFilterInfo,
+          value: 0,
+        },
+      ),
+    );
+    tree.relayout().unwrap();
+    let workbook = XlsWorkbookStream::from_tree(XlsStreamName::Workbook, tree).unwrap();
+
+    assert!(audit_workbook(&workbook, true, &mut Vec::new()).is_err());
+    let mut diagnostics = Vec::new();
+    audit_workbook(&workbook, false, &mut diagnostics).unwrap();
+    let guts = diagnostics
+      .iter()
+      .find(|diagnostic| diagnostic.structure == "Guts")
+      .expect("Guts diagnostic");
+    assert_eq!(guts.specification.section, "2.4.134");
+    let phonetic = diagnostics
+      .iter()
+      .find(|diagnostic| diagnostic.structure == "PhoneticInfo")
+      .expect("PhoneticInfo diagnostic");
+    assert_eq!(phonetic.specification.section, "2.4.192");
+    let auto_filter = diagnostics
+      .iter()
+      .find(|diagnostic| diagnostic.structure == "AutoFilterInfo")
+      .expect("AutoFilterInfo diagnostic");
+    assert_eq!(auto_filter.specification.section, "2.4.8");
   }
 
   #[test]

@@ -139,6 +139,7 @@ const SORT: u16 = 0x0090;
 const LH_RECORD: u16 = 0x0094;
 const SORT_DATA: u16 = 0x0895;
 const AUTO_FILTER: u16 = 0x009e;
+const WS_BOOL: u16 = 0x0081;
 const SYNC: u16 = 0x0097;
 const SX_FORMAT: u16 = 0x00fb;
 const W_OPT: u16 = 0x080b;
@@ -583,6 +584,7 @@ pub enum BiffRecordData {
     value: BoundSheet8Record,
   },
   Dimensions(DimensionsRecord),
+  WsBool(WsBoolRecord),
   Blank(BlankRecord),
   Number(NumberRecord),
   BoolErr(BoolErrRecord),
@@ -2286,7 +2288,6 @@ pub enum FixedU16RecordKind {
   RefreshAll,
   PasswordRev4,
   ChartUnits,
-  WsBool,
   PrintSize,
   StandardWidth,
 }
@@ -2324,6 +2325,7 @@ pub struct CellHeader {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_dimensions")]
 pub struct DimensionsRecord {
   pub first_row: u32,
   pub last_row_exclusive: u32,
@@ -2333,6 +2335,60 @@ pub struct DimensionsRecord {
   /// POI-61045 compatibility field found after the specified payload.
   #[sdk(optional_remaining)]
   pub compatibility_extra: Option<u16>,
+}
+
+fn validate_dimensions(value: &DimensionsRecord, position: u64) -> Result<()> {
+  if value.first_row > 0x0000_ffff
+    || value.last_row_exclusive > 0x0001_0000
+    || value.first_column > 0x00ff
+    || value.last_column_exclusive > 0x0100
+    || value.reserved != 0
+  {
+    return Err(Error::invalid(position, "Dimensions fields are invalid"));
+  }
+  Ok(())
+}
+
+/// MS-XLS WsBool worksheet properties.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u16")]
+pub struct WsBoolRecord {
+  #[sdk(bit = 0)]
+  pub show_automatic_page_breaks: bool,
+  #[sdk(bits = 1..=3)]
+  pub reserved1: u8,
+  #[sdk(bit = 4)]
+  pub dialog: bool,
+  #[sdk(bit = 5)]
+  pub apply_outline_styles: bool,
+  #[sdk(bit = 6)]
+  pub summary_rows_below: bool,
+  /// Relative to sheet display direction; see MS-XLS fColSumsRight.
+  #[sdk(bit = 7)]
+  pub summary_columns_opposite_default_side: bool,
+  #[sdk(bit = 8)]
+  pub fit_to_page: bool,
+  #[sdk(bit = 9)]
+  pub reserved2: bool,
+  #[sdk(bits = 10..=11)]
+  pub unused: u8,
+  #[sdk(bit = 12)]
+  pub synchronize_horizontal: bool,
+  #[sdk(bit = 13)]
+  pub synchronize_vertical: bool,
+  #[sdk(bit = 14)]
+  pub transition_formula_evaluation: bool,
+  #[sdk(bit = 15)]
+  pub transition_formula_entry: bool,
+}
+
+impl WsBoolRecord {
+  fn validate(self, position: u64) -> Result<()> {
+    if self.reserved1 != 0 || self.reserved2 {
+      return Err(Error::invalid(position, "WsBool reserved bits are nonzero"));
+    }
+    Ok(())
+  }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
@@ -2396,10 +2452,10 @@ pub struct RowRecord {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct Window1Record {
-  pub horizontal_position: u16,
-  pub vertical_position: u16,
-  pub width: u16,
-  pub height: u16,
+  pub horizontal_position: i16,
+  pub vertical_position: i16,
+  pub width: i16,
+  pub height: i16,
   pub flags: u16,
   pub active_sheet: u16,
   pub first_visible_tab: u16,
@@ -2413,7 +2469,9 @@ pub struct PaneRecord {
   pub vertical_split: u16,
   pub top_row: u16,
   pub left_column: u16,
-  pub active_pane: u16,
+  pub active_pane: u8,
+  /// Reserved by MS-XLS and retained for an exact physical round trip.
+  pub reserved: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2435,10 +2493,25 @@ pub enum ColInfoReserved {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct GutsRecord {
-  pub row_gutter: u16,
-  pub column_gutter: u16,
+  /// Undefined by MS-XLS and retained for an exact physical round trip.
+  pub unused1: u16,
+  /// Undefined by MS-XLS and retained for an exact physical round trip.
+  pub unused2: u16,
   pub maximum_row_outline_level: u16,
   pub maximum_column_outline_level: u16,
+}
+
+fn validate_guts(value: &GutsRecord, position: u64) -> Result<()> {
+  let valid_level = |level| level == 0 || (2..=8).contains(&level);
+  if !valid_level(value.maximum_row_outline_level)
+    || !valid_level(value.maximum_column_outline_level)
+  {
+    return Err(Error::invalid(
+      position,
+      "Guts maximum outline level is invalid",
+    ));
+  }
+  Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
@@ -2459,14 +2532,43 @@ pub struct SclRecord {
   pub denominator: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkBitfield)]
+#[sdk(repr = "u16")]
+pub struct PrintSetupOptions {
+  #[sdk(bit = 0)]
+  pub left_to_right: bool,
+  #[sdk(bit = 1)]
+  pub portrait: bool,
+  #[sdk(bit = 2)]
+  pub no_printer_settings: bool,
+  #[sdk(bit = 3)]
+  pub black_and_white: bool,
+  #[sdk(bit = 4)]
+  pub draft: bool,
+  #[sdk(bit = 5)]
+  pub print_comments: bool,
+  #[sdk(bit = 6)]
+  pub no_orientation: bool,
+  #[sdk(bit = 7)]
+  pub use_first_page_number: bool,
+  #[sdk(bit = 8)]
+  pub unused: bool,
+  #[sdk(bit = 9)]
+  pub comments_at_end: bool,
+  #[sdk(bits = 10..=11)]
+  pub print_errors: u8,
+  #[sdk(bits = 12..=15)]
+  pub reserved: u8,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct PrintSetupRecord {
   pub paper_size: u16,
   pub scale: u16,
-  pub page_start: u16,
+  pub page_start: i16,
   pub fit_width: u16,
   pub fit_height: u16,
-  pub flags: u16,
+  pub options: PrintSetupOptions,
   pub horizontal_resolution: u16,
   pub vertical_resolution: u16,
   /// Exact IEEE-754 bits.
@@ -5366,10 +5468,21 @@ pub struct SxVsRecord {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_recalc_id")]
 pub struct RecalcIdRecord {
   pub record_type: u16,
   pub reserved: u16,
   pub engine_build: u32,
+}
+
+fn validate_recalc_id(value: &RecalcIdRecord, position: u64) -> Result<()> {
+  if value.record_type != 449 || value.reserved != 0 {
+    return Err(Error::invalid(
+      position,
+      "RecalcId header fields are invalid",
+    ));
+  }
+  Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
@@ -6878,9 +6991,21 @@ fn validate_chart_end_object(value: &ChartEndObjectRecord, position: u64) -> Res
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_compat12")]
 pub struct Compat12Record {
   pub header: FrtHeader,
   pub no_compatibility_check: u32,
+}
+
+fn validate_compat12(value: &Compat12Record, position: u64) -> Result<()> {
+  validate_frt_header(value.header, COMPAT12, position, "Compat12")?;
+  if value.no_compatibility_check > 1 {
+    return Err(Error::invalid(
+      position,
+      "Compat12 fNoCompatChk is not a Boolean",
+    ));
+  }
+  Ok(())
 }
 
 bitflags::bitflags! {
@@ -7148,6 +7273,7 @@ pub struct CrtLayout12ARecord {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_mtr_settings")]
 pub struct MtrSettingsRecord {
   pub header: FrtHeader,
   pub enabled: u32,
@@ -7155,10 +7281,50 @@ pub struct MtrSettingsRecord {
   pub thread_count: i32,
 }
 
+fn validate_mtr_settings(value: &MtrSettingsRecord, position: u64) -> Result<()> {
+  validate_frt_header(value.header, MTR_SETTINGS, position, "MTRSettings")?;
+  if value.enabled > 1 || value.user_set_thread_count > 1 {
+    return Err(Error::invalid(
+      position,
+      "MTRSettings Boolean fields are invalid",
+    ));
+  }
+  if value.enabled == 1
+    && value.user_set_thread_count == 1
+    && !(1..=1024).contains(&value.thread_count)
+  {
+    return Err(Error::invalid(
+      position,
+      "MTRSettings user thread count is outside 1..=1024",
+    ));
+  }
+  Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_force_full_calculation")]
 pub struct ForceFullCalculationRecord {
   pub header: FrtHeader,
   pub ignore_dependencies: u32,
+}
+
+fn validate_force_full_calculation(
+  value: &ForceFullCalculationRecord,
+  position: u64,
+) -> Result<()> {
+  validate_frt_header(
+    value.header,
+    FORCE_FULL_CALCULATION,
+    position,
+    "ForceFullCalculation",
+  )?;
+  if value.ignore_dependencies > 1 {
+    return Err(Error::invalid(
+      position,
+      "ForceFullCalculation fNoDeps is not a Boolean",
+    ));
+  }
+  Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
@@ -7170,9 +7336,26 @@ pub struct XfCrcRecord {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_compress_pictures")]
 pub struct CompressPicturesRecord {
   pub header: FrtHeader,
   pub auto_compress_pictures: u32,
+}
+
+fn validate_compress_pictures(value: &CompressPicturesRecord, position: u64) -> Result<()> {
+  validate_frt_header(
+    value.header,
+    COMPRESS_PICTURES,
+    position,
+    "CompressPictures",
+  )?;
+  if value.auto_compress_pictures > 1 {
+    return Err(Error::invalid(
+      position,
+      "CompressPictures fAutoCompressPictures is not a Boolean",
+    ));
+  }
+  Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8760,7 +8943,7 @@ impl XctRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
 pub struct DefaultRowHeightRecord {
   pub flags: u16,
-  pub height: u16,
+  pub height: i16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8795,7 +8978,9 @@ pub struct Window2Record {
   pub flags: Window2Flags,
   pub top_row: u16,
   pub left_column: u16,
-  pub header_color: u32,
+  pub header_color: u16,
+  /// Reserved by MS-XLS and retained for an exact physical round trip.
+  pub reserved2: u16,
   pub extension: Window2Extension,
 }
 
@@ -8805,8 +8990,18 @@ pub enum Window2Extension {
   Zoom {
     page_break_zoom: u16,
     normal_zoom: u16,
-    reserved: Option<u32>,
+    /// Present in the normative 18-byte worksheet form and absent in the
+    /// 14-byte producer-compatibility form documented by Apache POI.
+    trailing: Option<Window2Trailing>,
   },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+pub struct Window2Trailing {
+  /// Undefined by MS-XLS and retained for an exact physical round trip.
+  pub unused: u16,
+  /// Reserved by MS-XLS and retained for an exact physical round trip.
+  pub reserved3: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
@@ -8814,7 +9009,7 @@ pub struct SelectionRecord {
   pub pane: u8,
   pub active_row: u16,
   pub active_column: u16,
-  pub active_reference_index: u16,
+  pub active_reference_index: i16,
   pub reference_count: u16,
   #[sdk(count = "reference_count")]
   pub references: Vec<SelectionReference>,
@@ -8829,9 +9024,20 @@ pub struct SelectionReference {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
+#[sdk(validate_at = "validate_sync")]
 pub struct SyncRecord {
   pub row: u16,
   pub column: u16,
+}
+
+fn validate_sync(value: &SyncRecord, position: u64) -> Result<()> {
+  if value.column > 0x00ff {
+    return Err(Error::invalid(
+      position,
+      "Sync column exceeds the BIFF8 column range",
+    ));
+  }
+  Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SdkObject)]
@@ -8871,6 +9077,46 @@ bitflags::bitflags! {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhoneticType {
+  NarrowKatakana,
+  WideKatakana,
+  Hiragana,
+  Any,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhoneticAlignment {
+  General,
+  Left,
+  Center,
+  Distributed,
+}
+
+impl PhoneticFlags {
+  pub const fn phonetic_type(self) -> PhoneticType {
+    match self.bits() & 0x0003 {
+      0 => PhoneticType::NarrowKatakana,
+      1 => PhoneticType::WideKatakana,
+      2 => PhoneticType::Hiragana,
+      _ => PhoneticType::Any,
+    }
+  }
+
+  pub const fn alignment(self) -> PhoneticAlignment {
+    match (self.bits() >> 2) & 0x0003 {
+      0 => PhoneticAlignment::General,
+      1 => PhoneticAlignment::Left,
+      2 => PhoneticAlignment::Center,
+      _ => PhoneticAlignment::Distributed,
+    }
+  }
+
+  pub const fn unused_bits(self) -> u16 {
+    self.bits() & 0xfff0
+  }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, SdkObject)]
 pub struct PhoneticInfoRecord {
   pub font_index: u16,
@@ -8879,6 +9125,22 @@ pub struct PhoneticInfoRecord {
   pub range_count: u16,
   #[sdk(count = "range_count")]
   pub ranges: Vec<CellRange>,
+}
+
+fn validate_phonetic_info(value: &PhoneticInfoRecord, position: u64) -> Result<()> {
+  if value.font_index == 4
+    || value.font_index > 1022
+    || value.range_count > 0x2000
+    || usize::from(value.range_count) != value.ranges.len()
+    || value.ranges.iter().any(|range| {
+      range.first_row > range.last_row
+        || range.first_column > range.last_column
+        || range.last_column > 0x00ff
+    })
+  {
+    return Err(Error::invalid(position, "PhoneticInfo fields are invalid"));
+  }
+  Ok(())
 }
 
 bitflags::bitflags! {
@@ -17953,6 +18215,7 @@ impl QsirRecord {
 
 impl SdkRead for AutoFilter12Criterion {
   fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+    let position = reader.position()?;
     let mut operand = AutoFilterOperand::read_fixed(reader)?;
     if matches!(operand.value, AutoFilterOperandValue::Rk { .. }) {
       return Err(Error::invalid(
@@ -18000,6 +18263,7 @@ impl SdkRead for AutoFilter12Criterion {
         usize::from(declared_character_count),
       )?);
     }
+    operand.validate(position, false)?;
     Ok(Self {
       operand,
       string_unused,
@@ -18009,6 +18273,7 @@ impl SdkRead for AutoFilter12Criterion {
 
 impl SdkWrite for AutoFilter12Criterion {
   fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+    let position = writer.position()?;
     if matches!(self.operand.value, AutoFilterOperandValue::Rk { .. }) {
       return Err(Error::invalid(
         writer.position()?,
@@ -18040,10 +18305,11 @@ impl SdkWrite for AutoFilter12Criterion {
       )
     {
       return Err(Error::invalid(
-        writer.position()?,
+        position,
         "AutoFilter12 criterion string extension presence is invalid",
       ));
     }
+    self.operand.validate(position, false)?;
     self.operand.write_fixed(writer)?;
     if let Some(unused) = self.string_unused {
       writer.write_u32(unused)?;
@@ -19500,8 +19766,59 @@ impl SheetExtOptionalFlags {
   }
 }
 
+fn valid_sheet_tab_color_index(value: u8) -> bool {
+  (0x08..=0x3f).contains(&value) || value == 0x7f
+}
+
+fn valid_color_icv(value: u32) -> bool {
+  (1..=0x3f).contains(&value) || value == 0x48
+}
+
+impl CfColor {
+  fn validate(self, position: u64, allow_auto: bool) -> Result<()> {
+    let tint = f64::from_bits(self.tint_bits);
+    let valid_value = match self.color_type {
+      0 => allow_auto,
+      1 => valid_color_icv(self.color_value),
+      2 => true,
+      3 => self.color_value <= 0x0b,
+      _ => false,
+    };
+    if !valid_value || !tint.is_finite() || !(-1.0..=1.0).contains(&tint) {
+      return Err(Error::invalid(position, "CFColor fields are invalid"));
+    }
+    Ok(())
+  }
+}
+
+impl SheetExtRecord {
+  fn validate(&self, position: u64) -> Result<()> {
+    let expected_size = if self.optional.is_some() { 40 } else { 20 };
+    if self.header.record_type != SHEET_EXT
+      || !self.header.flags.is_empty()
+      || self.header.reserved != 0
+      || self.declared_size != expected_size
+      || self.tab_color.reserved != 0
+      || !valid_sheet_tab_color_index(self.tab_color.color_index)
+    {
+      return Err(Error::invalid(position, "SheetExt fields are invalid"));
+    }
+    if let Some(optional) = self.optional {
+      if optional.flags.reserved != 0 || !valid_sheet_tab_color_index(optional.flags.color_index) {
+        return Err(Error::invalid(
+          position,
+          "SheetExt optional flags are invalid",
+        ));
+      }
+      optional.color.validate(position, true)?;
+    }
+    Ok(())
+  }
+}
+
 impl SdkRead for SheetExtRecord {
   fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
+    let position = reader.position()?;
     let header = FrtHeader::read_from(reader)?;
     let declared_size = reader.read_u32()?;
     let tab_color = SheetExtColorIndex::from_bits(reader.read_u32()?);
@@ -19518,24 +19835,20 @@ impl SdkRead for SheetExtRecord {
         ));
       }
     };
-    Ok(Self {
+    let value = Self {
       header,
       declared_size,
       tab_color,
       optional,
-    })
+    };
+    value.validate(position)?;
+    Ok(value)
   }
 }
 
 impl SdkWrite for SheetExtRecord {
   fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-    let expected_size = if self.optional.is_some() { 40 } else { 20 };
-    if self.declared_size != expected_size {
-      return Err(Error::invalid(
-        writer.position()?,
-        "SheetExt cb does not match its static shape",
-      ));
-    }
+    self.validate(writer.position()?)?;
     self.header.write_to(writer)?;
     writer.write_u32(self.declared_size)?;
     writer.write_u32(self.tab_color.bits())?;
@@ -21286,18 +21599,19 @@ impl SdkRead for Window2Record {
     let flags = Window2Flags::from_bits_retain(reader.read_u16()?);
     let top_row = reader.read_u16()?;
     let left_column = reader.read_u16()?;
-    let header_color = reader.read_u32()?;
+    let header_color = reader.read_u16()?;
+    let reserved2 = reader.read_u16()?;
     let extension = match reader.remaining()? {
       0 => Window2Extension::None,
       4 => Window2Extension::Zoom {
         page_break_zoom: reader.read_u16()?,
         normal_zoom: reader.read_u16()?,
-        reserved: None,
+        trailing: None,
       },
       8 => Window2Extension::Zoom {
         page_break_zoom: reader.read_u16()?,
         normal_zoom: reader.read_u16()?,
-        reserved: Some(reader.read_u32()?),
+        trailing: Some(Window2Trailing::read_from(reader)?),
       },
       remaining => {
         return Err(Error::invalid(
@@ -21311,6 +21625,7 @@ impl SdkRead for Window2Record {
       top_row,
       left_column,
       header_color,
+      reserved2,
       extension,
     })
   }
@@ -21321,18 +21636,19 @@ impl SdkWrite for Window2Record {
     writer.write_u16(self.flags.bits())?;
     writer.write_u16(self.top_row)?;
     writer.write_u16(self.left_column)?;
-    writer.write_u32(self.header_color)?;
+    writer.write_u16(self.header_color)?;
+    writer.write_u16(self.reserved2)?;
     match self.extension {
       Window2Extension::None => {}
       Window2Extension::Zoom {
         page_break_zoom,
         normal_zoom,
-        reserved,
+        trailing,
       } => {
         writer.write_u16(page_break_zoom)?;
         writer.write_u16(normal_zoom)?;
-        if let Some(value) = reserved {
-          writer.write_u32(value)?;
+        if let Some(value) = trailing {
+          value.write_to(writer)?;
         }
       }
     }
@@ -22286,16 +22602,56 @@ impl SortDataOptions {
   }
 }
 
+impl Rfx {
+  fn validate(self, position: u64) -> Result<()> {
+    if self.first_row > self.last_row
+      || self.first_column > self.last_column
+      || self.last_row > 0x000f_ffff
+      || self.last_column > 0x0000_3fff
+    {
+      return Err(Error::invalid(position, "RFX cell range is invalid"));
+    }
+    Ok(())
+  }
+}
+
+impl SortDataRecord {
+  fn validate(&self, position: u64) -> Result<()> {
+    if self.header.record_type != SORT_DATA
+      || !self.header.flags.is_empty()
+      || self.header.reserved != 0
+      || usize::try_from(self.condition_count).ok() != Some(self.conditions.len())
+    {
+      return Err(Error::invalid(position, "SortData fields are invalid"));
+    }
+    self.range.validate(position)?;
+    for continuation in &self.conditions {
+      if continuation.header.record_type != CONTINUE_FRT12 || !continuation.header.flags.is_empty()
+      {
+        return Err(Error::invalid(
+          position,
+          "SortData continuation header is invalid",
+        ));
+      }
+      continuation.condition.validate(position)?;
+    }
+    Ok(())
+  }
+}
+
 impl SdkRead for SortDataRecord {
   fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
     let header = FrtHeader::read_from(reader)?;
-    if header.record_type != SORT_DATA {
+    if header.record_type != SORT_DATA || !header.flags.is_empty() || header.reserved != 0 {
       return Err(Error::invalid(0, "SortData FRT record type mismatch"));
     }
+    let options = SortDataOptions::from_bits(reader.read_u16()?)?;
+    let range = Rfx::read_from(reader)?;
+    range.validate(0)?;
     Ok(Self {
       header,
-      options: SortDataOptions::from_bits(reader.read_u16()?)?,
-      range: Rfx::read_from(reader)?,
+      options,
+      range,
       condition_count: reader.read_u32()?,
       parent_id: reader.read_u32()?,
       conditions: Vec::new(),
@@ -22305,9 +22661,7 @@ impl SdkRead for SortDataRecord {
 
 impl SdkWrite for SortDataRecord {
   fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-    if self.header.record_type != SORT_DATA {
-      return Err(Error::invalid(0, "SortData FRT record type mismatch"));
-    }
+    self.validate(writer.position()?)?;
     self.header.write_to(writer)?;
     writer.write_u16(self.options.bits()?)?;
     self.range.write_to(writer)?;
@@ -22320,7 +22674,11 @@ impl SdkRead for SortCondition {
   fn read_from<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
     let flags = reader.read_u16()?;
     let sort_on = ((flags >> 1) & 0x0f) as u8;
+    if flags >> 5 != 0 {
+      return Err(Error::invalid(0, "SortCond12 reserved flags are nonzero"));
+    }
     let range = Rfx::read_from(reader)?;
+    range.validate(0)?;
     let data = match sort_on {
       0 => SortConditionData::Value {
         value: reader.read_u32()?,
@@ -22356,24 +22714,91 @@ impl SdkRead for SortCondition {
           .map_err(|_| Error::Limit("SortCond12 custom list exceeds usize".into()))?,
       )?)
     };
-    Ok(Self {
+    let value = Self {
       descending: flags & 1 != 0,
-      reserved: flags >> 5,
+      reserved: 0,
       range,
       data,
       custom_list,
-    })
+    };
+    value.validate(0)?;
+    Ok(value)
+  }
+}
+
+impl SortCondition {
+  fn validate(&self, position: u64) -> Result<()> {
+    if self.reserved != 0 {
+      return Err(Error::invalid(
+        position,
+        "SortCond12 reserved flags are nonzero",
+      ));
+    }
+    self.range.validate(position)?;
+    match self.data {
+      SortConditionData::Value { value, reserved } if value != 0 || reserved != 0 => {
+        return Err(Error::invalid(
+          position,
+          "value SortCond12 conditional data is nonzero",
+        ));
+      }
+      SortConditionData::CellColor { reserved, .. }
+      | SortConditionData::FontColor { reserved, .. }
+        if reserved != 0 =>
+      {
+        return Err(Error::invalid(
+          position,
+          "color SortCond12 reserved data is nonzero",
+        ));
+      }
+      SortConditionData::Icon {
+        icon_set,
+        icon_index,
+      } => {
+        let set = KpiSet::from_raw(icon_set)
+          .ok_or_else(|| Error::invalid(position, "SortCond12 icon set is invalid"))?;
+        let maximum = match set {
+          KpiSet::None if icon_index == -1 => -1,
+          KpiSet::None => {
+            return Err(Error::invalid(position, "SortCond12 icon index is invalid"));
+          }
+          KpiSet::ThreeArrows
+          | KpiSet::ThreeArrowsGray
+          | KpiSet::ThreeFlags
+          | KpiSet::ThreeTrafficLights1
+          | KpiSet::ThreeTrafficLights2
+          | KpiSet::ThreeSigns
+          | KpiSet::ThreeSymbols
+          | KpiSet::ThreeSymbols2 => 2,
+          KpiSet::FourArrows
+          | KpiSet::FourArrowsGray
+          | KpiSet::FourRedToBlack
+          | KpiSet::FourRating
+          | KpiSet::FourTrafficLights => 3,
+          KpiSet::FiveArrows
+          | KpiSet::FiveArrowsGray
+          | KpiSet::FiveRating
+          | KpiSet::FiveQuarters => 4,
+        };
+        if !(-1..=maximum).contains(&icon_index) {
+          return Err(Error::invalid(position, "SortCond12 icon index is invalid"));
+        }
+      }
+      _ => {}
+    }
+    if !matches!(self.data, SortConditionData::Value { .. }) && self.custom_list.is_some() {
+      return Err(Error::invalid(
+        position,
+        "non-value SortCond12 has a custom sort list",
+      ));
+    }
+    Ok(())
   }
 }
 
 impl SdkWrite for SortCondition {
   fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-    if self.reserved > 0x07ff {
-      return Err(Error::invalid(
-        0,
-        "SortCond12 reserved flags exceed 11 bits",
-      ));
-    }
+    self.validate(writer.position()?)?;
     let sort_on = match self.data {
       SortConditionData::Value { .. } => 0u16,
       SortConditionData::CellColor { .. } => 1,
@@ -22429,20 +22854,12 @@ impl SdkWrite for SortCondition {
 
 impl SortDataRecord {
   fn encode_physical(&self) -> Result<Vec<EncodedBiffRecord>> {
-    if usize::try_from(self.condition_count).ok() != Some(self.conditions.len()) {
-      return Err(Error::invalid(0, "SortData condition count mismatch"));
-    }
+    self.validate(0)?;
     let mut records = vec![EncodedBiffRecord {
       record_type: SORT_DATA,
       payload: encode_sdk(self)?,
     }];
     for continuation in &self.conditions {
-      if continuation.header.record_type != CONTINUE_FRT12 {
-        return Err(Error::invalid(
-          0,
-          "SortCond12 continuation record type mismatch",
-        ));
-      }
       let mut writer = Writer::new(Cursor::new(Vec::new()));
       continuation.header.write_to(&mut writer)?;
       continuation.condition.write_to(&mut writer)?;
@@ -22487,6 +22904,90 @@ impl AutoFilterOptions {
 }
 
 impl AutoFilterOperand {
+  fn validate(&self, position: u64, allow_rk: bool) -> Result<()> {
+    if !matches!(self.value, AutoFilterOperandValue::Unused { .. })
+      && !(1..=6).contains(&self.comparison)
+    {
+      return Err(Error::invalid(
+        position,
+        "AutoFilter operand comparison is invalid",
+      ));
+    }
+    match self.value {
+      AutoFilterOperandValue::Unused { .. } => {}
+      AutoFilterOperandValue::Rk { .. } if !allow_rk => {
+        return Err(Error::invalid(
+          position,
+          "AutoFilter12 criterion cannot use an RK operand",
+        ));
+      }
+      AutoFilterOperandValue::String {
+        declared_character_count,
+        compare_without_wildcards,
+        reserved,
+        ..
+      } => {
+        if declared_character_count == 0 || compare_without_wildcards > 1 || reserved != 0 {
+          return Err(Error::invalid(
+            position,
+            "AutoFilter string operand fields are invalid",
+          ));
+        }
+        let Some(string) = &self.string else {
+          return Err(Error::invalid(
+            position,
+            "AutoFilter string operand lacks text",
+          ));
+        };
+        if string.character_count() != usize::from(declared_character_count) {
+          return Err(Error::invalid(
+            position,
+            "AutoFilter string length mismatch",
+          ));
+        }
+      }
+      AutoFilterOperandValue::BooleanOrError { value, .. } => {
+        let [raw, is_error] = value.to_le_bytes();
+        if !(matches!((is_error, raw), (0, 0 | 1))
+          || is_error == 1 && CellErrorCode::from_raw(raw).is_some())
+        {
+          return Err(Error::invalid(
+            position,
+            "AutoFilter Boolean/error operand is invalid",
+          ));
+        }
+      }
+      AutoFilterOperandValue::Blanks { reserved }
+      | AutoFilterOperandValue::NonBlanks { reserved }
+        if reserved != 0 =>
+      {
+        return Err(Error::invalid(
+          position,
+          "AutoFilter blank operand reserved bytes are nonzero",
+        ));
+      }
+      _ => {}
+    }
+    if !matches!(self.value, AutoFilterOperandValue::String { .. }) && self.string.is_some() {
+      return Err(Error::invalid(
+        position,
+        "non-string AutoFilter operand has text",
+      ));
+    }
+    Ok(())
+  }
+
+  fn is_simple(&self) -> bool {
+    matches!(
+      self.value,
+      AutoFilterOperandValue::String {
+        compare_without_wildcards: 1,
+        ..
+      } | AutoFilterOperandValue::Blanks { .. }
+        | AutoFilterOperandValue::NonBlanks { .. }
+    )
+  }
+
   fn read_fixed<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Self> {
     let value_type = reader.read_u8()?;
     let comparison = reader.read_u8()?;
@@ -22609,16 +23110,43 @@ impl SdkRead for AutoFilterRecord {
         )?);
       }
     }
-    Ok(Self {
+    let value = Self {
       entry_index,
       options,
       operands,
-    })
+    };
+    value.validate(0)?;
+    Ok(value)
+  }
+}
+
+impl AutoFilterRecord {
+  fn validate(&self, position: u64) -> Result<()> {
+    if self.options.top_n {
+      if !(1..=500).contains(&self.options.top_count) {
+        return Err(Error::invalid(
+          position,
+          "AutoFilter Top-N count is outside 1 through 500",
+        ));
+      }
+      return Ok(());
+    }
+    for (index, operand) in self.operands.iter().enumerate() {
+      operand.validate(position, true)?;
+      if self.options.simple[index] != operand.is_simple() {
+        return Err(Error::invalid(
+          position,
+          "AutoFilter simple flag disagrees with its operand",
+        ));
+      }
+    }
+    Ok(())
   }
 }
 
 impl SdkWrite for AutoFilterRecord {
   fn write_to<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+    self.validate(writer.position()?)?;
     writer.write_u16(self.entry_index)?;
     writer.write_u16(self.options.bits()?)?;
     for operand in &self.operands {
@@ -26746,6 +27274,10 @@ impl BiffRecordData {
       Self::BoundSheet8(value) => (BOUND_SHEET8, value.to_bytes()?),
       Self::BoundSheet8Compatibility { record_type, value } => (*record_type, value.to_bytes()?),
       Self::Dimensions(value) => (DIMENSIONS, encode_sdk(value)?),
+      Self::WsBool(value) => {
+        value.validate(0)?;
+        (WS_BOOL, encode_sdk(value)?)
+      }
       Self::Blank(value) => (BLANK, encode_sdk(value)?),
       Self::Number(value) => (NUMBER, encode_sdk(value)?),
       Self::BoolErr(value) => (BOOL_ERR, encode_sdk(value)?),
@@ -29359,7 +29891,9 @@ fn validate_remaining_static_record_context(records: &[BiffRecord]) -> Result<()
       {
         return Err(Error::invalid(position, "CrErr string is incomplete"));
       }
-      BiffRecordData::AutoFilter12(value) if matches!(document_type, Some(0x0010 | 0x0040)) => {
+      BiffRecordData::AutoFilter(value) => value.validate(position)?,
+      BiffRecordData::SortData(value) => value.validate(position)?,
+      BiffRecordData::AutoFilter12(value) => {
         value.validate(position)?;
         if value.user_view_guid != [0; 16]
           && records[..index]
@@ -29377,12 +29911,6 @@ fn validate_remaining_static_record_context(records: &[BiffRecord]) -> Result<()
             "AutoFilter12 user-view GUID has no matching preceding UserSViewBegin",
           ));
         }
-      }
-      BiffRecordData::AutoFilter12(_) => {
-        return Err(Error::invalid(
-          position,
-          "AutoFilter12 is outside a worksheet or macro-sheet substream",
-        ));
       }
       BiffRecordData::FrtWrapper(_) if document_type != Some(0x0020) || chart_object_depth == 0 => {
         return Err(Error::invalid(
@@ -29607,6 +30135,11 @@ fn decode_record(
           offset,
           record_type,
         )?)),
+        WS_BOOL => {
+          let value: WsBoolRecord = parse_sdk(payload, offset, record_type)?;
+          value.validate(offset as u64)?;
+          Some(BiffRecordData::WsBool(value))
+        }
         FORMULA => Some(BiffRecordData::Formula(parse_sdk(
           payload,
           offset,
@@ -31249,7 +31782,6 @@ impl FixedU16RecordKind {
       0x01b7 => Self::RefreshAll,
       0x01bc => Self::PasswordRev4,
       0x1001 => Self::ChartUnits,
-      0x0081 => Self::WsBool,
       0x0033 => Self::PrintSize,
       0x0099 => Self::StandardWidth,
       _ => return None,
@@ -31289,7 +31821,6 @@ impl FixedU16RecordKind {
       Self::RefreshAll => 0x01b7,
       Self::PasswordRev4 => 0x01bc,
       Self::ChartUnits => 0x1001,
-      Self::WsBool => 0x0081,
       Self::PrintSize => 0x0033,
       Self::StandardWidth => 0x0099,
     }
@@ -31562,6 +32093,25 @@ mod tests {
         SYNC,
         vec![2, 0, 3, 0],
         BiffRecordData::Sync(SyncRecord { row: 2, column: 3 }),
+      ),
+      (
+        WS_BOOL,
+        vec![0xa1, 0x59],
+        BiffRecordData::WsBool(WsBoolRecord {
+          show_automatic_page_breaks: true,
+          reserved1: 0,
+          dialog: false,
+          apply_outline_styles: true,
+          summary_rows_below: false,
+          summary_columns_opposite_default_side: true,
+          fit_to_page: true,
+          reserved2: false,
+          unused: 2,
+          synchronize_horizontal: true,
+          synchronize_vertical: false,
+          transition_formula_evaluation: true,
+          transition_formula_entry: false,
+        }),
       ),
       (
         SX_NUM,
@@ -34215,6 +34765,457 @@ mod tests {
   }
 
   #[test]
+  fn worksheet_view_records_keep_normative_field_boundaries() {
+    let window1 = Window1Record {
+      horizontal_position: -120,
+      vertical_position: 240,
+      width: 16_384,
+      height: 8_192,
+      flags: 0x003a,
+      active_sheet: 2,
+      first_visible_tab: 1,
+      selected_tab_count: 2,
+      tab_width_ratio: 600,
+    };
+    let window1_bytes = encode_sdk(&window1).unwrap();
+    assert_eq!(window1_bytes.len(), 18);
+    assert_eq!(
+      parse_sdk::<Window1Record>(&window1_bytes, 0, WINDOW1).unwrap(),
+      window1
+    );
+
+    let pane = PaneRecord {
+      horizontal_split: 4,
+      vertical_split: 3,
+      top_row: 6,
+      left_column: 5,
+      active_pane: 0,
+      reserved: 0xa5,
+    };
+    let pane_bytes = encode_sdk(&pane).unwrap();
+    assert_eq!(&pane_bytes[8..], &[0x00, 0xa5]);
+    assert_eq!(parse_sdk::<PaneRecord>(&pane_bytes, 0, PANE).unwrap(), pane);
+
+    let window2 = Window2Record {
+      flags: Window2Flags::DISPLAY_GRIDLINES
+        | Window2Flags::DISPLAY_ROW_COLUMN_HEADINGS
+        | Window2Flags::FREEZE_PANES
+        | Window2Flags::DEFAULT_HEADER,
+      top_row: 7,
+      left_column: 4,
+      header_color: 64,
+      reserved2: 0x1234,
+      extension: Window2Extension::Zoom {
+        page_break_zoom: 75,
+        normal_zoom: 125,
+        trailing: Some(Window2Trailing {
+          unused: 0x5678,
+          reserved3: 0x9abc,
+        }),
+      },
+    };
+    let window2_bytes = encode_sdk(&window2).unwrap();
+    assert_eq!(window2_bytes.len(), 18);
+    assert_eq!(&window2_bytes[6..10], &[0x40, 0x00, 0x34, 0x12]);
+    assert_eq!(&window2_bytes[14..18], &[0x78, 0x56, 0xbc, 0x9a]);
+    assert_eq!(
+      parse_sdk::<Window2Record>(&window2_bytes, 0, WINDOW2).unwrap(),
+      window2
+    );
+
+    let compatibility_window2 = Window2Record {
+      extension: Window2Extension::Zoom {
+        page_break_zoom: 60,
+        normal_zoom: 90,
+        trailing: None,
+      },
+      ..window2
+    };
+    let compatibility_bytes = encode_sdk(&compatibility_window2).unwrap();
+    assert_eq!(compatibility_bytes.len(), 14);
+    assert_eq!(
+      parse_sdk::<Window2Record>(&compatibility_bytes, 0, WINDOW2).unwrap(),
+      compatibility_window2
+    );
+
+    let selection = SelectionRecord {
+      pane: 3,
+      active_row: 9,
+      active_column: 2,
+      active_reference_index: 0,
+      reference_count: 1,
+      references: vec![SelectionReference {
+        first_row: 9,
+        last_row: 10,
+        first_column: 2,
+        last_column: 4,
+      }],
+    };
+    let selection_bytes = encode_sdk(&selection).unwrap();
+    assert_eq!(selection_bytes.len(), 15);
+    assert_eq!(
+      parse_sdk::<SelectionRecord>(&selection_bytes, 0, SELECTION).unwrap(),
+      selection
+    );
+  }
+
+  #[test]
+  fn worksheet_property_records_enforce_ms_xls_must_constraints() {
+    let dimensions = DimensionsRecord {
+      first_row: 65_535,
+      last_row_exclusive: 65_536,
+      first_column: 255,
+      last_column_exclusive: 256,
+      reserved: 0,
+      compatibility_extra: None,
+    };
+    let dimensions_bytes = encode_sdk(&dimensions).unwrap();
+    assert_eq!(dimensions_bytes.len(), 14);
+    assert_eq!(
+      parse_sdk::<DimensionsRecord>(&dimensions_bytes, 0, DIMENSIONS).unwrap(),
+      dimensions
+    );
+    assert!(
+      encode_sdk(&DimensionsRecord {
+        last_row_exclusive: 65_537,
+        ..dimensions
+      })
+      .is_err()
+    );
+    assert!(
+      encode_sdk(&DimensionsRecord {
+        reserved: 1,
+        ..dimensions
+      })
+      .is_err()
+    );
+
+    assert!(
+      BiffRecordData::WsBool(WsBoolRecord {
+        show_automatic_page_breaks: false,
+        reserved1: 1,
+        dialog: false,
+        apply_outline_styles: false,
+        summary_rows_below: false,
+        summary_columns_opposite_default_side: false,
+        fit_to_page: false,
+        reserved2: false,
+        unused: 0,
+        synchronize_horizontal: false,
+        synchronize_vertical: false,
+        transition_formula_evaluation: false,
+        transition_formula_entry: false,
+      })
+      .encode()
+      .is_err()
+    );
+    assert!(decode_record(WS_BOOL, &[0, 2], false, true, 0).is_err());
+    assert!(
+      encode_sdk(&SyncRecord {
+        row: 0,
+        column: 256
+      })
+      .is_err()
+    );
+
+    let sheet_ext = SheetExtRecord {
+      header: FrtHeader {
+        record_type: SHEET_EXT,
+        flags: FrtFlags::empty(),
+        reserved: 0,
+      },
+      declared_size: 40,
+      tab_color: SheetExtColorIndex {
+        color_index: 8,
+        reserved: 0,
+      },
+      optional: Some(SheetExtOptional {
+        flags: SheetExtOptionalFlags {
+          color_index: 8,
+          calculate_conditional_formats: true,
+          not_published: false,
+          reserved: 0,
+        },
+        color: CfColor {
+          color_type: 3,
+          color_value: 11,
+          tint_bits: (-0.25_f64).to_bits(),
+        },
+      }),
+    };
+    let (record_type, sheet_ext_bytes) = BiffRecordData::SheetExt(sheet_ext).encode().unwrap();
+    assert_eq!(record_type, SHEET_EXT);
+    assert_eq!(sheet_ext_bytes.len(), 40);
+    assert_eq!(
+      decode_record(SHEET_EXT, &sheet_ext_bytes, false, true, 0).unwrap(),
+      BiffRecordData::SheetExt(sheet_ext)
+    );
+    assert!(
+      BiffRecordData::SheetExt(SheetExtRecord {
+        tab_color: SheetExtColorIndex {
+          color_index: 7,
+          reserved: 0,
+        },
+        ..sheet_ext
+      })
+      .encode()
+      .is_err()
+    );
+    let mut invalid_color = sheet_ext;
+    invalid_color.optional.as_mut().unwrap().color.color_value = 12;
+    assert!(BiffRecordData::SheetExt(invalid_color).encode().is_err());
+    let mut invalid_tint = sheet_ext;
+    invalid_tint.optional.as_mut().unwrap().color.tint_bits = f64::NAN.to_bits();
+    assert!(BiffRecordData::SheetExt(invalid_tint).encode().is_err());
+  }
+
+  #[test]
+  fn worksheet_guts_and_phonetic_info_follow_ms_xls_encodings() {
+    let guts = GutsRecord {
+      unused1: 0x1234,
+      unused2: 0x5678,
+      maximum_row_outline_level: 2,
+      maximum_column_outline_level: 8,
+    };
+    let guts_bytes = encode_sdk(&guts).unwrap();
+    assert_eq!(
+      guts_bytes,
+      vec![0x34, 0x12, 0x78, 0x56, 0x02, 0x00, 0x08, 0x00]
+    );
+    assert_eq!(parse_sdk::<GutsRecord>(&guts_bytes, 0, GUTS).unwrap(), guts);
+    assert!(
+      validate_guts(
+        &GutsRecord {
+          maximum_row_outline_level: 1,
+          ..guts
+        },
+        0,
+      )
+      .is_err()
+    );
+    assert!(
+      validate_guts(
+        &GutsRecord {
+          maximum_column_outline_level: 9,
+          ..guts
+        },
+        0,
+      )
+      .is_err()
+    );
+
+    let phonetic = PhoneticInfoRecord {
+      font_index: 5,
+      flags: PhoneticFlags::from_bits_retain(0xa5fa),
+      range_count: 1,
+      ranges: vec![CellRange {
+        first_row: 2,
+        last_row: 4,
+        first_column: 3,
+        last_column: 7,
+      }],
+    };
+    assert_eq!(phonetic.flags.phonetic_type(), PhoneticType::Hiragana);
+    assert_eq!(phonetic.flags.alignment(), PhoneticAlignment::Center);
+    assert_eq!(phonetic.flags.unused_bits(), 0xa5f0);
+    let phonetic_bytes = encode_sdk(&phonetic).unwrap();
+    assert_eq!(
+      phonetic_bytes,
+      vec![
+        0x05, 0x00, 0xfa, 0xa5, 0x01, 0x00, 0x02, 0x00, 0x04, 0x00, 0x03, 0x00, 0x07, 0x00,
+      ]
+    );
+    assert_eq!(
+      parse_sdk::<PhoneticInfoRecord>(&phonetic_bytes, 0, PHONETIC_INFO).unwrap(),
+      phonetic
+    );
+    for font_index in [4, 1023] {
+      assert!(
+        validate_phonetic_info(
+          &PhoneticInfoRecord {
+            font_index,
+            ..phonetic.clone()
+          },
+          0,
+        )
+        .is_err()
+      );
+    }
+    assert!(
+      validate_phonetic_info(
+        &PhoneticInfoRecord {
+          range_count: 0x2001,
+          ..phonetic.clone()
+        },
+        0,
+      )
+      .is_err()
+    );
+    assert!(
+      validate_phonetic_info(
+        &PhoneticInfoRecord {
+          range_count: 0,
+          ..phonetic.clone()
+        },
+        0,
+      )
+      .is_err()
+    );
+    assert!(
+      validate_phonetic_info(
+        &PhoneticInfoRecord {
+          ranges: vec![CellRange {
+            first_row: 5,
+            last_row: 4,
+            first_column: 3,
+            last_column: 7,
+          }],
+          ..phonetic
+        },
+        0,
+      )
+      .is_err()
+    );
+  }
+
+  #[test]
+  fn print_setup_keeps_signed_page_number_and_named_option_bits() {
+    let value = PrintSetupRecord {
+      paper_size: 9,
+      scale: 125,
+      page_start: -1,
+      fit_width: 2,
+      fit_height: 3,
+      options: PrintSetupOptions {
+        left_to_right: true,
+        portrait: true,
+        no_printer_settings: true,
+        black_and_white: true,
+        draft: true,
+        print_comments: true,
+        no_orientation: true,
+        use_first_page_number: true,
+        unused: true,
+        comments_at_end: true,
+        print_errors: 3,
+        reserved: 0x0a,
+      },
+      horizontal_resolution: 600,
+      vertical_resolution: 300,
+      header_margin_bits: 0.3_f64.to_bits(),
+      footer_margin_bits: 0.4_f64.to_bits(),
+      copies: 4,
+    };
+    let bytes = encode_sdk(&value).unwrap();
+    assert_eq!(bytes.len(), 34);
+    assert_eq!(&bytes[4..6], &[0xff, 0xff]);
+    assert_eq!(&bytes[10..12], &[0xff, 0xaf]);
+    assert_eq!(
+      parse_sdk::<PrintSetupRecord>(&bytes, 0, PRINT_SETUP).unwrap(),
+      value
+    );
+  }
+
+  #[test]
+  fn workbook_calculation_future_records_enforce_normative_boolean_fields() {
+    let header = |record_type| FrtHeader {
+      record_type,
+      flags: FrtFlags::empty(),
+      reserved: 0,
+    };
+    let recalc = RecalcIdRecord {
+      record_type: 449,
+      reserved: 0,
+      engine_build: 125_725,
+    };
+    let bytes = encode_sdk(&recalc).unwrap();
+    assert_eq!(bytes.len(), 8);
+    assert_eq!(
+      parse_sdk::<RecalcIdRecord>(&bytes, 0, RECALC_ID).unwrap(),
+      recalc
+    );
+
+    let multithreaded = MtrSettingsRecord {
+      header: header(MTR_SETTINGS),
+      enabled: 1,
+      user_set_thread_count: 1,
+      thread_count: 8,
+    };
+    let bytes = encode_sdk(&multithreaded).unwrap();
+    assert_eq!(
+      parse_sdk::<MtrSettingsRecord>(&bytes, 0, MTR_SETTINGS).unwrap(),
+      multithreaded
+    );
+
+    let forced = ForceFullCalculationRecord {
+      header: header(FORCE_FULL_CALCULATION),
+      ignore_dependencies: 1,
+    };
+    assert_eq!(
+      parse_sdk::<ForceFullCalculationRecord>(
+        &encode_sdk(&forced).unwrap(),
+        0,
+        FORCE_FULL_CALCULATION,
+      )
+      .unwrap(),
+      forced
+    );
+    let compressed = CompressPicturesRecord {
+      header: header(COMPRESS_PICTURES),
+      auto_compress_pictures: 0,
+    };
+    assert_eq!(
+      parse_sdk::<CompressPicturesRecord>(&encode_sdk(&compressed).unwrap(), 0, COMPRESS_PICTURES,)
+        .unwrap(),
+      compressed
+    );
+    let compatibility = Compat12Record {
+      header: header(COMPAT12),
+      no_compatibility_check: 1,
+    };
+    assert_eq!(
+      parse_sdk::<Compat12Record>(&encode_sdk(&compatibility).unwrap(), 0, COMPAT12).unwrap(),
+      compatibility
+    );
+
+    assert!(
+      encode_sdk(&RecalcIdRecord {
+        reserved: 1,
+        ..recalc
+      })
+      .is_err()
+    );
+    assert!(
+      encode_sdk(&MtrSettingsRecord {
+        thread_count: 0,
+        ..multithreaded
+      })
+      .is_err()
+    );
+    assert!(
+      encode_sdk(&ForceFullCalculationRecord {
+        ignore_dependencies: 2,
+        ..forced
+      })
+      .is_err()
+    );
+    assert!(
+      encode_sdk(&CompressPicturesRecord {
+        auto_compress_pictures: 2,
+        ..compressed
+      })
+      .is_err()
+    );
+    assert!(
+      encode_sdk(&Compat12Record {
+        no_compatibility_check: 2,
+        ..compatibility
+      })
+      .is_err()
+    );
+  }
+
+  #[test]
   fn biff_relayout_updates_sheet_and_index_file_pointers_after_growth() {
     let mut stream = BiffStream {
       records: vec![
@@ -35254,11 +36255,11 @@ mod tests {
     let values = [
       SortCondition {
         descending: true,
-        reserved: 0x155,
+        reserved: 0,
         range,
         data: SortConditionData::Value {
           value: 0,
-          reserved: 0x1234_5678,
+          reserved: 0,
         },
         custom_list: Some(BiffUnicodeString {
           flags: 1,
@@ -35283,6 +36284,17 @@ mod tests {
       assert_eq!(decoded, value);
       assert_eq!(encode_sdk(&decoded).unwrap(), bytes);
     }
+    let invalid = SortCondition {
+      descending: false,
+      reserved: 1,
+      range,
+      data: SortConditionData::Value {
+        value: 0,
+        reserved: 0,
+      },
+      custom_list: None,
+    };
+    assert!(encode_sdk(&invalid).is_err());
   }
 
   #[test]
@@ -35291,7 +36303,7 @@ mod tests {
       entry_index: 4,
       options: AutoFilterOptions {
         join_or: true,
-        simple: [false, true],
+        simple: [false, false],
         top_n: false,
         top: true,
         percent: false,
@@ -35321,6 +36333,13 @@ mod tests {
     let decoded: AutoFilterRecord = parse_sdk(&bytes, 0, AUTO_FILTER).unwrap();
     assert_eq!(decoded, value);
     assert_eq!(encode_sdk(&decoded).unwrap(), bytes);
+    let mut invalid_simple = value.clone();
+    invalid_simple.options.simple[0] = true;
+    assert!(encode_sdk(&invalid_simple).is_err());
+    let mut invalid_top = value;
+    invalid_top.options.top_n = true;
+    invalid_top.options.top_count = 0;
+    assert!(encode_sdk(&invalid_top).is_err());
   }
 
   #[test]
@@ -35329,7 +36348,7 @@ mod tests {
       entry_index: 2,
       options: AutoFilterOptions {
         join_or: false,
-        simple: [true, true],
+        simple: [false, false],
         top_n: false,
         top: false,
         percent: false,

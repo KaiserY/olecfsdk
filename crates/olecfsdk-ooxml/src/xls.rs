@@ -1,11 +1,20 @@
 use olecfsdk::{
+  io::SdkEnumValue,
   office_art::{OfficeArtClientAnchor, OfficeArtImageFormat, OfficeArtShapeFlags},
   xls::{
-    BiffSubstreamKind, CellErrorCode, ExtFontScheme, ExtPropertyData, ExtRstBody, FontAttributes,
-    FontRecord, FormulaOperator, FormulaTokenData, FormulaTokenStream, FullColorExt,
-    SstExtensionData, SstString, XfExtRecord, XfRecord, XlStringCharacters, XlsCellValue,
-    XlsCellValueRef, XlsFile, XlsFormulaCachedValue, XlsFormulaDefinitionRef, XlsFormulaRef,
-    XlsHyperlinkTarget, XlsPictureImageLink, XlsPictureRef, XlsWorkbookView,
+    AutoFilter12DateGrouping, AutoFilter12DateGroupingLevel, AutoFilter12DynamicFilter,
+    AutoFilter12Filter, AutoFilter12Record, AutoFilterOperand, AutoFilterOperandValue,
+    AutoFilterRecord, BiffRecordData, BiffSubstreamKind, BiffUnicodeString, CellErrorCode,
+    CellRange, CfColor, ColInfoRecord, EmptyRecordKind, EnhancedProtectionFlags, ExtFontScheme,
+    ExtPropertyData, ExtRstBody, ExtendedHeaderFooterFlags, FeatureData, FeatureHeaderData,
+    FixedF64RecordKind, FixedU16RecordKind, FontAttributes, FontRecord, FormulaOperator,
+    FormulaTokenData, FormulaTokenStream, FullColorExt, HeaderFooterRecord, KpiSet, NameValue,
+    PaneRecord, PhoneticAlignment, PhoneticType, PlvFlags, PlvRecord, PrintSetupRecord, Rfx,
+    RowRecord, SclRecord, SelectionRecord, SheetExtRecord, SortConditionData, SortDataRecord,
+    SortFieldParent, SstExtensionData, SstString, Window2Extension, Window2Flags, Window2Record,
+    XfExtRecord, XfRecord, XlStringCharacters, XlsCellValue, XlsCellValueRef, XlsFile,
+    XlsFormulaCachedValue, XlsFormulaDefinitionRef, XlsFormulaRef, XlsHyperlinkTarget,
+    XlsPictureImageLink, XlsPictureRef, XlsSheetRef, XlsWorkbookView,
   },
 };
 use ooxmlsdk::{
@@ -23,9 +32,18 @@ use ooxmlsdk::{
     schemas_openxmlformats_org_drawingml_2006_main as a,
     schemas_openxmlformats_org_drawingml_2006_spreadsheet_drawing as xdr,
     schemas_openxmlformats_org_spreadsheetml_2006_main::{
-      self as x, Author, Authors, Cell, CellFormula, CellValue, CellValues, Comment, CommentList,
-      CommentText, Comments, Hyperlink, Hyperlinks, MergeCell, MergeCells, Row, SharedStringItem,
-      SharedStringTable, Sheet, SheetData, SheetStateValues, Sheets, Text, Workbook, Worksheet,
+      self as x, Author, Authors, BookViews, Break, CalculateModeValues, CalculationProperties,
+      Cell, CellCommentsValues, CellFormula, CellValue, CellValues, Column, ColumnBreaks, Columns,
+      Comment, CommentList, CommentText, Comments, EvenFooter, EvenHeader, FirstFooter,
+      FirstHeader, HeaderFooter, Hyperlink, Hyperlinks, MergeCell, MergeCells, ObjectDisplayValues,
+      OddFooter, OddHeader, OrientationValues, OutlineProperties, PageMargins, PageOrderValues,
+      PageSetup, PageSetupProperties, Pane, PaneStateValues, PaneValues, PhoneticAlignmentValues,
+      PhoneticProperties, PhoneticValues, PrintErrorValues, PrintOptions, ProtectedRange,
+      ProtectedRanges, ReferenceModeValues, Row, RowBreaks, Selection, SharedStringItem,
+      SharedStringTable, Sheet, SheetCalculationProperties, SheetData, SheetDimension,
+      SheetFormatProperties, SheetProperties, SheetProtection, SheetStateValues, SheetView,
+      SheetViewValues, SheetViews, Sheets, TabColor, Text, UpdateLinksBehaviorValues,
+      VisibilityValues, Workbook, WorkbookProperties, WorkbookProtection, WorkbookView, Worksheet,
       XstringType,
     },
     xml::SpaceProcessingModeValues,
@@ -79,6 +97,39 @@ pub fn convert_xls_with_options(
       SourceLocation::XlsWorkbook { workbook_index: 0 },
     )?;
   }
+  let mut next_target_sheet = 0_u32;
+  let target_sheet_positions = view
+    .sheets()
+    .iter()
+    .map(|sheet| {
+      if sheet.kind() == BiffSubstreamKind::WorksheetOrDialogSheet
+        && sheet.metadata().sheet_type == 0
+      {
+        let position = next_target_sheet;
+        next_target_sheet += 1;
+        Some(position)
+      } else {
+        None
+      }
+    })
+    .collect::<Vec<_>>();
+  let sheet_windows = view
+    .sheets()
+    .iter()
+    .copied()
+    .map(collect_sheet_window_groups)
+    .collect::<Vec<_>>();
+  let workbook_views = convert_workbook_views(
+    &view,
+    &target_sheet_positions,
+    &sheet_windows,
+    options,
+    &mut report,
+  )?;
+  let workbook_view_count = workbook_views.len();
+  let workbook_properties = convert_workbook_properties(&view, options, &mut report)?;
+  let workbook_protection = convert_workbook_protection(&view, options, &mut report)?;
+  let calculation_properties = convert_calculation_properties(&view, options, &mut report)?;
 
   let mut document = SpreadsheetDocument::create(SpreadsheetDocumentType::Workbook);
   let workbook_part = document.add_new_part_auto_id::<WorkbookPart>()?;
@@ -103,15 +154,42 @@ pub fn convert_xls_with_options(
       continue;
     }
 
-    // Row/column dimensions, views, non-comment drawings, and broader
-    // sheet-level formatting remain outside this vertical slice.
-    unsupported(
-      &mut report,
+    let sheet_properties = convert_sheet_properties(
+      source_sheet,
+      &sheet_windows[sheet_index],
+      sheet_index,
       options,
-      ConversionCode::WorksheetFeatureNotMapped,
-      source_location,
+      &mut report,
     )?;
+    let sheet_dimension = convert_sheet_dimension(source_sheet, sheet_index, options, &mut report)?;
+    let sheet_format_properties =
+      convert_sheet_format_properties(source_sheet, sheet_index, options, &mut report)?;
+    let sheet_views = convert_sheet_views(
+      &sheet_windows[sheet_index],
+      workbook_view_count,
+      sheet_index,
+      options,
+      &mut report,
+    )?;
+    let page_settings = convert_page_settings(source_sheet, sheet_index, options, &mut report)?;
+    let sheet_calculation_properties =
+      convert_sheet_calculation_properties(source_sheet, sheet_index, options, &mut report)?;
+    let sheet_protection =
+      convert_sheet_protection(source_sheet, sheet_index, options, &mut report)?;
+    let protected_ranges =
+      convert_protected_ranges(source_sheet, sheet_index, options, &mut report)?;
+    let phonetic =
+      convert_phonetic_information(&view, source_sheet, sheet_index, options, &mut report)?;
+    let sort_and_filter =
+      convert_sheet_sort_and_filter(&view, source_sheet, sheet_index, options, &mut report)?;
     let index = source_sheet.sparse_cell_index()?;
+    let columns = convert_columns(
+      source_sheet.column_infos(),
+      sheet_index,
+      options,
+      &mut report,
+      &styles.xf_unmapped,
+    )?;
     let merge_cell = source_sheet
       .merged_cells()
       .map(|range| MergeCell {
@@ -136,25 +214,29 @@ pub fn convert_xls_with_options(
     };
     let source_hyperlinks = source_sheet.hyperlinks()?;
     let source_comments = source_sheet.comments()?;
+    let cell_context = XlsCellConversionContext {
+      view: &view,
+      index: &index,
+      sheet_index,
+      options,
+      xf_unmapped: &styles.xf_unmapped,
+      phonetic_visible_ranges: &phonetic.visible_ranges,
+    };
     let mut rows = Vec::new();
     for source_row in index.rows() {
       let mut cells = Vec::new();
       for source_cell in source_row.cells() {
-        cells.push(convert_cell(
-          &view,
-          &index,
-          source_cell,
-          sheet_index,
-          options,
-          &mut report,
-          &styles.xf_unmapped,
-        )?);
+        cells.push(convert_cell(&cell_context, source_cell, &mut report)?);
       }
-      rows.push(Row {
-        row_index: Some(u32::from(source_row.row()) + 1),
-        cell: cells,
-        ..Default::default()
-      });
+      rows.push(convert_row(
+        source_row.row(),
+        source_row.definition()?,
+        cells,
+        sheet_index,
+        options,
+        &mut report,
+        &styles.xf_unmapped,
+      )?);
       report.record(Disposition::Mapped);
     }
 
@@ -230,11 +312,31 @@ pub fn convert_xls_with_options(
       &mut document,
       Worksheet {
         xmlns: vec![XmlNamespace::known(XmlKnownNamespace::R)],
+        sheet_properties,
+        sheet_dimension,
+        sheet_views,
+        sheet_format_properties,
+        columns: (!columns.is_empty())
+          .then_some(Columns { column: columns })
+          .into_iter()
+          .collect(),
         sheet_data: SheetData { row: rows },
+        sheet_calculation_properties,
+        sheet_protection,
+        protected_ranges,
+        phonetic_properties: phonetic.properties,
+        auto_filter: sort_and_filter.auto_filter,
+        sort_state: sort_and_filter.sort_state,
         merge_cells,
         hyperlinks: (!hyperlinks.is_empty()).then_some(Hyperlinks {
           hyperlink: hyperlinks,
         }),
+        print_options: page_settings.print_options,
+        page_margins: page_settings.page_margins,
+        page_setup: page_settings.page_setup,
+        header_footer: page_settings.header_footer,
+        row_breaks: page_settings.row_breaks,
+        column_breaks: page_settings.column_breaks,
         drawing,
         ..Default::default()
       },
@@ -262,6 +364,14 @@ pub fn convert_xls_with_options(
       id: relationship_id,
       ..Default::default()
     });
+    if has_unmapped_worksheet_features(source_sheet) {
+      unsupported(
+        &mut report,
+        options,
+        ConversionCode::WorksheetFeatureNotMapped,
+        source_location,
+      )?;
+    }
     report.record(Disposition::Mapped);
   }
 
@@ -269,9 +379,15 @@ pub fn convert_xls_with_options(
     &mut document,
     Workbook {
       xmlns: vec![XmlNamespace::known(XmlKnownNamespace::R)],
+      workbook_properties,
+      workbook_protection,
+      book_views: (!workbook_views.is_empty()).then_some(BookViews {
+        workbook_view: workbook_views,
+      }),
       sheets: Sheets {
         sheet: target_sheets,
       },
+      calculation_properties,
       ..Default::default()
     },
   )?;
@@ -661,6 +777,3805 @@ fn has_unmapped_workbook_features(source: &XlsFile, view: &XlsWorkbookView<'_>) 
     || !source.pivot_caches.is_empty()
     || source.revision_log.is_some()
     || source.user_names.is_some()
+}
+
+fn has_unmapped_worksheet_features(source: XlsSheetRef<'_>) -> bool {
+  source
+    .direct_records()
+    .any(|record| !worksheet_record_is_accounted_for(&record.data))
+}
+
+/// Records listed here are either mapped directly, consumed by the typed
+/// relationship/grid projections, or diagnosed by a more specific loss code.
+/// Everything else remains an explicit worksheet-level loss when it actually
+/// occurs in the source substream.
+fn worksheet_record_is_accounted_for(record: &BiffRecordData) -> bool {
+  match record {
+    BiffRecordData::Bof(_)
+    | BiffRecordData::Eof
+    | BiffRecordData::Index(_)
+    | BiffRecordData::DbCell(_)
+    | BiffRecordData::EntExU2(_)
+    | BiffRecordData::Dimensions(_)
+    | BiffRecordData::WsBool(_)
+    | BiffRecordData::CodeName(_)
+    | BiffRecordData::SheetExt(_)
+    | BiffRecordData::Sync(_)
+    | BiffRecordData::DefaultRowHeight(_)
+    | BiffRecordData::Guts(_)
+    | BiffRecordData::ColInfo(_)
+    | BiffRecordData::Window2(_)
+    | BiffRecordData::Scl(_)
+    | BiffRecordData::Plv(_)
+    | BiffRecordData::Pane(_)
+    | BiffRecordData::Selection(_)
+    | BiffRecordData::PrintSetup(_)
+    | BiffRecordData::Header(_)
+    | BiffRecordData::Footer(_)
+    | BiffRecordData::HorizontalPageBreaks(_)
+    | BiffRecordData::VerticalPageBreaks(_)
+    | BiffRecordData::PhoneticInfo(_)
+    | BiffRecordData::Formula(_)
+    | BiffRecordData::Formula4Compatibility(_)
+    | BiffRecordData::SharedFormula(_)
+    | BiffRecordData::Array(_)
+    | BiffRecordData::Table(_)
+    | BiffRecordData::StringValue(_)
+    | BiffRecordData::Blank(_)
+    | BiffRecordData::Number(_)
+    | BiffRecordData::BoolErr(_)
+    | BiffRecordData::Label(_)
+    | BiffRecordData::LabelSst(_)
+    | BiffRecordData::Rk(_)
+    | BiffRecordData::MulRk(_)
+    | BiffRecordData::MulBlank(_)
+    | BiffRecordData::Row(_)
+    | BiffRecordData::MergeCells(_)
+    | BiffRecordData::Hyperlink(_)
+    | BiffRecordData::AutoFilter(_)
+    | BiffRecordData::AutoFilter12(_)
+    | BiffRecordData::SortData(_)
+    | BiffRecordData::FixedF64Bits { .. } => true,
+    BiffRecordData::FixedU16 { kind, .. } => matches!(
+      kind,
+      FixedU16RecordKind::CalcCount
+        | FixedU16RecordKind::CalcMode
+        | FixedU16RecordKind::RefMode
+        | FixedU16RecordKind::Iteration
+        | FixedU16RecordKind::PrintHeaders
+        | FixedU16RecordKind::PrintGridlines
+        | FixedU16RecordKind::DefaultColWidth
+        | FixedU16RecordKind::Uncalced
+        | FixedU16RecordKind::SaveRecalc
+        | FixedU16RecordKind::ObjectProtect
+        | FixedU16RecordKind::Gridset
+        | FixedU16RecordKind::HCenter
+        | FixedU16RecordKind::VCenter
+        | FixedU16RecordKind::AutoFilterInfo
+        | FixedU16RecordKind::Protect
+        | FixedU16RecordKind::Password
+        | FixedU16RecordKind::ScenarioProtect
+        | FixedU16RecordKind::StandardWidth
+    ),
+    BiffRecordData::Empty { kind, .. } => matches!(
+      kind,
+      EmptyRecordKind::NullCompatibility | EmptyRecordKind::FilterMode
+    ),
+    BiffRecordData::ExtendedHeaderFooter(value) => value.sheet_view_guid == [0; 16],
+    BiffRecordData::FeatureHeader(value) => value.shared_feature_type == 0x0002,
+    BiffRecordData::Feature(value) => matches!(&value.data, FeatureData::Protection(_)),
+    _ => false,
+  }
+}
+
+fn convert_workbook_properties(
+  view: &XlsWorkbookView<'_>,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<WorkbookProperties>> {
+  let location = SourceLocation::XlsWorkbook { workbook_index: 0 };
+  let mut date_1904 = Vec::new();
+  let mut backup = Vec::new();
+  let mut hide_objects = Vec::new();
+  let mut refresh_all = Vec::new();
+  let mut book_boolean = Vec::new();
+  let mut code_names = Vec::new();
+  let mut book_extensions = Vec::new();
+  let mut compress_pictures = Vec::new();
+  let mut compatibility = Vec::new();
+  for record in view.globals_records() {
+    match &record.data {
+      BiffRecordData::FixedU16 { kind, value } => match kind {
+        FixedU16RecordKind::Date1904 => date_1904.push(*value),
+        FixedU16RecordKind::Backup => backup.push(*value),
+        FixedU16RecordKind::HideObj => hide_objects.push(*value),
+        FixedU16RecordKind::RefreshAll => refresh_all.push(*value),
+        FixedU16RecordKind::BookBool => book_boolean.push(*value),
+        _ => {}
+      },
+      BiffRecordData::CodeName(value) => code_names.push(value),
+      BiffRecordData::BookExt(value) => book_extensions.push(value),
+      BiffRecordData::CompressPictures(value) => compress_pictures.push(value),
+      BiffRecordData::Compat12(value) => compatibility.push(value),
+      _ => {}
+    }
+  }
+
+  let date_1904 = required_single_u16(
+    &date_1904,
+    ConversionCode::WorkbookPropertiesNotMapped,
+    location,
+    options,
+    report,
+  )?;
+  let backup = required_single_u16(
+    &backup,
+    ConversionCode::WorkbookPropertiesNotMapped,
+    location,
+    options,
+    report,
+  )?;
+  let hide_objects = required_single_u16(
+    &hide_objects,
+    ConversionCode::WorkbookPropertiesNotMapped,
+    location,
+    options,
+    report,
+  )?;
+  let refresh_all = required_single_u16(
+    &refresh_all,
+    ConversionCode::WorkbookPropertiesNotMapped,
+    location,
+    options,
+    report,
+  )?;
+  let book_boolean = required_single_u16(
+    &book_boolean,
+    ConversionCode::WorkbookPropertiesNotMapped,
+    location,
+    options,
+    report,
+  )?;
+
+  let mut target = WorkbookProperties::default();
+  let mut mapped = false;
+  if let Some(value) = date_1904
+    && let Some(value) = checked_biff_boolean_u16(
+      value,
+      ConversionCode::WorkbookPropertiesNotMapped,
+      location,
+      options,
+      report,
+    )?
+  {
+    target.date1904 = Some(BooleanValue::from_bool(value));
+    mapped = true;
+  }
+  if let Some(value) = backup
+    && let Some(value) = checked_biff_boolean_u16(
+      value,
+      ConversionCode::WorkbookPropertiesNotMapped,
+      location,
+      options,
+      report,
+    )?
+  {
+    target.backup_file = Some(BooleanValue::from_bool(value));
+    mapped = true;
+  }
+  if let Some(value) = refresh_all
+    && let Some(value) = checked_biff_boolean_u16(
+      value,
+      ConversionCode::WorkbookPropertiesNotMapped,
+      location,
+      options,
+      report,
+    )?
+  {
+    target.refresh_all_connections = Some(BooleanValue::from_bool(value));
+    mapped = true;
+  }
+  if let Some(value) = hide_objects {
+    target.show_objects = match value {
+      0 => Some(ObjectDisplayValues::All),
+      1 => Some(ObjectDisplayValues::Placeholders),
+      2 => Some(ObjectDisplayValues::None),
+      _ => {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorkbookPropertiesNotMapped,
+          location,
+        )?;
+        None
+      }
+    };
+    mapped |= target.show_objects.is_some();
+  }
+  if let Some(value) = book_boolean {
+    // MS-XLS BookBool: bit 0 is inverted, bits 5..=6 are grUpdateLinks,
+    // and bit 8 hides unselected table borders. Bit 7 is undefined and ignored.
+    if value & 0xfe02 != 0 || (value >> 5) & 0x3 == 3 || value & 0x001c != 0 {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorkbookPropertiesNotMapped,
+        location,
+      )?;
+    }
+    target.save_external_link_values = Some(BooleanValue::from_bool(value & 0x0001 == 0));
+    target.update_links = match (value >> 5) & 0x3 {
+      0 => Some(UpdateLinksBehaviorValues::UserSet),
+      1 => Some(UpdateLinksBehaviorValues::Never),
+      2 => Some(UpdateLinksBehaviorValues::Always),
+      _ => None,
+    };
+    target.show_border_unselected_tables = Some(BooleanValue::from_bool(value & 0x0100 == 0));
+    mapped = true;
+  }
+
+  if code_names.len() > 1 {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorkbookPropertiesNotMapped,
+      location,
+    )?;
+  }
+  if let Some(value) = code_names.first() {
+    target.code_name = biff_string_text(&value.name.text);
+    if target.code_name.is_none() {
+      unsupported(
+        report,
+        options,
+        ConversionCode::CompatibilityUtf16,
+        location,
+      )?;
+    } else {
+      mapped = true;
+    }
+  }
+
+  if book_extensions.len() > 1 {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorkbookPropertiesNotMapped,
+      location,
+    )?;
+  }
+  if let Some(value) = book_extensions.first() {
+    use olecfsdk::xls::{BookExtConditional11Flags, BookExtConditional12Flags, BookExtFlags};
+    let mapped_flags = BookExtFlags::HIDE_PIVOT_LIST | BookExtFlags::FILTER_PRIVACY;
+    if value.flags.bits() & !mapped_flags.bits() != 0 {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorkbookPropertiesNotMapped,
+        location,
+      )?;
+    }
+    target.hide_pivot_field_list = Some(BooleanValue::from_bool(
+      value.flags.contains(BookExtFlags::HIDE_PIVOT_LIST),
+    ));
+    target.filter_privacy = Some(BooleanValue::from_bool(
+      value.flags.contains(BookExtFlags::FILTER_PRIVACY),
+    ));
+    if let Some(flags) = value.conditional11 {
+      target.prompted_solutions = Some(BooleanValue::from_bool(
+        flags.contains(BookExtConditional11Flags::WARN_ABOUT_SOLUTION),
+      ));
+      target.show_ink_annotation = Some(BooleanValue::from_bool(
+        flags.contains(BookExtConditional11Flags::SHOW_INK_ANNOTATION),
+      ));
+    }
+    if let Some(flags) = value.conditional12 {
+      target.publish_items = Some(BooleanValue::from_bool(
+        flags.contains(BookExtConditional12Flags::PUBLISHED_BOOK_ITEMS),
+      ));
+      target.show_pivot_chart_filter = Some(BooleanValue::from_bool(
+        flags.contains(BookExtConditional12Flags::SHOW_PIVOT_CHART_FILTER),
+      ));
+    }
+    mapped = true;
+  }
+
+  if compress_pictures.len() > 1 {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorkbookPropertiesNotMapped,
+      location,
+    )?;
+  }
+  if let Some(value) = compress_pictures.first()
+    && let Some(value) = checked_biff_boolean_u32(
+      value.auto_compress_pictures,
+      ConversionCode::WorkbookPropertiesNotMapped,
+      location,
+      options,
+      report,
+    )?
+  {
+    target.auto_compress_pictures = Some(BooleanValue::from_bool(value));
+    mapped = true;
+  }
+
+  if compatibility.len() > 1 {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorkbookPropertiesNotMapped,
+      location,
+    )?;
+  }
+  if let Some(value) = compatibility.first()
+    && let Some(value) = checked_biff_boolean_u32(
+      value.no_compatibility_check,
+      ConversionCode::WorkbookPropertiesNotMapped,
+      location,
+      options,
+      report,
+    )?
+  {
+    target.check_compatibility = Some(BooleanValue::from_bool(!value));
+    mapped = true;
+  }
+
+  if mapped {
+    report.record(Disposition::Mapped);
+    Ok(Some(target))
+  } else {
+    Ok(None)
+  }
+}
+
+fn convert_workbook_protection(
+  view: &XlsWorkbookView<'_>,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<WorkbookProtection>> {
+  let location = SourceLocation::XlsWorkbook { workbook_index: 0 };
+  let mut windows = Vec::new();
+  let mut structure = Vec::new();
+  let mut passwords = Vec::new();
+  let mut revisions = Vec::new();
+  let mut revision_passwords = Vec::new();
+  for record in view.globals_records() {
+    let BiffRecordData::FixedU16 { kind, value } = record.data else {
+      continue;
+    };
+    match kind {
+      FixedU16RecordKind::WindowProtect => windows.push(value),
+      FixedU16RecordKind::Protect => structure.push(value),
+      FixedU16RecordKind::Password => passwords.push(value),
+      FixedU16RecordKind::ProtectionRev4 => revisions.push(value),
+      FixedU16RecordKind::PasswordRev4 => revision_passwords.push(value),
+      _ => {}
+    }
+  }
+
+  // MS-XLS Globals PROTECTION requires exactly one record of each kind.
+  let windows = required_single_u16(
+    &windows,
+    ConversionCode::WorkbookProtectionNotMapped,
+    location,
+    options,
+    report,
+  )?;
+  let structure = required_single_u16(
+    &structure,
+    ConversionCode::WorkbookProtectionNotMapped,
+    location,
+    options,
+    report,
+  )?;
+  let password = required_single_u16(
+    &passwords,
+    ConversionCode::WorkbookProtectionNotMapped,
+    location,
+    options,
+    report,
+  )?;
+  let revisions = required_single_u16(
+    &revisions,
+    ConversionCode::WorkbookProtectionNotMapped,
+    location,
+    options,
+    report,
+  )?;
+  let revision_password = required_single_u16(
+    &revision_passwords,
+    ConversionCode::WorkbookProtectionNotMapped,
+    location,
+    options,
+    report,
+  )?;
+
+  let lock_windows = windows
+    .map(|value| {
+      checked_biff_boolean_u16(
+        value,
+        ConversionCode::WorkbookProtectionNotMapped,
+        location,
+        options,
+        report,
+      )
+    })
+    .transpose()?
+    .flatten();
+  let lock_structure = structure
+    .map(|value| {
+      checked_biff_boolean_u16(
+        value,
+        ConversionCode::WorkbookProtectionNotMapped,
+        location,
+        options,
+        report,
+      )
+    })
+    .transpose()?
+    .flatten();
+  let lock_revision = revisions
+    .map(|value| {
+      checked_biff_boolean_u16(
+        value,
+        ConversionCode::WorkbookProtectionNotMapped,
+        location,
+        options,
+        report,
+      )
+    })
+    .transpose()?
+    .flatten();
+  if lock_revision == Some(false) && revision_password.is_some_and(|value| value != 0) {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorkbookProtectionNotMapped,
+      location,
+    )?;
+  }
+
+  let present = lock_windows == Some(true)
+    || lock_structure == Some(true)
+    || lock_revision == Some(true)
+    || password.is_some_and(|value| value != 0)
+    || revision_password.is_some_and(|value| value != 0);
+  report.record(Disposition::Mapped);
+  Ok(present.then(|| {
+    WorkbookProtection {
+      workbook_password: password
+        .filter(|value| *value != 0)
+        .map(legacy_password_hex),
+      revisions_password: revision_password
+        .filter(|value| *value != 0)
+        .map(legacy_password_hex),
+      lock_structure: lock_structure.map(BooleanValue::from_bool),
+      lock_windows: lock_windows.map(BooleanValue::from_bool),
+      lock_revision: lock_revision.map(BooleanValue::from_bool),
+      ..Default::default()
+    }
+  }))
+}
+
+fn legacy_password_hex(value: u16) -> String {
+  format!("{value:04X}")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct XlsCalculationSettings {
+  mode: u16,
+  iteration_count: u16,
+  reference_mode: u16,
+  iteration: u16,
+  delta_bits: u64,
+  calculate_on_save: u16,
+}
+
+fn convert_calculation_properties(
+  view: &XlsWorkbookView<'_>,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<CalculationProperties>> {
+  let workbook_location = SourceLocation::XlsWorkbook { workbook_index: 0 };
+  let mut precision = Vec::new();
+  let mut recalculation_ids = Vec::new();
+  let mut force_full_calculation = Vec::new();
+  let mut multithreaded = Vec::new();
+  for record in view.globals_records() {
+    match &record.data {
+      BiffRecordData::FixedU16 {
+        kind: FixedU16RecordKind::CalcPrecision,
+        value,
+      } => precision.push(*value),
+      BiffRecordData::RecalcId(value) => recalculation_ids.push(value),
+      BiffRecordData::ForceFullCalculation(value) => force_full_calculation.push(value),
+      BiffRecordData::MtrSettings(value) => multithreaded.push(value),
+      _ => {}
+    }
+  }
+  let precision = required_single_u16(
+    &precision,
+    ConversionCode::WorkbookCalculationNotMapped,
+    workbook_location,
+    options,
+    report,
+  )?;
+
+  let mut settings = Vec::new();
+  let mut any_uncalculated = false;
+  for (sheet_index, sheet) in view.sheets().iter().copied().enumerate() {
+    if sheet.kind() != BiffSubstreamKind::WorksheetOrDialogSheet || sheet.metadata().sheet_type != 0
+    {
+      continue;
+    }
+    let location = SourceLocation::XlsSheet {
+      workbook_index: 0,
+      sheet_index,
+    };
+    if let Some(value) = collect_sheet_calculation_settings(sheet, location, options, report)? {
+      settings.push((sheet_index, value));
+    }
+    any_uncalculated |= sheet.direct_records().any(|record| {
+      matches!(
+        record.data,
+        BiffRecordData::FixedU16 {
+          kind: FixedU16RecordKind::Uncalced,
+          ..
+        }
+      )
+    });
+  }
+  let common = settings.first().map(|(_, value)| *value);
+  if settings.iter().any(|(_, value)| Some(*value) != common) {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorkbookCalculationNotMapped,
+      workbook_location,
+    )?;
+  }
+
+  let mut target = CalculationProperties {
+    full_calculation_on_load: Some(BooleanValue::from_bool(any_uncalculated)),
+    calculation_completed: Some(BooleanValue::from_bool(!any_uncalculated)),
+    ..Default::default()
+  };
+  if let Some(value) = common {
+    target.calculation_mode = match value.mode {
+      0 => Some(CalculateModeValues::Manual),
+      1 => Some(CalculateModeValues::Auto),
+      2 => Some(CalculateModeValues::AutoNoTable),
+      _ => {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorkbookCalculationNotMapped,
+          workbook_location,
+        )?;
+        None
+      }
+    };
+    if (1..=32_767).contains(&value.iteration_count) {
+      target.iterate_count = Some(u32::from(value.iteration_count));
+    } else {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorkbookCalculationNotMapped,
+        workbook_location,
+      )?;
+    }
+    target.reference_mode = match value.reference_mode {
+      0 => Some(ReferenceModeValues::R1c1),
+      1 => Some(ReferenceModeValues::A1),
+      _ => {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorkbookCalculationNotMapped,
+          workbook_location,
+        )?;
+        None
+      }
+    };
+    target.iterate = checked_biff_boolean_u16(
+      value.iteration,
+      ConversionCode::WorkbookCalculationNotMapped,
+      workbook_location,
+      options,
+      report,
+    )?
+    .map(BooleanValue::from_bool);
+    let delta = f64::from_bits(value.delta_bits);
+    if delta.is_finite() && delta >= 0.0 {
+      target.iterate_delta = Some(delta);
+    } else {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorkbookCalculationNotMapped,
+        workbook_location,
+      )?;
+    }
+    target.calculation_on_save = checked_biff_boolean_u16(
+      value.calculate_on_save,
+      ConversionCode::WorkbookCalculationNotMapped,
+      workbook_location,
+      options,
+      report,
+    )?
+    .map(BooleanValue::from_bool);
+  }
+  if let Some(value) = precision {
+    target.full_precision = checked_biff_boolean_u16(
+      value,
+      ConversionCode::WorkbookCalculationNotMapped,
+      workbook_location,
+      options,
+      report,
+    )?
+    .map(BooleanValue::from_bool);
+  }
+
+  if recalculation_ids.len() > 1 {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorkbookCalculationNotMapped,
+      workbook_location,
+    )?;
+  }
+  if let Some(value) = recalculation_ids.first() {
+    if value.record_type != 449 || value.reserved != 0 {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorkbookCalculationNotMapped,
+        workbook_location,
+      )?;
+    }
+    target.calculation_id = Some(value.engine_build);
+  }
+
+  if force_full_calculation.len() > 1 {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorkbookCalculationNotMapped,
+      workbook_location,
+    )?;
+  }
+  if let Some(value) = force_full_calculation.first() {
+    target.force_full_calculation = checked_biff_boolean_u32(
+      value.ignore_dependencies,
+      ConversionCode::WorkbookCalculationNotMapped,
+      workbook_location,
+      options,
+      report,
+    )?
+    .map(BooleanValue::from_bool);
+  }
+
+  if multithreaded.len() > 1 {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorkbookCalculationNotMapped,
+      workbook_location,
+    )?;
+  }
+  if let Some(value) = multithreaded.first() {
+    let enabled = checked_biff_boolean_u32(
+      value.enabled,
+      ConversionCode::WorkbookCalculationNotMapped,
+      workbook_location,
+      options,
+      report,
+    )?;
+    let user_set = checked_biff_boolean_u32(
+      value.user_set_thread_count,
+      ConversionCode::WorkbookCalculationNotMapped,
+      workbook_location,
+      options,
+      report,
+    )?;
+    target.concurrent_calculation = enabled.map(BooleanValue::from_bool);
+    if enabled == Some(true) && user_set == Some(true) {
+      if (1..=1024).contains(&value.thread_count) {
+        target.concurrent_manual_count = Some(value.thread_count as u32);
+      } else {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorkbookCalculationNotMapped,
+          workbook_location,
+        )?;
+      }
+    }
+  }
+
+  report.record(Disposition::Mapped);
+  Ok(Some(target))
+}
+
+fn collect_sheet_calculation_settings(
+  source: XlsSheetRef<'_>,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<XlsCalculationSettings>> {
+  let mut mode = Vec::new();
+  let mut iteration_count = Vec::new();
+  let mut reference_mode = Vec::new();
+  let mut iteration = Vec::new();
+  let mut delta_bits = Vec::new();
+  let mut calculate_on_save = Vec::new();
+  for record in source.direct_records() {
+    match &record.data {
+      BiffRecordData::FixedU16 { kind, value } => match kind {
+        FixedU16RecordKind::CalcMode => mode.push(*value),
+        FixedU16RecordKind::CalcCount => iteration_count.push(*value),
+        FixedU16RecordKind::RefMode => reference_mode.push(*value),
+        FixedU16RecordKind::Iteration => iteration.push(*value),
+        FixedU16RecordKind::SaveRecalc => calculate_on_save.push(*value),
+        _ => {}
+      },
+      BiffRecordData::FixedF64Bits {
+        kind: FixedF64RecordKind::CalcDelta,
+        bits,
+      } => delta_bits.push(*bits),
+      _ => {}
+    }
+  }
+  let values = [
+    mode.len(),
+    iteration_count.len(),
+    reference_mode.len(),
+    iteration.len(),
+    delta_bits.len(),
+    calculate_on_save.len(),
+  ];
+  if values != [1; 6] {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorkbookCalculationNotMapped,
+      location,
+    )?;
+  }
+  let Some((mode, iteration_count, reference_mode, iteration, delta_bits, calculate_on_save)) =
+    mode
+      .first()
+      .copied()
+      .zip(iteration_count.first().copied())
+      .zip(reference_mode.first().copied())
+      .zip(iteration.first().copied())
+      .zip(delta_bits.first().copied())
+      .zip(calculate_on_save.first().copied())
+      .map(|(((((a, b), c), d), e), f)| (a, b, c, d, e, f))
+  else {
+    return Ok(None);
+  };
+  Ok(Some(XlsCalculationSettings {
+    mode,
+    iteration_count,
+    reference_mode,
+    iteration,
+    delta_bits,
+    calculate_on_save,
+  }))
+}
+
+fn convert_sheet_calculation_properties(
+  source: XlsSheetRef<'_>,
+  sheet_index: usize,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<SheetCalculationProperties>> {
+  let values = source
+    .direct_records()
+    .filter_map(|record| match record.data {
+      BiffRecordData::FixedU16 {
+        kind: FixedU16RecordKind::Uncalced,
+        value,
+      } => Some(value),
+      _ => None,
+    })
+    .collect::<Vec<_>>();
+  if values.is_empty() {
+    return Ok(None);
+  }
+  let location = SourceLocation::XlsSheet {
+    workbook_index: 0,
+    sheet_index,
+  };
+  if values.len() != 1 || values[0] != 0 {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetCalculationNotMapped,
+      location,
+    )?;
+  }
+  report.record(Disposition::Mapped);
+  Ok(Some(SheetCalculationProperties {
+    full_calculation_on_load: Some(BooleanValue::from_bool(true)),
+  }))
+}
+
+fn convert_sheet_protection(
+  source: XlsSheetRef<'_>,
+  sheet_index: usize,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<SheetProtection>> {
+  let location = SourceLocation::XlsSheet {
+    workbook_index: 0,
+    sheet_index,
+  };
+  let mut protect = Vec::new();
+  let mut passwords = Vec::new();
+  let mut objects = Vec::new();
+  let mut scenarios = Vec::new();
+  let mut enhanced = Vec::new();
+  for record in source.direct_records() {
+    match &record.data {
+      BiffRecordData::FixedU16 { kind, value } => match kind {
+        FixedU16RecordKind::Protect => protect.push(*value),
+        FixedU16RecordKind::Password => passwords.push(*value),
+        FixedU16RecordKind::ObjectProtect => objects.push(*value),
+        FixedU16RecordKind::ScenarioProtect => scenarios.push(*value),
+        _ => {}
+      },
+      BiffRecordData::FeatureHeader(value) if value.shared_feature_type == 0x0002 => {
+        if value.header.record_type != 0x0867
+          || !value.header.flags.is_empty()
+          || value.header.reserved != 0
+          || value.reserved != 1
+        {
+          unsupported(
+            report,
+            options,
+            ConversionCode::WorksheetProtectionNotMapped,
+            location,
+          )?;
+        }
+        match value.data {
+          FeatureHeaderData::EnhancedProtection(flags) => {
+            if flags.bits() & !EnhancedProtectionFlags::all().bits() != 0 {
+              unsupported(
+                report,
+                options,
+                ConversionCode::WorksheetProtectionNotMapped,
+                location,
+              )?;
+            }
+            enhanced.push(flags);
+          }
+          FeatureHeaderData::None => {}
+          _ => {
+            unsupported(
+              report,
+              options,
+              ConversionCode::WorksheetProtectionNotMapped,
+              location,
+            )?;
+          }
+        }
+      }
+      _ => {}
+    }
+  }
+
+  let has_classic_records =
+    !protect.is_empty() || !passwords.is_empty() || !objects.is_empty() || !scenarios.is_empty();
+  if !has_classic_records {
+    return Ok(None);
+  }
+  let protect = optional_single_u16(
+    &protect,
+    ConversionCode::WorksheetProtectionNotMapped,
+    location,
+    options,
+    report,
+  )?;
+  let password = optional_single_u16(
+    &passwords,
+    ConversionCode::WorksheetProtectionNotMapped,
+    location,
+    options,
+    report,
+  )?;
+  let object = optional_single_u16(
+    &objects,
+    ConversionCode::WorksheetProtectionNotMapped,
+    location,
+    options,
+    report,
+  )?;
+  let scenario = optional_single_u16(
+    &scenarios,
+    ConversionCode::WorksheetProtectionNotMapped,
+    location,
+    options,
+    report,
+  )?;
+  if protect.is_some_and(|value| value != 1)
+    || password == Some(0)
+    || object.is_some_and(|value| value != 1)
+    || scenario.is_some_and(|value| value != 1)
+    || (protect.is_none() && (password.is_some() || object.is_some() || scenario.is_some()))
+  {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetProtectionNotMapped,
+      location,
+    )?;
+  }
+  if enhanced.len() > 1 {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetProtectionNotMapped,
+      location,
+    )?;
+  }
+
+  let mut target = SheetProtection {
+    password: password
+      .filter(|value| *value != 0)
+      .map(legacy_password_hex),
+    sheet: Some(BooleanValue::from_bool(protect.is_some())),
+    objects: Some(BooleanValue::from_bool(object.is_some())),
+    scenarios: Some(BooleanValue::from_bool(scenario.is_some())),
+    ..Default::default()
+  };
+  if let Some(flags) = enhanced.first().copied() {
+    target.objects = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::OBJECTS),
+    ));
+    target.scenarios = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::SCENARIOS),
+    ));
+    target.format_cells = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::FORMAT_CELLS),
+    ));
+    target.format_columns = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::FORMAT_COLUMNS),
+    ));
+    target.format_rows = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::FORMAT_ROWS),
+    ));
+    target.insert_columns = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::INSERT_COLUMNS),
+    ));
+    target.insert_rows = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::INSERT_ROWS),
+    ));
+    target.insert_hyperlinks = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::INSERT_HYPERLINKS),
+    ));
+    target.delete_columns = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::DELETE_COLUMNS),
+    ));
+    target.delete_rows = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::DELETE_ROWS),
+    ));
+    target.select_locked_cells = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::SELECT_LOCKED_CELLS),
+    ));
+    target.sort = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::SORT),
+    ));
+    target.auto_filter = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::AUTO_FILTER),
+    ));
+    target.pivot_tables = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::PIVOT_TABLES),
+    ));
+    target.select_unlocked_cells = Some(BooleanValue::from_bool(
+      !flags.contains(EnhancedProtectionFlags::SELECT_UNLOCKED_CELLS),
+    ));
+  }
+  report.record(Disposition::Mapped);
+  Ok(Some(target))
+}
+
+fn convert_protected_ranges(
+  source: XlsSheetRef<'_>,
+  sheet_index: usize,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<ProtectedRanges>> {
+  let location = SourceLocation::XlsSheet {
+    workbook_index: 0,
+    sheet_index,
+  };
+  let mut ranges = Vec::new();
+  for record in source.direct_records() {
+    let BiffRecordData::Feature(feature) = &record.data else {
+      continue;
+    };
+    let FeatureData::Protection(protection) = &feature.data else {
+      continue;
+    };
+    if feature.header.record_type != 0x0868
+      || !feature.header.flags.is_empty()
+      || feature.header.reserved != 0
+      || feature.shared_feature_type != 0x0002
+      || feature.reserved1 != 0
+      || feature.reserved2 != 0
+      || feature.feature_data_size != 0
+      || feature.reserved3 != 0
+      || protection.flags.bits() & 0xFFFF_FFFE != 0
+      || feature.references.is_empty()
+      || feature.references.iter().any(|range| {
+        range.first_row > range.last_row
+          || range.first_column > range.last_column
+          || range.last_column > 0x00FF
+      })
+    {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetProtectedRangeNotMapped,
+        location,
+      )?;
+    }
+    if protection.security_descriptor.is_some() {
+      // BIFF stores a self-relative binary descriptor; OOXML's transitional
+      // string attribute has no normative binary representation.
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetProtectedRangeNotMapped,
+        location,
+      )?;
+    }
+    let Some(name) = biff_string_text(&protection.title.text) else {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetProtectedRangeNotMapped,
+        location,
+      )?;
+      continue;
+    };
+    let password = match u16::try_from(protection.password_verifier) {
+      Ok(0) => None,
+      Ok(value) => Some(legacy_password_hex(value)),
+      Err(_) => {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorksheetProtectedRangeNotMapped,
+          location,
+        )?;
+        None
+      }
+    };
+    ranges.push(ProtectedRange {
+      password,
+      sequence_of_references: feature
+        .references
+        .iter()
+        .map(|range| {
+          cell_range_reference(
+            range.first_row,
+            range.first_column,
+            range.last_row,
+            range.last_column,
+          )
+        })
+        .collect(),
+      name,
+      ..Default::default()
+    });
+    report.record(Disposition::Mapped);
+  }
+  Ok((!ranges.is_empty()).then_some(ProtectedRanges {
+    protected_range: ranges,
+  }))
+}
+
+fn required_single_u16(
+  values: &[u16],
+  code: ConversionCode,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<u16>> {
+  if values.len() != 1 {
+    unsupported(report, options, code, location)?;
+  }
+  Ok(values.first().copied())
+}
+
+fn optional_single_u16(
+  values: &[u16],
+  code: ConversionCode,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<u16>> {
+  if values.len() > 1 {
+    unsupported(report, options, code, location)?;
+  }
+  Ok(values.first().copied())
+}
+
+fn checked_biff_boolean_u16(
+  value: u16,
+  code: ConversionCode,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<bool>> {
+  checked_biff_boolean_u32(u32::from(value), code, location, options, report)
+}
+
+fn checked_biff_boolean_u32(
+  value: u32,
+  code: ConversionCode,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<bool>> {
+  match value {
+    0 => Ok(Some(false)),
+    1 => Ok(Some(true)),
+    _ => {
+      unsupported(report, options, code, location)?;
+      Ok(None)
+    }
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct XlsFilterRange {
+  first_row: u32,
+  last_row: u32,
+  first_column: u32,
+  last_column: u32,
+}
+
+impl XlsFilterRange {
+  fn from_rfx(value: Rfx) -> Self {
+    Self {
+      first_row: value.first_row,
+      last_row: value.last_row,
+      first_column: value.first_column,
+      last_column: value.last_column,
+    }
+  }
+
+  fn reference(self) -> Option<String> {
+    cell_range_reference_u32(
+      self.first_row,
+      self.first_column,
+      self.last_row,
+      self.last_column,
+    )
+  }
+
+  fn column_count(self) -> Option<u32> {
+    self
+      .last_column
+      .checked_sub(self.first_column)?
+      .checked_add(1)
+  }
+}
+
+#[derive(Default)]
+struct ConvertedSheetSortAndFilter {
+  auto_filter: Option<Box<x::AutoFilter>>,
+  sort_state: Option<Box<x::SortState>>,
+}
+
+fn convert_sheet_sort_and_filter(
+  view: &XlsWorkbookView<'_>,
+  source: XlsSheetRef<'_>,
+  sheet_index: usize,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<ConvertedSheetSortAndFilter> {
+  let location = SourceLocation::XlsSheet {
+    workbook_index: 0,
+    sheet_index,
+  };
+  let mut filter_info = Vec::new();
+  let mut classic_filters = Vec::new();
+  let mut future_filters = Vec::new();
+  let mut sort_data = Vec::new();
+  let mut filter_mode_count = 0usize;
+  for record in source.direct_records() {
+    match &record.data {
+      BiffRecordData::FixedU16 {
+        kind: FixedU16RecordKind::AutoFilterInfo,
+        value,
+      } => filter_info.push(*value),
+      BiffRecordData::AutoFilter(value) => classic_filters.push(value),
+      BiffRecordData::AutoFilter12(value) => future_filters.push(value),
+      BiffRecordData::SortData(value) => sort_data.push(value),
+      BiffRecordData::Empty {
+        kind: EmptyRecordKind::FilterMode,
+        ..
+      } => filter_mode_count += 1,
+      _ => {}
+    }
+  }
+
+  let name_range = filter_database_range(view, sheet_index, location, options, report)?;
+  let mut main_future_filters = Vec::new();
+  for filter in future_filters {
+    if !filter.flags.worksheet || filter.list_id != u32::MAX || filter.user_view_guid != [0; 16] {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetAutoFilterNotMapped,
+        location,
+      )?;
+      continue;
+    }
+    main_future_filters.push(filter);
+  }
+  let future_range = main_future_filters.first().map(|filter| {
+    let range = filter.header.range;
+    XlsFilterRange {
+      first_row: u32::from(range.first_row),
+      last_row: u32::from(range.last_row),
+      first_column: u32::from(range.first_column),
+      last_column: u32::from(range.last_column),
+    }
+  });
+  if let Some(range) = future_range
+    && main_future_filters.iter().any(|filter| {
+      let candidate = filter.header.range;
+      range
+        != XlsFilterRange {
+          first_row: u32::from(candidate.first_row),
+          last_row: u32::from(candidate.last_row),
+          first_column: u32::from(candidate.first_column),
+          last_column: u32::from(candidate.last_column),
+        }
+    })
+  {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetAutoFilterNotMapped,
+      location,
+    )?;
+  }
+  if name_range.is_some() && future_range.is_some() && name_range != future_range {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetAutoFilterNotMapped,
+      location,
+    )?;
+  }
+  let filter_range = name_range.or(future_range);
+  let has_filter_records = !classic_filters.is_empty() || !main_future_filters.is_empty();
+  let has_filter_feature = !filter_info.is_empty() || has_filter_records || filter_mode_count != 0;
+  if filter_info.len() > 1
+    || filter_mode_count > 1
+    || (has_filter_records && filter_info.len() != 1)
+  {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetAutoFilterNotMapped,
+      location,
+    )?;
+  }
+  if let (Some(range), Some(entries)) = (filter_range, filter_info.first().copied())
+    && (!(1..=256).contains(&entries) || range.column_count() != Some(u32::from(entries)))
+  {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetAutoFilterNotMapped,
+      location,
+    )?;
+  }
+
+  let mut auto_filter = if has_filter_feature {
+    match filter_range.and_then(XlsFilterRange::reference) {
+      Some(reference) => Some(x::AutoFilter {
+        reference: Some(reference),
+        ..Default::default()
+      }),
+      None => {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorksheetAutoFilterNotMapped,
+          location,
+        )?;
+        None
+      }
+    }
+  } else {
+    None
+  };
+
+  if let Some(target) = &mut auto_filter {
+    let entry_limit = filter_info.first().copied();
+    for filter in classic_filters {
+      if entry_limit.is_some_and(|count| filter.entry_index >= count) {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorksheetAutoFilterNotMapped,
+          location,
+        )?;
+        continue;
+      }
+      let column = convert_classic_filter_column(filter, location, options, report)?;
+      push_unique_filter_column(target, column, location, options, report)?;
+    }
+    for filter in main_future_filters {
+      if entry_limit.is_some_and(|count| filter.entry_index >= count) {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorksheetAutoFilterNotMapped,
+          location,
+        )?;
+        continue;
+      }
+      let column = convert_future_filter_column(filter, location, options, report)?;
+      push_unique_filter_column(target, column, location, options, report)?;
+    }
+    target.filter_column.sort_by_key(|column| column.column_id);
+    report.record(Disposition::Mapped);
+  }
+
+  let mut worksheet_sort = None;
+  let mut filter_sort = None;
+  for source_sort in sort_data {
+    let target = convert_sort_state(source_sort, location, options, report)?;
+    match source_sort.options.parent {
+      SortFieldParent::Sheet => {
+        if worksheet_sort.is_some() {
+          unsupported(
+            report,
+            options,
+            ConversionCode::WorksheetSortStateNotMapped,
+            location,
+          )?;
+        } else {
+          worksheet_sort = target.map(Box::new);
+        }
+      }
+      SortFieldParent::AutoFilter => {
+        if filter_sort.is_some() {
+          unsupported(
+            report,
+            options,
+            ConversionCode::WorksheetSortStateNotMapped,
+            location,
+          )?;
+        } else {
+          filter_sort = target.map(Box::new);
+        }
+      }
+      SortFieldParent::Table | SortFieldParent::QueryTable => unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetSortStateNotMapped,
+        location,
+      )?,
+    }
+  }
+  if let Some(filter_sort) = filter_sort {
+    match &mut auto_filter {
+      Some(auto_filter) => auto_filter.sort_state = Some(filter_sort),
+      None => unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetSortStateNotMapped,
+        location,
+      )?,
+    }
+  }
+  Ok(ConvertedSheetSortAndFilter {
+    auto_filter: auto_filter.map(Box::new),
+    sort_state: worksheet_sort,
+  })
+}
+
+fn filter_database_range(
+  view: &XlsWorkbookView<'_>,
+  sheet_index: usize,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<XlsFilterRange>> {
+  let expected_scope = u16::try_from(sheet_index + 1)
+    .map_err(|_| olecfsdk::Error::Limit("XLS sheet index exceeds u16".into()))?;
+  let names = view
+    .defined_names()
+    .iter()
+    .copied()
+    .filter(|name| name.sheet_index == expected_scope && name.name == NameValue::BuiltIn(0x0d))
+    .collect::<Vec<_>>();
+  if names.len() > 1 {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetAutoFilterNotMapped,
+      location,
+    )?;
+  }
+  let Some(name) = names.first().copied() else {
+    return Ok(None);
+  };
+  let valid_envelope = name.formula.tokens.len() == 1
+    && name.formula.unparsed_tail.is_empty()
+    && name.formula_extra_tail.is_empty();
+  let Some(token) = name.formula.tokens.first().filter(|_| valid_envelope) else {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetAutoFilterNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  };
+  let FormulaTokenData::Area3d {
+    first_row,
+    last_row,
+    first_column,
+    last_column,
+    ..
+  } = token.data
+  else {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetAutoFilterNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  };
+  let external_sheet = view.resolve_formula_token_external_sheet(&token.data)?;
+  let expected_sheet = u16::try_from(sheet_index)
+    .map_err(|_| olecfsdk::Error::Limit("XLS sheet index exceeds u16".into()))?;
+  if !external_sheet.is_some_and(|sheet| {
+    sheet.source().first_sheet_index == expected_sheet
+      && sheet.source().last_sheet_index == expected_sheet
+  }) {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetAutoFilterNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  }
+  Ok(Some(XlsFilterRange {
+    first_row: u32::from(first_row),
+    last_row: u32::from(last_row),
+    first_column: u32::from(first_column),
+    last_column: u32::from(last_column),
+  }))
+}
+
+fn push_unique_filter_column(
+  target: &mut x::AutoFilter,
+  column: x::FilterColumn,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<()> {
+  if target
+    .filter_column
+    .iter()
+    .any(|existing| existing.column_id == column.column_id)
+  {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetAutoFilterNotMapped,
+      location,
+    )?;
+  } else {
+    target.filter_column.push(column);
+  }
+  Ok(())
+}
+
+fn convert_classic_filter_column(
+  source: &AutoFilterRecord,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<x::FilterColumn> {
+  let choice = if source.options.top_n {
+    if !(1..=500).contains(&source.options.top_count) {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetAutoFilterNotMapped,
+        location,
+      )?;
+    }
+    Some(x::FilterColumnChoice::Top10(x::Top10 {
+      top: Some(BooleanValue::from_bool(source.options.top)),
+      percent: Some(BooleanValue::from_bool(source.options.percent)),
+      val: f64::from(source.options.top_count),
+      ..Default::default()
+    }))
+  } else {
+    let mut filters = Vec::new();
+    for operand in &source.operands {
+      match convert_custom_filter_operand(operand) {
+        Some(filter) => filters.push(filter),
+        None if !matches!(operand.value, AutoFilterOperandValue::Unused { .. }) => unsupported(
+          report,
+          options,
+          ConversionCode::WorksheetAutoFilterNotMapped,
+          location,
+        )?,
+        None => {}
+      }
+    }
+    (!filters.is_empty()).then(|| {
+      x::FilterColumnChoice::XCustomFilters(x::CustomFilters {
+        and: (filters.len() > 1).then(|| BooleanValue::from_bool(!source.options.join_or)),
+        custom_filter: filters,
+      })
+    })
+  };
+  Ok(x::FilterColumn {
+    column_id: u32::from(source.entry_index),
+    filter_column_choice: choice,
+    ..Default::default()
+  })
+}
+
+fn convert_custom_filter_operand(source: &AutoFilterOperand) -> Option<x::CustomFilter> {
+  let (operator, value) = match source.value {
+    AutoFilterOperandValue::Unused { .. } => return None,
+    AutoFilterOperandValue::Blanks { .. } => (x::FilterOperatorValues::Equal, String::new()),
+    AutoFilterOperandValue::NonBlanks { .. } => (x::FilterOperatorValues::NotEqual, String::new()),
+    _ => (
+      convert_filter_operator(source.comparison)?,
+      filter_operand_text(source)?,
+    ),
+  };
+  Some(x::CustomFilter {
+    operator: Some(operator),
+    val: Some(value),
+  })
+}
+
+fn convert_filter_operator(value: u8) -> Option<x::FilterOperatorValues> {
+  Some(match value {
+    1 => x::FilterOperatorValues::LessThan,
+    2 => x::FilterOperatorValues::Equal,
+    3 => x::FilterOperatorValues::LessThanOrEqual,
+    4 => x::FilterOperatorValues::GreaterThan,
+    5 => x::FilterOperatorValues::NotEqual,
+    6 => x::FilterOperatorValues::GreaterThanOrEqual,
+    _ => return None,
+  })
+}
+
+fn filter_operand_text(source: &AutoFilterOperand) -> Option<String> {
+  match source.value {
+    AutoFilterOperandValue::Unused { .. }
+    | AutoFilterOperandValue::Blanks { .. }
+    | AutoFilterOperandValue::NonBlanks { .. } => None,
+    AutoFilterOperandValue::Rk { value, .. } => Some(decode_filter_rk(value).to_string()),
+    AutoFilterOperandValue::Number { bits } => {
+      let value = f64::from_bits(bits);
+      value.is_finite().then(|| value.to_string())
+    }
+    AutoFilterOperandValue::String { .. } => source.string.as_ref().and_then(biff_string_text),
+    AutoFilterOperandValue::BooleanOrError { value, .. } => {
+      let [raw, error] = value.to_le_bytes();
+      match (error, raw) {
+        (0, 0 | 1) => Some(raw.to_string()),
+        (1, raw) => formula_error(raw).map(str::to_owned),
+        _ => None,
+      }
+    }
+  }
+}
+
+fn decode_filter_rk(bits: u32) -> f64 {
+  let mut value = if bits & 2 != 0 {
+    f64::from((bits as i32) >> 2)
+  } else {
+    f64::from_bits(u64::from(bits & !3) << 32)
+  };
+  if bits & 1 != 0 {
+    value /= 100.0;
+  }
+  value
+}
+
+fn convert_future_filter_column(
+  source: &AutoFilter12Record,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<x::FilterColumn> {
+  let choice = match &source.filter {
+    AutoFilter12Filter::Criteria
+      if source.dynamic_filter_type != AutoFilter12DynamicFilter::None =>
+    {
+      Some(x::FilterColumnChoice::DynamicFilter(
+        convert_future_dynamic_filter(source, location, options, report)?,
+      ))
+    }
+    AutoFilter12Filter::Criteria => convert_future_criteria(source, location, options, report)?,
+    AutoFilter12Filter::CellColor(_) | AutoFilter12Filter::FontColor(_) => {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetAutoFilterNotMapped,
+        location,
+      )?;
+      None
+    }
+    AutoFilter12Filter::Icon {
+      icon_set,
+      icon_index,
+    } => match convert_icon_set(*icon_set) {
+      Some(icon_set) => Some(x::FilterColumnChoice::XIconFilter(x::IconFilter {
+        icon_set,
+        icon_id: Some(*icon_index),
+      })),
+      None => {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorksheetAutoFilterNotMapped,
+          location,
+        )?;
+        None
+      }
+    },
+  };
+  report.record(Disposition::Mapped);
+  Ok(x::FilterColumn {
+    column_id: u32::from(source.entry_index),
+    hidden_button: Some(BooleanValue::from_bool(source.hide_arrow)),
+    filter_column_choice: choice,
+    ..Default::default()
+  })
+}
+
+fn convert_future_dynamic_filter(
+  source: &AutoFilter12Record,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<x::DynamicFilter> {
+  let mut target = x::DynamicFilter {
+    r#type: convert_dynamic_filter(source.dynamic_filter_type),
+    ..Default::default()
+  };
+  let active = source
+    .criteria
+    .iter()
+    .filter_map(|criterion| match criterion.value.operand.value {
+      AutoFilterOperandValue::Unused { .. } => None,
+      AutoFilterOperandValue::Number { bits } => {
+        Some((criterion.value.operand.comparison, f64::from_bits(bits)))
+      }
+      _ => Some((criterion.value.operand.comparison, f64::NAN)),
+    })
+    .collect::<Vec<_>>();
+
+  let mapped = match source.dynamic_filter_type {
+    AutoFilter12DynamicFilter::AboveAverage => match active.as_slice() {
+      [(4, value)] if value.is_finite() => {
+        target.val = Some(*value);
+        true
+      }
+      _ => false,
+    },
+    AutoFilter12DynamicFilter::BelowAverage => match active.as_slice() {
+      [(1, value)] if value.is_finite() => {
+        target.val = Some(*value);
+        true
+      }
+      _ => false,
+    },
+    AutoFilter12DynamicFilter::Tomorrow
+    | AutoFilter12DynamicFilter::Today
+    | AutoFilter12DynamicFilter::Yesterday
+    | AutoFilter12DynamicFilter::NextWeek
+    | AutoFilter12DynamicFilter::ThisWeek
+    | AutoFilter12DynamicFilter::LastWeek
+    | AutoFilter12DynamicFilter::NextMonth
+    | AutoFilter12DynamicFilter::ThisMonth
+    | AutoFilter12DynamicFilter::LastMonth
+    | AutoFilter12DynamicFilter::NextQuarter
+    | AutoFilter12DynamicFilter::ThisQuarter
+    | AutoFilter12DynamicFilter::LastQuarter
+    | AutoFilter12DynamicFilter::NextYear
+    | AutoFilter12DynamicFilter::ThisYear
+    | AutoFilter12DynamicFilter::LastYear
+    | AutoFilter12DynamicFilter::YearToDate => {
+      let minimum = active
+        .iter()
+        .filter(|(comparison, _)| *comparison == 6)
+        .map(|(_, value)| *value)
+        .collect::<Vec<_>>();
+      let maximum = active
+        .iter()
+        .filter(|(comparison, _)| *comparison == 1)
+        .map(|(_, value)| *value)
+        .collect::<Vec<_>>();
+      match (active.len(), minimum.as_slice(), maximum.as_slice()) {
+        (2, [minimum], [maximum])
+          if minimum.is_finite() && maximum.is_finite() && minimum < maximum =>
+        {
+          target.val = Some(*minimum);
+          target.max_val = Some(*maximum);
+          true
+        }
+        _ => false,
+      }
+    }
+    AutoFilter12DynamicFilter::Quarter1
+    | AutoFilter12DynamicFilter::Quarter2
+    | AutoFilter12DynamicFilter::Quarter3
+    | AutoFilter12DynamicFilter::Quarter4
+    | AutoFilter12DynamicFilter::Month1
+    | AutoFilter12DynamicFilter::Month2
+    | AutoFilter12DynamicFilter::Month3
+    | AutoFilter12DynamicFilter::Month4
+    | AutoFilter12DynamicFilter::Month5
+    | AutoFilter12DynamicFilter::Month6
+    | AutoFilter12DynamicFilter::Month7
+    | AutoFilter12DynamicFilter::Month8
+    | AutoFilter12DynamicFilter::Month9
+    | AutoFilter12DynamicFilter::Month10
+    | AutoFilter12DynamicFilter::Month11
+    | AutoFilter12DynamicFilter::Month12 => true,
+    AutoFilter12DynamicFilter::None => false,
+  };
+  if !mapped {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetAutoFilterNotMapped,
+      location,
+    )?;
+  }
+  Ok(target)
+}
+
+fn convert_future_criteria(
+  source: &AutoFilter12Record,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<x::FilterColumnChoice>> {
+  let equality_list = source.criteria.iter().all(|criterion| {
+    criterion.value.operand.comparison == 2
+      && !matches!(
+        criterion.value.operand.value,
+        AutoFilterOperandValue::NonBlanks { .. }
+      )
+  });
+  if equality_list || !source.date_groupings.is_empty() {
+    let mut blank = false;
+    let mut filters_choice = Vec::new();
+    for criterion in &source.criteria {
+      let operand = &criterion.value.operand;
+      match operand.value {
+        AutoFilterOperandValue::Blanks { .. } if operand.comparison == 2 => blank = true,
+        AutoFilterOperandValue::Unused { .. } => {}
+        _ if operand.comparison == 2 => match filter_operand_text(operand) {
+          Some(value) => filters_choice.push(x::FiltersChoice::XFilter(x::Filter { val: value })),
+          None => unsupported(
+            report,
+            options,
+            ConversionCode::WorksheetAutoFilterNotMapped,
+            location,
+          )?,
+        },
+        _ => unsupported(
+          report,
+          options,
+          ConversionCode::WorksheetAutoFilterNotMapped,
+          location,
+        )?,
+      }
+    }
+    filters_choice.extend(
+      source
+        .date_groupings
+        .iter()
+        .map(|group| x::FiltersChoice::DateGroupItem(convert_date_grouping(&group.value))),
+    );
+    return Ok(Some(x::FilterColumnChoice::Filters(x::Filters {
+      blank: blank.then(|| BooleanValue::from_bool(true)),
+      filters_choice,
+      ..Default::default()
+    })));
+  }
+  let active = source
+    .criteria
+    .iter()
+    .filter(|criterion| {
+      !matches!(
+        criterion.value.operand.value,
+        AutoFilterOperandValue::Unused { .. }
+      )
+    })
+    .collect::<Vec<_>>();
+  if active.len() > 1 {
+    // MS-XLS does not carry the OOXML customFilters `and` bit in this
+    // production, so do not invent a relationship between two comparisons.
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetAutoFilterNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  }
+  let Some(filter) = active
+    .first()
+    .and_then(|criterion| convert_custom_filter_operand(&criterion.value.operand))
+  else {
+    return Ok(None);
+  };
+  Ok(Some(x::FilterColumnChoice::XCustomFilters(
+    x::CustomFilters {
+      and: None,
+      custom_filter: vec![filter],
+    },
+  )))
+}
+
+fn convert_date_grouping(source: &AutoFilter12DateGrouping) -> x::DateGroupItem {
+  let level = source.level;
+  x::DateGroupItem {
+    year: source.year,
+    month: (level != AutoFilter12DateGroupingLevel::Year).then_some(source.month),
+    day: matches!(
+      level,
+      AutoFilter12DateGroupingLevel::Day
+        | AutoFilter12DateGroupingLevel::Hour
+        | AutoFilter12DateGroupingLevel::Minute
+        | AutoFilter12DateGroupingLevel::Second
+    )
+    .then_some(source.day as u16),
+    hour: matches!(
+      level,
+      AutoFilter12DateGroupingLevel::Hour
+        | AutoFilter12DateGroupingLevel::Minute
+        | AutoFilter12DateGroupingLevel::Second
+    )
+    .then_some(source.hour),
+    minute: matches!(
+      level,
+      AutoFilter12DateGroupingLevel::Minute | AutoFilter12DateGroupingLevel::Second
+    )
+    .then_some(source.minute),
+    second: (level == AutoFilter12DateGroupingLevel::Second).then_some(source.second),
+    date_time_grouping: match level {
+      AutoFilter12DateGroupingLevel::Year => x::DateTimeGroupingValues::Year,
+      AutoFilter12DateGroupingLevel::Month => x::DateTimeGroupingValues::Month,
+      AutoFilter12DateGroupingLevel::Day => x::DateTimeGroupingValues::Day,
+      AutoFilter12DateGroupingLevel::Hour => x::DateTimeGroupingValues::Hour,
+      AutoFilter12DateGroupingLevel::Minute => x::DateTimeGroupingValues::Minute,
+      AutoFilter12DateGroupingLevel::Second => x::DateTimeGroupingValues::Second,
+    },
+  }
+}
+
+fn convert_dynamic_filter(source: AutoFilter12DynamicFilter) -> x::DynamicFilterValues {
+  match source {
+    AutoFilter12DynamicFilter::None => x::DynamicFilterValues::Null,
+    AutoFilter12DynamicFilter::AboveAverage => x::DynamicFilterValues::AboveAverage,
+    AutoFilter12DynamicFilter::BelowAverage => x::DynamicFilterValues::BelowAverage,
+    AutoFilter12DynamicFilter::Tomorrow => x::DynamicFilterValues::Tomorrow,
+    AutoFilter12DynamicFilter::Today => x::DynamicFilterValues::Today,
+    AutoFilter12DynamicFilter::Yesterday => x::DynamicFilterValues::Yesterday,
+    AutoFilter12DynamicFilter::NextWeek => x::DynamicFilterValues::NextWeek,
+    AutoFilter12DynamicFilter::ThisWeek => x::DynamicFilterValues::ThisWeek,
+    AutoFilter12DynamicFilter::LastWeek => x::DynamicFilterValues::LastWeek,
+    AutoFilter12DynamicFilter::NextMonth => x::DynamicFilterValues::NextMonth,
+    AutoFilter12DynamicFilter::ThisMonth => x::DynamicFilterValues::ThisMonth,
+    AutoFilter12DynamicFilter::LastMonth => x::DynamicFilterValues::LastMonth,
+    AutoFilter12DynamicFilter::NextQuarter => x::DynamicFilterValues::NextQuarter,
+    AutoFilter12DynamicFilter::ThisQuarter => x::DynamicFilterValues::ThisQuarter,
+    AutoFilter12DynamicFilter::LastQuarter => x::DynamicFilterValues::LastQuarter,
+    AutoFilter12DynamicFilter::NextYear => x::DynamicFilterValues::NextYear,
+    AutoFilter12DynamicFilter::ThisYear => x::DynamicFilterValues::ThisYear,
+    AutoFilter12DynamicFilter::LastYear => x::DynamicFilterValues::LastYear,
+    AutoFilter12DynamicFilter::YearToDate => x::DynamicFilterValues::YearToDate,
+    AutoFilter12DynamicFilter::Quarter1 => x::DynamicFilterValues::Quarter1,
+    AutoFilter12DynamicFilter::Quarter2 => x::DynamicFilterValues::Quarter2,
+    AutoFilter12DynamicFilter::Quarter3 => x::DynamicFilterValues::Quarter3,
+    AutoFilter12DynamicFilter::Quarter4 => x::DynamicFilterValues::Quarter4,
+    AutoFilter12DynamicFilter::Month1 => x::DynamicFilterValues::January,
+    AutoFilter12DynamicFilter::Month2 => x::DynamicFilterValues::February,
+    AutoFilter12DynamicFilter::Month3 => x::DynamicFilterValues::March,
+    AutoFilter12DynamicFilter::Month4 => x::DynamicFilterValues::April,
+    AutoFilter12DynamicFilter::Month5 => x::DynamicFilterValues::May,
+    AutoFilter12DynamicFilter::Month6 => x::DynamicFilterValues::June,
+    AutoFilter12DynamicFilter::Month7 => x::DynamicFilterValues::July,
+    AutoFilter12DynamicFilter::Month8 => x::DynamicFilterValues::August,
+    AutoFilter12DynamicFilter::Month9 => x::DynamicFilterValues::September,
+    AutoFilter12DynamicFilter::Month10 => x::DynamicFilterValues::October,
+    AutoFilter12DynamicFilter::Month11 => x::DynamicFilterValues::November,
+    AutoFilter12DynamicFilter::Month12 => x::DynamicFilterValues::December,
+  }
+}
+
+fn convert_icon_set(source: KpiSet) -> Option<x::IconSetValues> {
+  Some(match source {
+    KpiSet::None => return None,
+    KpiSet::ThreeArrows => x::IconSetValues::ThreeArrows,
+    KpiSet::ThreeArrowsGray => x::IconSetValues::ThreeArrowsGray,
+    KpiSet::ThreeFlags => x::IconSetValues::ThreeFlags,
+    KpiSet::ThreeTrafficLights1 => x::IconSetValues::ThreeTrafficLights1,
+    KpiSet::ThreeTrafficLights2 => x::IconSetValues::ThreeTrafficLights2,
+    KpiSet::ThreeSigns => x::IconSetValues::ThreeSigns,
+    KpiSet::ThreeSymbols => x::IconSetValues::ThreeSymbols,
+    KpiSet::ThreeSymbols2 => x::IconSetValues::ThreeSymbols2,
+    KpiSet::FourArrows => x::IconSetValues::FourArrows,
+    KpiSet::FourArrowsGray => x::IconSetValues::FourArrowsGray,
+    KpiSet::FourRedToBlack => x::IconSetValues::FourRedToBlack,
+    KpiSet::FourRating => x::IconSetValues::FourRating,
+    KpiSet::FourTrafficLights => x::IconSetValues::FourTrafficLights,
+    KpiSet::FiveArrows => x::IconSetValues::FiveArrows,
+    KpiSet::FiveArrowsGray => x::IconSetValues::FiveArrowsGray,
+    KpiSet::FiveRating => x::IconSetValues::FiveRating,
+    KpiSet::FiveQuarters => x::IconSetValues::FiveQuarters,
+  })
+}
+
+fn convert_sort_state(
+  source: &SortDataRecord,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<x::SortState>> {
+  let Some(reference) = XlsFilterRange::from_rfx(source.range).reference() else {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetSortStateNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  };
+  let sort_method = if source.options.alternate_method {
+    // BIFF only says "other than character order"; OOXML requires choosing
+    // stroke or phonetic order, which cannot be recovered from this bit.
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetSortStateNotMapped,
+      location,
+    )?;
+    None
+  } else {
+    None
+  };
+  let mut conditions = Vec::new();
+  for continuation in &source.conditions {
+    let condition = &continuation.condition;
+    let Some(reference) = XlsFilterRange::from_rfx(condition.range).reference() else {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetSortStateNotMapped,
+        location,
+      )?;
+      continue;
+    };
+    if condition.reserved != 0 {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetSortStateNotMapped,
+        location,
+      )?;
+    }
+    let custom_list = condition.custom_list.as_ref().and_then(biff_string_text);
+    if condition.custom_list.is_some() && custom_list.is_none() {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetSortStateNotMapped,
+        location,
+      )?;
+    }
+    let mut target = x::SortCondition {
+      descending: Some(BooleanValue::from_bool(condition.descending)),
+      reference,
+      custom_list,
+      ..Default::default()
+    };
+    match condition.data {
+      SortConditionData::Value { value, reserved } => {
+        if value != 0 || reserved != 0 {
+          unsupported(
+            report,
+            options,
+            ConversionCode::WorksheetSortStateNotMapped,
+            location,
+          )?;
+        }
+        target.sort_by = Some(x::SortByValues::Value);
+      }
+      SortConditionData::CellColor { .. } | SortConditionData::FontColor { .. } => {
+        // SortData refers to Globals DXF indices; those must be emitted into
+        // the target stylesheet before a dxfId can be valid.
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorksheetSortStateNotMapped,
+          location,
+        )?;
+        continue;
+      }
+      SortConditionData::Icon {
+        icon_set,
+        icon_index,
+      } => {
+        let Some(icon_set) = KpiSet::from_raw(icon_set).and_then(convert_icon_set) else {
+          unsupported(
+            report,
+            options,
+            ConversionCode::WorksheetSortStateNotMapped,
+            location,
+          )?;
+          continue;
+        };
+        target.sort_by = Some(x::SortByValues::Icon);
+        target.icon_set = Some(icon_set);
+        target.icon_id = u32::try_from(icon_index).ok();
+      }
+    }
+    conditions.push(x::SortStateChoice::XSortCondition(Box::new(target)));
+  }
+  report.record(Disposition::Mapped);
+  Ok(Some(x::SortState {
+    column_sort: Some(BooleanValue::from_bool(source.options.sort_columns)),
+    case_sensitive: Some(BooleanValue::from_bool(source.options.case_sensitive)),
+    sort_method,
+    reference,
+    sort_state_choice: conditions,
+    ..Default::default()
+  }))
+}
+
+#[derive(Debug)]
+struct XlsWindowGroup<'a> {
+  window: &'a Window2Record,
+  page_layout: Vec<&'a PlvRecord>,
+  scale: Vec<&'a SclRecord>,
+  pane: Vec<&'a PaneRecord>,
+  selections: Vec<&'a SelectionRecord>,
+}
+
+#[derive(Debug, Default)]
+struct XlsSheetWindows<'a> {
+  groups: Vec<XlsWindowGroup<'a>>,
+  orphan_view_records: bool,
+}
+
+fn collect_sheet_window_groups(source: XlsSheetRef<'_>) -> XlsSheetWindows<'_> {
+  let mut result = XlsSheetWindows::default();
+  for record in source.direct_records() {
+    match &record.data {
+      BiffRecordData::Window2(window) => result.groups.push(XlsWindowGroup {
+        window,
+        page_layout: Vec::new(),
+        scale: Vec::new(),
+        pane: Vec::new(),
+        selections: Vec::new(),
+      }),
+      // WORKSHEETCONTENT puts all normal WINDOW productions before every
+      // CUSTOMVIEW. Selection records after this delimiter belong to a
+      // custom view and must not be folded into the last normal window.
+      BiffRecordData::UserSViewBegin(_) | BiffRecordData::UserSViewBeginChart(_) => break,
+      BiffRecordData::Plv(value) => {
+        if let Some(group) = result.groups.last_mut() {
+          group.page_layout.push(value);
+        } else {
+          result.orphan_view_records = true;
+        }
+      }
+      BiffRecordData::Scl(value) => {
+        if let Some(group) = result.groups.last_mut() {
+          group.scale.push(value);
+        } else {
+          result.orphan_view_records = true;
+        }
+      }
+      BiffRecordData::Pane(value) => {
+        if let Some(group) = result.groups.last_mut() {
+          group.pane.push(value);
+        } else {
+          result.orphan_view_records = true;
+        }
+      }
+      BiffRecordData::Selection(value) => {
+        if let Some(group) = result.groups.last_mut() {
+          group.selections.push(value);
+        } else {
+          result.orphan_view_records = true;
+        }
+      }
+      _ => {}
+    }
+  }
+  result
+}
+
+fn convert_sheet_properties(
+  source: XlsSheetRef<'_>,
+  windows: &XlsSheetWindows<'_>,
+  sheet_index: usize,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<Box<SheetProperties>>> {
+  let location = SourceLocation::XlsSheet {
+    workbook_index: 0,
+    sheet_index,
+  };
+  let mut worksheet_options = Vec::new();
+  let mut code_names = Vec::new();
+  let mut extensions = Vec::new();
+  let mut synchronization = Vec::new();
+  let mut filter_mode_count = 0usize;
+  for record in source.direct_records() {
+    match &record.data {
+      BiffRecordData::WsBool(value) => worksheet_options.push(*value),
+      BiffRecordData::CodeName(value) => code_names.push(value),
+      BiffRecordData::SheetExt(value) => extensions.push(value),
+      BiffRecordData::Sync(value) => synchronization.push(value),
+      BiffRecordData::Empty {
+        kind: EmptyRecordKind::FilterMode,
+        ..
+      } => filter_mode_count += 1,
+      _ => {}
+    }
+  }
+  if worksheet_options.len() != 1
+    || code_names.len() > 1
+    || extensions.len() > 1
+    || synchronization.len() > 1
+    || filter_mode_count > 1
+  {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetPropertiesNotMapped,
+      location,
+    )?;
+  }
+
+  let mut target = SheetProperties::default();
+  let mut mapped = false;
+  if let Some(source) = worksheet_options.first().copied() {
+    if source.dialog {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetPropertiesNotMapped,
+        location,
+      )?;
+    }
+    let right_to_left = windows
+      .groups
+      .first()
+      .is_some_and(|group| group.window.flags.contains(Window2Flags::RIGHT_TO_LEFT));
+    if windows
+      .groups
+      .iter()
+      .any(|group| group.window.flags.contains(Window2Flags::RIGHT_TO_LEFT) != right_to_left)
+    {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetPropertiesNotMapped,
+        location,
+      )?;
+    }
+    target.sync_horizontal = Some(BooleanValue::from_bool(source.synchronize_horizontal));
+    target.sync_vertical = Some(BooleanValue::from_bool(source.synchronize_vertical));
+    target.transition_evaluation = Some(BooleanValue::from_bool(
+      source.transition_formula_evaluation,
+    ));
+    target.transition_entry = Some(BooleanValue::from_bool(source.transition_formula_entry));
+    target.outline_properties = Some(OutlineProperties {
+      apply_styles: Some(BooleanValue::from_bool(source.apply_outline_styles)),
+      summary_below: Some(BooleanValue::from_bool(source.summary_rows_below)),
+      summary_right: Some(BooleanValue::from_bool(summary_columns_on_right(
+        source.summary_columns_opposite_default_side,
+        right_to_left,
+      ))),
+      ..Default::default()
+    });
+    target.page_setup_properties = Some(PageSetupProperties {
+      auto_page_breaks: Some(BooleanValue::from_bool(source.show_automatic_page_breaks)),
+      fit_to_page: Some(BooleanValue::from_bool(source.fit_to_page)),
+    });
+    if (source.synchronize_horizontal || source.synchronize_vertical) && synchronization.is_empty()
+    {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetPropertiesNotMapped,
+        location,
+      )?;
+    }
+    mapped = true;
+  }
+
+  if let Some(source) = synchronization.first() {
+    target.sync_reference = Some(cell_reference(source.row, source.column));
+    mapped = true;
+  }
+  if let Some(source) = code_names.first() {
+    target.code_name = biff_string_text(&source.name.text);
+    if target.code_name.is_none() {
+      unsupported(
+        report,
+        options,
+        ConversionCode::CompatibilityUtf16,
+        location,
+      )?;
+    } else {
+      mapped = true;
+    }
+  }
+  if filter_mode_count == 1 {
+    target.filter_mode = Some(BooleanValue::True);
+    mapped = true;
+  }
+  if let Some(source) = extensions.first() {
+    if let Some(optional) = source.optional {
+      target.published = Some(BooleanValue::from_bool(!optional.flags.not_published));
+      target.enable_format_conditions_calculation = Some(BooleanValue::from_bool(
+        optional.flags.calculate_conditional_formats,
+      ));
+    }
+    target.tab_color = convert_sheet_tab_color(source);
+    if source.tab_color.color_index != 0x7f && target.tab_color.is_none() {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetPropertiesNotMapped,
+        location,
+      )?;
+    }
+    mapped = true;
+  }
+
+  if mapped {
+    report.record(Disposition::Mapped);
+    Ok(Some(Box::new(target)))
+  } else {
+    Ok(None)
+  }
+}
+
+/// MS-XLS fColSumsRight is relative to display direction rather than an
+/// absolute "on the right" value like SpreadsheetML summaryRight.
+const fn summary_columns_on_right(opposite_default_side: bool, right_to_left: bool) -> bool {
+  opposite_default_side == right_to_left
+}
+
+fn convert_sheet_tab_color(source: &SheetExtRecord) -> Option<TabColor> {
+  if source.tab_color.color_index == 0x7f {
+    return None;
+  }
+  if let Some(optional) = source.optional
+    && optional.flags.color_index == source.tab_color.color_index
+  {
+    return convert_cf_tab_color(optional.color);
+  }
+  Some(TabColor {
+    indexed: Some(u32::from(source.tab_color.color_index)),
+    ..Default::default()
+  })
+}
+
+fn convert_cf_tab_color(source: CfColor) -> Option<TabColor> {
+  let tint = f64::from_bits(source.tint_bits);
+  let mut target = TabColor {
+    tint: (tint != 0.0).then_some(tint),
+    ..Default::default()
+  };
+  match source.color_type {
+    0 => target.auto = Some(BooleanValue::True),
+    1 => target.indexed = Some(source.color_value),
+    2 => {
+      let [red, green, blue, alpha] = source.color_value.to_le_bytes();
+      target.rgb = Some(format!("{alpha:02X}{red:02X}{green:02X}{blue:02X}"));
+    }
+    3 => target.theme = Some(source.color_value),
+    _ => return None,
+  }
+  Some(target)
+}
+
+fn convert_sheet_dimension(
+  source: XlsSheetRef<'_>,
+  sheet_index: usize,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<SheetDimension>> {
+  let dimensions = source
+    .direct_records()
+    .filter_map(|record| match &record.data {
+      BiffRecordData::Dimensions(value) => Some(value),
+      _ => None,
+    })
+    .collect::<Vec<_>>();
+  let location = SourceLocation::XlsSheet {
+    workbook_index: 0,
+    sheet_index,
+  };
+  let Some(source) = dimensions
+    .first()
+    .copied()
+    .filter(|_| dimensions.len() == 1)
+  else {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetDimensionNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  };
+  let reference = if source.last_row_exclusive == 0 || source.last_column_exclusive == 0 {
+    "A1".to_owned()
+  } else if source.first_row >= source.last_row_exclusive
+    || source.first_column >= source.last_column_exclusive
+  {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetDimensionNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  } else {
+    let first = cell_reference_u32(source.first_row, u32::from(source.first_column));
+    let last = cell_reference_u32(
+      source.last_row_exclusive - 1,
+      u32::from(source.last_column_exclusive - 1),
+    );
+    match (first, last) {
+      (Some(first), Some(last)) if first == last => first,
+      (Some(first), Some(last)) => format!("{first}:{last}"),
+      _ => {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorksheetDimensionNotMapped,
+          location,
+        )?;
+        return Ok(None);
+      }
+    }
+  };
+  report.record(Disposition::Mapped);
+  Ok(Some(SheetDimension { reference }))
+}
+
+#[derive(Default)]
+struct ConvertedPhoneticInformation {
+  properties: Option<PhoneticProperties>,
+  visible_ranges: Vec<CellRange>,
+}
+
+fn convert_phonetic_information(
+  view: &XlsWorkbookView<'_>,
+  source: XlsSheetRef<'_>,
+  sheet_index: usize,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<ConvertedPhoneticInformation> {
+  let values = source
+    .direct_records()
+    .filter_map(|record| match &record.data {
+      BiffRecordData::PhoneticInfo(value) => Some(value),
+      _ => None,
+    })
+    .collect::<Vec<_>>();
+  let location = SourceLocation::XlsSheet {
+    workbook_index: 0,
+    sheet_index,
+  };
+  let Some(source) = values.first().copied().filter(|_| values.len() == 1) else {
+    if values.len() > 1 {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetPhoneticInformationNotMapped,
+        location,
+      )?;
+    }
+    return Ok(ConvertedPhoneticInformation::default());
+  };
+  let font_id = font_position(source.font_index)
+    .filter(|_| view.font(source.font_index).is_some())
+    .and_then(|value| u32::try_from(value).ok());
+  let Some(font_id) = font_id else {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetPhoneticInformationNotMapped,
+      location,
+    )?;
+    return Ok(ConvertedPhoneticInformation {
+      properties: None,
+      visible_ranges: source.ranges.clone(),
+    });
+  };
+  let r#type = match source.flags.phonetic_type() {
+    PhoneticType::NarrowKatakana => PhoneticValues::HalfWidthKatakana,
+    PhoneticType::WideKatakana => PhoneticValues::FullWidthKatakana,
+    PhoneticType::Hiragana => PhoneticValues::Hiragana,
+    PhoneticType::Any => PhoneticValues::NoConversion,
+  };
+  let alignment = match source.flags.alignment() {
+    PhoneticAlignment::General => PhoneticAlignmentValues::NoControl,
+    PhoneticAlignment::Left => PhoneticAlignmentValues::Left,
+    PhoneticAlignment::Center => PhoneticAlignmentValues::Center,
+    PhoneticAlignment::Distributed => PhoneticAlignmentValues::Distributed,
+  };
+  report.record(Disposition::Mapped);
+  Ok(ConvertedPhoneticInformation {
+    properties: Some(PhoneticProperties {
+      font_id,
+      r#type: Some(r#type),
+      alignment: Some(alignment),
+    }),
+    visible_ranges: source.ranges.clone(),
+  })
+}
+
+fn phonetic_is_visible(ranges: &[CellRange], row: u16, column: u16) -> bool {
+  ranges.iter().any(|range| {
+    (range.first_row..=range.last_row).contains(&row)
+      && (range.first_column..=range.last_column).contains(&column)
+  })
+}
+
+fn convert_workbook_views(
+  view: &XlsWorkbookView<'_>,
+  target_sheet_positions: &[Option<u32>],
+  sheet_windows: &[XlsSheetWindows<'_>],
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Vec<WorkbookView>> {
+  let source = view
+    .globals_records()
+    .iter()
+    .filter_map(|record| match &record.data {
+      BiffRecordData::Window1(value) => Some(value),
+      _ => None,
+    })
+    .collect::<Vec<_>>();
+  if source.is_empty() {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorkbookViewNotMapped,
+      SourceLocation::XlsWorkbook { workbook_index: 0 },
+    )?;
+    return Ok(Vec::new());
+  }
+
+  source
+    .into_iter()
+    .enumerate()
+    .map(|(view_index, source)| {
+      let active_source = usize::from(source.active_sheet);
+      let first_source = usize::from(source.first_visible_tab);
+      let active_tab = target_sheet_positions.get(active_source).copied().flatten();
+      let first_sheet = target_sheet_positions.get(first_source).copied().flatten();
+      let active_window_sheets = sheet_windows
+        .iter()
+        .enumerate()
+        .filter_map(|(sheet_index, windows)| {
+          windows
+            .groups
+            .get(view_index)
+            .filter(|group| group.window.flags.contains(Window2Flags::ACTIVE))
+            .map(|_| sheet_index)
+        })
+        .collect::<Vec<_>>();
+      let selected_window_count = sheet_windows
+        .iter()
+        .filter(|windows| {
+          windows
+            .groups
+            .get(view_index)
+            .is_some_and(|group| group.window.flags.contains(Window2Flags::SELECTED))
+        })
+        .count();
+      let invalid = source.width < 1
+        || source.height < 1
+        || source.tab_width_ratio > 1000
+        || active_tab.is_none()
+        || first_sheet.is_none()
+        || active_window_sheets.as_slice() != [active_source]
+        || selected_window_count != usize::from(source.selected_tab_count);
+      if invalid {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorkbookViewNotMapped,
+          SourceLocation::XlsWorkbook { workbook_index: 0 },
+        )?;
+      }
+      let visibility = if source.flags & 0x0004 != 0 {
+        VisibilityValues::VeryHidden
+      } else if source.flags & 0x0001 != 0 {
+        VisibilityValues::Hidden
+      } else {
+        VisibilityValues::Visible
+      };
+      report.record(Disposition::Mapped);
+      Ok(WorkbookView {
+        visibility: Some(visibility),
+        minimized: bool_value(source.flags & 0x0002 != 0),
+        show_horizontal_scroll: bool_value(source.flags & 0x0008 != 0),
+        show_vertical_scroll: bool_value(source.flags & 0x0010 != 0),
+        show_sheet_tabs: bool_value(source.flags & 0x0020 != 0),
+        x_window: Some(i32::from(source.horizontal_position)),
+        y_window: Some(i32::from(source.vertical_position)),
+        window_width: u32::try_from(source.width).ok(),
+        window_height: u32::try_from(source.height).ok(),
+        tab_ratio: (source.tab_width_ratio <= 1000).then_some(u32::from(source.tab_width_ratio)),
+        first_sheet,
+        active_tab,
+        auto_filter_date_grouping: bool_value(source.flags & 0x0040 == 0),
+        ..Default::default()
+      })
+    })
+    .collect()
+}
+
+fn convert_sheet_format_properties(
+  source: XlsSheetRef<'_>,
+  sheet_index: usize,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<SheetFormatProperties>> {
+  let mut default_rows = Vec::new();
+  let mut base_widths = Vec::new();
+  let mut default_widths = Vec::new();
+  let mut guts = Vec::new();
+  for record in source.direct_records() {
+    match &record.data {
+      BiffRecordData::DefaultRowHeight(value) => default_rows.push(value),
+      BiffRecordData::FixedU16 {
+        kind: FixedU16RecordKind::DefaultColWidth,
+        value,
+      } => base_widths.push(*value),
+      BiffRecordData::FixedU16 {
+        kind: FixedU16RecordKind::StandardWidth,
+        value,
+      } => default_widths.push(*value),
+      BiffRecordData::Guts(value) => guts.push(value),
+      _ => {}
+    }
+  }
+  let location = SourceLocation::XlsSheet {
+    workbook_index: 0,
+    sheet_index,
+  };
+  let Some(default_row) = default_rows
+    .first()
+    .copied()
+    .filter(|_| default_rows.len() == 1)
+  else {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetDefaultFormattingNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  };
+  let hidden = default_row.flags & 0x0002 != 0;
+  let valid_height = if hidden {
+    (0..=8179).contains(&default_row.height)
+  } else {
+    (1..=8179).contains(&default_row.height)
+  };
+  let base_column_width = match base_widths.as_slice() {
+    [value] if *value <= 255 => Some(u32::from(*value)),
+    [value] => {
+      let _ = value;
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetDefaultFormattingNotMapped,
+        location,
+      )?;
+      None
+    }
+    [] => {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetDefaultFormattingNotMapped,
+        location,
+      )?;
+      None
+    }
+    _ => {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetDefaultFormattingNotMapped,
+        location,
+      )?;
+      None
+    }
+  };
+  let default_column_width = match default_widths.as_slice() {
+    [value] => Some(f64::from(*value) / 256.0),
+    [] => None,
+    _ => {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetDefaultFormattingNotMapped,
+        location,
+      )?;
+      None
+    }
+  };
+  if !valid_height {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetDefaultFormattingNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  }
+  let actual_outline_level_row = source
+    .row_records()
+    .map(|row| u8::try_from(row.flags & 0x0000_0007).expect("three bits fit u8"))
+    .max()
+    .filter(|value| *value != 0);
+  let actual_outline_level_column = source
+    .column_infos()
+    .map(|column| u8::try_from((column.flags >> 8) & 0x0007).expect("three bits fit u8"))
+    .max()
+    .filter(|value| *value != 0);
+  let (outline_level_row, outline_level_column) = match guts.as_slice() {
+    [] => (actual_outline_level_row, actual_outline_level_column),
+    [guts] => {
+      if !guts_outline_level_is_valid(guts.maximum_row_outline_level)
+        || !guts_outline_level_is_valid(guts.maximum_column_outline_level)
+      {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorksheetDefaultFormattingNotMapped,
+          location,
+        )?;
+        (actual_outline_level_row, actual_outline_level_column)
+      } else {
+        let declared_row = guts_outline_level(guts.maximum_row_outline_level);
+        let declared_column = guts_outline_level(guts.maximum_column_outline_level);
+        if declared_row != actual_outline_level_row
+          || declared_column != actual_outline_level_column
+        {
+          unsupported(
+            report,
+            options,
+            ConversionCode::WorksheetDefaultFormattingNotMapped,
+            location,
+          )?;
+        }
+        (declared_row, declared_column)
+      }
+    }
+    _ => {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetDefaultFormattingNotMapped,
+        location,
+      )?;
+      (actual_outline_level_row, actual_outline_level_column)
+    }
+  };
+  report.record(Disposition::Mapped);
+  Ok(Some(SheetFormatProperties {
+    base_column_width,
+    default_column_width,
+    default_row_height: f64::from(default_row.height) / 20.0,
+    custom_height: bool_attribute(default_row.flags & 0x0001 != 0),
+    zero_height: bool_attribute(hidden),
+    thick_top: bool_attribute(default_row.flags & 0x0004 != 0),
+    thick_bottom: bool_attribute(default_row.flags & 0x0008 != 0),
+    outline_level_row,
+    outline_level_column,
+    ..Default::default()
+  }))
+}
+
+const fn guts_outline_level(value: u16) -> Option<u8> {
+  match value {
+    2..=8 => Some((value - 1) as u8),
+    _ => None,
+  }
+}
+
+const fn guts_outline_level_is_valid(value: u16) -> bool {
+  matches!(value, 0 | 2..=8)
+}
+
+fn convert_sheet_views(
+  source: &XlsSheetWindows<'_>,
+  workbook_view_count: usize,
+  sheet_index: usize,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<Box<SheetViews>>> {
+  let location = SourceLocation::XlsSheet {
+    workbook_index: 0,
+    sheet_index,
+  };
+  if source.orphan_view_records || source.groups.len() != workbook_view_count {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetViewNotMapped,
+      location,
+    )?;
+  }
+  let mut sheet_view = Vec::with_capacity(source.groups.len().min(workbook_view_count));
+  for (view_index, source) in source.groups.iter().take(workbook_view_count).enumerate() {
+    let page_layout = match source.page_layout.as_slice() {
+      [] => None,
+      [value] => Some(*value),
+      _ => {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorksheetViewNotMapped,
+          location,
+        )?;
+        None
+      }
+    };
+    let scale = match source.scale.as_slice() {
+      [] => None,
+      [value] => Some(*value),
+      _ => {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorksheetViewNotMapped,
+          location,
+        )?;
+        None
+      }
+    };
+    let flags = source.window.flags;
+    let page_break_preview = flags.contains(Window2Flags::PAGE_BREAK_PREVIEW);
+    let page_layout_view =
+      page_layout.is_some_and(|value| value.flags.contains(PlvFlags::PAGE_LAYOUT_VIEW));
+    let view = if page_break_preview && page_layout_view {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetViewNotMapped,
+        location,
+      )?;
+      None
+    } else if page_break_preview {
+      Some(SheetViewValues::PageBreakPreview)
+    } else if page_layout_view {
+      Some(SheetViewValues::PageLayout)
+    } else {
+      Some(SheetViewValues::Normal)
+    };
+    let valid_top_left = source.window.left_column <= 255
+      && (!flags.contains(Window2Flags::FREEZE_PANES)
+        || (source.window.left_column != 255 && source.window.top_row != u16::MAX));
+    let valid_grid_color = source.window.header_color <= 64
+      && (flags.contains(Window2Flags::DEFAULT_HEADER) == (source.window.header_color == 64));
+    if !valid_top_left
+      || !valid_grid_color
+      || (flags.contains(Window2Flags::FREEZE_NO_SPLIT)
+        && !flags.contains(Window2Flags::FREEZE_PANES))
+    {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetViewNotMapped,
+        location,
+      )?;
+    }
+    let (page_break_zoom, normal_zoom) = match source.window.extension {
+      Window2Extension::None => (None, None),
+      Window2Extension::Zoom {
+        page_break_zoom,
+        normal_zoom,
+        ..
+      } => {
+        if !valid_saved_zoom(page_break_zoom) || !valid_saved_zoom(normal_zoom) {
+          unsupported(
+            report,
+            options,
+            ConversionCode::WorksheetViewNotMapped,
+            location,
+          )?;
+        }
+        (
+          nonzero_valid_zoom(page_break_zoom),
+          nonzero_valid_zoom(normal_zoom),
+        )
+      }
+    };
+    let zoom_scale = scale
+      .map(|scale| convert_current_zoom(scale, location, options, report))
+      .transpose()?
+      .flatten();
+    let page_layout_zoom = if let Some(page_layout) = page_layout {
+      if !valid_saved_zoom(page_layout.zoom_scale) {
+        unsupported(
+          report,
+          options,
+          ConversionCode::WorksheetViewNotMapped,
+          location,
+        )?;
+        None
+      } else {
+        nonzero_valid_zoom(page_layout.zoom_scale)
+      }
+    } else {
+      None
+    };
+    let pane = convert_pane(source, sheet_index, options, report)?;
+    let selection = convert_selections(&source.selections, sheet_index, options, report)?;
+    sheet_view.push(SheetView {
+      show_formulas: bool_value(flags.contains(Window2Flags::DISPLAY_FORMULAS)),
+      show_grid_lines: bool_value(flags.contains(Window2Flags::DISPLAY_GRIDLINES)),
+      show_row_col_headers: bool_value(flags.contains(Window2Flags::DISPLAY_ROW_COLUMN_HEADINGS)),
+      show_zeros: bool_value(flags.contains(Window2Flags::DISPLAY_ZEROS)),
+      right_to_left: bool_value(flags.contains(Window2Flags::RIGHT_TO_LEFT)),
+      tab_selected: bool_value(flags.contains(Window2Flags::SELECTED)),
+      show_ruler: page_layout
+        .map(|value| BooleanValue::from_bool(value.flags.contains(PlvFlags::RULER_VISIBLE))),
+      show_outline_symbols: bool_value(flags.contains(Window2Flags::DISPLAY_OUTLINE)),
+      default_grid_color: bool_value(flags.contains(Window2Flags::DEFAULT_HEADER)),
+      show_white_space: page_layout
+        .map(|value| BooleanValue::from_bool(!value.flags.contains(PlvFlags::WHITESPACE_HIDDEN))),
+      view,
+      top_left_cell: valid_top_left
+        .then(|| cell_reference(source.window.top_row, source.window.left_column)),
+      color_id: valid_grid_color.then_some(u32::from(source.window.header_color)),
+      zoom_scale,
+      zoom_scale_normal: normal_zoom,
+      zoom_scale_sheet_layout_view: page_break_zoom,
+      zoom_scale_page_layout_view: page_layout_zoom,
+      workbook_view_id: u32::try_from(view_index)
+        .map_err(|_| olecfsdk::Error::Limit("XLS workbook view index exceeds u32".into()))?,
+      pane,
+      selection,
+      ..Default::default()
+    });
+    report.record(Disposition::Mapped);
+  }
+  Ok((!sheet_view.is_empty()).then(|| {
+    Box::new(SheetViews {
+      sheet_view,
+      ..Default::default()
+    })
+  }))
+}
+
+#[derive(Debug, Default)]
+struct XlsPageSettings {
+  print_options: Option<PrintOptions>,
+  page_margins: Option<PageMargins>,
+  page_setup: Option<PageSetup>,
+  header_footer: Option<Box<HeaderFooter>>,
+  row_breaks: Option<RowBreaks>,
+  column_breaks: Option<ColumnBreaks>,
+}
+
+fn convert_page_settings(
+  source: XlsSheetRef<'_>,
+  sheet_index: usize,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<XlsPageSettings> {
+  let location = SourceLocation::XlsSheet {
+    workbook_index: 0,
+    sheet_index,
+  };
+  let mut print_headers = Vec::new();
+  let mut print_gridlines = Vec::new();
+  let mut gridsets = Vec::new();
+  let mut horizontal_centers = Vec::new();
+  let mut vertical_centers = Vec::new();
+  let mut left_margins = Vec::new();
+  let mut right_margins = Vec::new();
+  let mut top_margins = Vec::new();
+  let mut bottom_margins = Vec::new();
+  let mut setups = Vec::new();
+  let mut headers = Vec::new();
+  let mut footers = Vec::new();
+  let mut extended = Vec::new();
+  let mut row_break_records = Vec::new();
+  let mut column_break_records = Vec::new();
+  for record in source.direct_records() {
+    match &record.data {
+      BiffRecordData::FixedU16 { kind, value } => match kind {
+        FixedU16RecordKind::PrintHeaders => print_headers.push(*value),
+        FixedU16RecordKind::PrintGridlines => print_gridlines.push(*value),
+        FixedU16RecordKind::Gridset => gridsets.push(*value),
+        FixedU16RecordKind::HCenter => horizontal_centers.push(*value),
+        FixedU16RecordKind::VCenter => vertical_centers.push(*value),
+        _ => {}
+      },
+      BiffRecordData::FixedF64Bits { kind, bits } => match kind {
+        FixedF64RecordKind::LeftMargin => left_margins.push(*bits),
+        FixedF64RecordKind::RightMargin => right_margins.push(*bits),
+        FixedF64RecordKind::TopMargin => top_margins.push(*bits),
+        FixedF64RecordKind::BottomMargin => bottom_margins.push(*bits),
+        _ => {}
+      },
+      BiffRecordData::PrintSetup(value) => setups.push(value),
+      BiffRecordData::Header(value) => headers.push(value),
+      BiffRecordData::Footer(value) => footers.push(value),
+      BiffRecordData::ExtendedHeaderFooter(value) if value.sheet_view_guid == [0; 16] => {
+        extended.push(value)
+      }
+      BiffRecordData::HorizontalPageBreaks(value) => row_break_records.push(value),
+      BiffRecordData::VerticalPageBreaks(value) => column_break_records.push(value),
+      _ => {}
+    }
+  }
+
+  let setup = match setups.as_slice() {
+    [value] => Some(*value),
+    _ => {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetPageSetupNotMapped,
+        location,
+      )?;
+      None
+    }
+  };
+  Ok(XlsPageSettings {
+    print_options: convert_print_options(
+      &print_headers,
+      &print_gridlines,
+      &gridsets,
+      &horizontal_centers,
+      &vertical_centers,
+      location,
+      options,
+      report,
+    )?,
+    page_margins: convert_page_margins(
+      &left_margins,
+      &right_margins,
+      &top_margins,
+      &bottom_margins,
+      setup,
+      location,
+      options,
+      report,
+    )?,
+    page_setup: setup
+      .map(|value| convert_page_setup(value, location, options, report))
+      .transpose()?,
+    header_footer: convert_header_footer(&headers, &footers, &extended, location, options, report)?,
+    row_breaks: convert_row_breaks(&row_break_records, location, options, report)?,
+    column_breaks: convert_column_breaks(&column_break_records, location, options, report)?,
+  })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_print_options(
+  print_headers: &[u16],
+  print_gridlines: &[u16],
+  gridsets: &[u16],
+  horizontal_centers: &[u16],
+  vertical_centers: &[u16],
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<PrintOptions>> {
+  let cardinality_valid = [
+    print_headers.len(),
+    print_gridlines.len(),
+    gridsets.len(),
+    horizontal_centers.len(),
+    vertical_centers.len(),
+  ]
+  .into_iter()
+  .all(|count| count == 1);
+  if !cardinality_valid {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetPrintOptionsNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  }
+  let headings = print_headers[0];
+  let grid_lines = print_gridlines[0];
+  let grid_lines_set = gridsets[0];
+  let horizontal_centered = horizontal_centers[0];
+  let vertical_centered = vertical_centers[0];
+  if headings > 1 || grid_lines_set > 1 || horizontal_centered > 1 || vertical_centered > 1 {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetPrintOptionsNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  }
+  report.record(Disposition::Mapped);
+  Ok(Some(PrintOptions {
+    horizontal_centered: bool_value(horizontal_centered == 1),
+    vertical_centered: bool_value(vertical_centered == 1),
+    headings: bool_value(headings == 1),
+    // PrintGrid's upper fifteen bits are explicitly unused by MS-XLS.
+    grid_lines: bool_value(grid_lines & 1 != 0),
+    grid_lines_set: bool_value(grid_lines_set == 1),
+  }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_page_margins(
+  left: &[u64],
+  right: &[u64],
+  top: &[u64],
+  bottom: &[u64],
+  setup: Option<&PrintSetupRecord>,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<PageMargins>> {
+  let Some(setup) = setup else {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetPageMarginsNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  };
+  // MS-XLS makes the four side-margin records optional. Both LibreOffice and
+  // POI apply these BIFF defaults when a record is absent.
+  let margin = |values: &[u64], default: f64| match values {
+    [] => Some(default),
+    [bits] => Some(f64::from_bits(*bits)),
+    _ => None,
+  };
+  let values = (
+    margin(left, 0.75),
+    margin(right, 0.75),
+    margin(top, 1.0),
+    margin(bottom, 1.0),
+    Some(f64::from_bits(setup.header_margin_bits)),
+    Some(f64::from_bits(setup.footer_margin_bits)),
+  );
+  let (Some(left), Some(right), Some(top), Some(bottom), Some(header), Some(footer)) = values
+  else {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetPageMarginsNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  };
+  let valid = [left, right, top, bottom]
+    .into_iter()
+    .all(|value| value.is_finite() && (0.0..=49.0).contains(&value))
+    && [header, footer]
+      .into_iter()
+      .all(|value| value.is_finite() && (0.0..49.0).contains(&value));
+  if !valid {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetPageMarginsNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  }
+  report.record(Disposition::Mapped);
+  Ok(Some(PageMargins {
+    left,
+    right,
+    top,
+    bottom,
+    header,
+    footer,
+  }))
+}
+
+fn convert_page_setup(
+  source: &PrintSetupRecord,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<PageSetup> {
+  let source_options = source.options;
+  let printer_values_defined = !source_options.no_printer_settings;
+  let paper_size_valid = !printer_values_defined || !(118..=255).contains(&source.paper_size);
+  let scale_valid = !printer_values_defined || (10..=400).contains(&source.scale);
+  let fit_width_valid = source.fit_width <= 32767;
+  let fit_height_valid = source.fit_height <= 32767;
+  if source_options.reserved != 0
+    || !paper_size_valid
+    || !scale_valid
+    || !fit_width_valid
+    || !fit_height_valid
+  {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetPageSetupNotMapped,
+      location,
+    )?;
+  }
+  let cell_comments = if !source_options.print_comments {
+    CellCommentsValues::None
+  } else if source_options.comments_at_end {
+    CellCommentsValues::AtEnd
+  } else {
+    CellCommentsValues::AsDisplayed
+  };
+  let errors = match source_options.print_errors {
+    0 => PrintErrorValues::Displayed,
+    1 => PrintErrorValues::Blank,
+    2 => PrintErrorValues::Dash,
+    3 => PrintErrorValues::Na,
+    _ => unreachable!("two-bit print error value"),
+  };
+  let orientation = printer_values_defined.then_some(if source_options.no_orientation {
+    // MS-XLS explicitly requires portrait output when fNoOrient is set.
+    OrientationValues::Portrait
+  } else if source_options.portrait {
+    OrientationValues::Portrait
+  } else {
+    OrientationValues::Landscape
+  });
+  report.record(Disposition::Mapped);
+  Ok(PageSetup {
+    paper_size: (printer_values_defined && paper_size_valid)
+      .then_some(u32::from(source.paper_size)),
+    scale: (printer_values_defined && scale_valid).then_some(u32::from(source.scale)),
+    first_page_number: source_options
+      .use_first_page_number
+      .then_some(i64::from(source.page_start)),
+    fit_to_width: fit_width_valid.then_some(u32::from(source.fit_width)),
+    fit_to_height: fit_height_valid.then_some(u32::from(source.fit_height)),
+    page_order: Some(if source_options.left_to_right {
+      PageOrderValues::OverThenDown
+    } else {
+      PageOrderValues::DownThenOver
+    }),
+    orientation,
+    use_printer_defaults: bool_value(source_options.no_printer_settings),
+    black_and_white: bool_value(source_options.black_and_white),
+    draft: bool_value(source_options.draft),
+    cell_comments: Some(cell_comments),
+    use_first_page_number: bool_value(source_options.use_first_page_number),
+    errors: Some(errors),
+    horizontal_dpi: printer_values_defined.then_some(u32::from(source.horizontal_resolution)),
+    vertical_dpi: printer_values_defined.then_some(u32::from(source.vertical_resolution)),
+    copies: printer_values_defined.then_some(u32::from(source.copies)),
+    ..Default::default()
+  })
+}
+
+fn convert_header_footer(
+  headers: &[&HeaderFooterRecord],
+  footers: &[&HeaderFooterRecord],
+  extended: &[&olecfsdk::xls::ExtendedHeaderFooterRecord],
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<Box<HeaderFooter>>> {
+  if headers.len() != 1 || footers.len() != 1 || extended.len() > 1 {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetHeaderFooterNotMapped,
+      location,
+    )?;
+  }
+  let odd_header = headers.first().and_then(|value| header_footer_text(value));
+  let odd_footer = footers.first().and_then(|value| header_footer_text(value));
+  if headers
+    .first()
+    .is_some_and(|value| matches!(value, HeaderFooterRecord::Text { .. }) && odd_header.is_none())
+    || footers
+      .first()
+      .is_some_and(|value| matches!(value, HeaderFooterRecord::Text { .. }) && odd_footer.is_none())
+  {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetHeaderFooterNotMapped,
+      location,
+    )?;
+  }
+
+  let mut target = HeaderFooter {
+    odd_header: odd_header.map(|value| OddHeader(xstring(value))),
+    odd_footer: odd_footer.map(|value| OddFooter(xstring(value))),
+    ..Default::default()
+  };
+  if let Some(source) = extended.first() {
+    let different_odd_even = source
+      .flags
+      .contains(ExtendedHeaderFooterFlags::DIFFERENT_ODD_EVEN);
+    let different_first = source
+      .flags
+      .contains(ExtendedHeaderFooterFlags::DIFFERENT_FIRST);
+    let even_header = source.even_header.as_ref().and_then(biff_string_text);
+    let even_footer = source.even_footer.as_ref().and_then(biff_string_text);
+    let first_header = source.first_header.as_ref().and_then(biff_string_text);
+    let first_footer = source.first_footer.as_ref().and_then(biff_string_text);
+    let invalid_text = [
+      (source.even_header.as_ref(), even_header.as_ref()),
+      (source.even_footer.as_ref(), even_footer.as_ref()),
+      (source.first_header.as_ref(), first_header.as_ref()),
+      (source.first_footer.as_ref(), first_footer.as_ref()),
+    ]
+    .into_iter()
+    .any(|(source, target)| source.is_some() && target.is_none());
+    let invalid_flags = (!different_odd_even
+      && (source.even_header.is_some() || source.even_footer.is_some()))
+      || (!different_first && (source.first_header.is_some() || source.first_footer.is_some()));
+    let invalid_counts = [
+      source.even_header_character_count,
+      source.even_footer_character_count,
+      source.first_header_character_count,
+      source.first_footer_character_count,
+    ]
+    .into_iter()
+    .any(|count| count > 255);
+    if invalid_text || invalid_flags || invalid_counts {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetHeaderFooterNotMapped,
+        location,
+      )?;
+    }
+    target.different_odd_even = bool_value(different_odd_even);
+    target.different_first = bool_value(different_first);
+    target.scale_with_doc = bool_value(
+      source
+        .flags
+        .contains(ExtendedHeaderFooterFlags::SCALE_WITH_DOCUMENT),
+    );
+    target.align_with_margins = bool_value(
+      source
+        .flags
+        .contains(ExtendedHeaderFooterFlags::ALIGN_MARGINS),
+    );
+    if different_odd_even {
+      target.even_header = even_header.map(|value| EvenHeader(xstring(value)));
+      target.even_footer = even_footer.map(|value| EvenFooter(xstring(value)));
+    }
+    if different_first {
+      target.first_header = first_header.map(|value| FirstHeader(xstring(value)));
+      target.first_footer = first_footer.map(|value| FirstFooter(xstring(value)));
+    }
+  }
+  let present = target.odd_header.is_some()
+    || target.odd_footer.is_some()
+    || target.even_header.is_some()
+    || target.even_footer.is_some()
+    || target.first_header.is_some()
+    || target.first_footer.is_some()
+    || !extended.is_empty();
+  report.record(Disposition::Mapped);
+  Ok(present.then(|| Box::new(target)))
+}
+
+fn header_footer_text(value: &HeaderFooterRecord) -> Option<String> {
+  match value {
+    HeaderFooterRecord::EmptyPayload | HeaderFooterRecord::EmptyCountOnly => None,
+    HeaderFooterRecord::Text { characters, .. } => formula_string(characters),
+  }
+}
+
+fn biff_string_text(value: &BiffUnicodeString) -> Option<String> {
+  formula_string(&value.characters)
+}
+
+fn convert_row_breaks(
+  source: &[&olecfsdk::xls::HorizontalPageBreaksRecord],
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<RowBreaks>> {
+  let Some(source) = source.first().copied().filter(|_| source.len() == 1) else {
+    if source.len() > 1 {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetPageBreaksNotMapped,
+        location,
+      )?;
+    }
+    return Ok(None);
+  };
+  let valid = source.breaks.len() <= 1023
+    && source
+      .breaks
+      .iter()
+      .all(|value| value.first_column < value.last_column && value.last_column <= 16383)
+    && source.breaks.windows(2).all(|values| {
+      values[0].row < values[1].row
+        || (values[0].row == values[1].row && values[0].last_column < values[1].first_column)
+    });
+  if !valid {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetPageBreaksNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  }
+  if source.breaks.is_empty() {
+    return Ok(None);
+  }
+  let count = u32::try_from(source.breaks.len())
+    .map_err(|_| olecfsdk::Error::Limit("XLS row page-break count exceeds u32".into()))?;
+  report.record(Disposition::Mapped);
+  Ok(Some(RowBreaks {
+    count: Some(count),
+    manual_break_count: Some(count),
+    r#break: source
+      .breaks
+      .iter()
+      .map(|value| Break {
+        id: Some(u32::from(value.row)),
+        min: Some(u32::from(value.first_column)),
+        max: Some(u32::from(value.last_column)),
+        manual_page_break: bool_value(true),
+        ..Default::default()
+      })
+      .collect(),
+  }))
+}
+
+fn convert_column_breaks(
+  source: &[&olecfsdk::xls::VerticalPageBreaksRecord],
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<ColumnBreaks>> {
+  let Some(source) = source.first().copied().filter(|_| source.len() == 1) else {
+    if source.len() > 1 {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetPageBreaksNotMapped,
+        location,
+      )?;
+    }
+    return Ok(None);
+  };
+  let valid = source.breaks.len() <= 255
+    && source
+      .breaks
+      .iter()
+      .all(|value| value.column <= 255 && value.first_row < value.last_row)
+    && source.breaks.windows(2).all(|values| {
+      values[0].column < values[1].column
+        || (values[0].column == values[1].column && values[0].last_row < values[1].first_row)
+    });
+  if !valid {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetPageBreaksNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  }
+  if source.breaks.is_empty() {
+    return Ok(None);
+  }
+  let count = u32::try_from(source.breaks.len())
+    .map_err(|_| olecfsdk::Error::Limit("XLS column page-break count exceeds u32".into()))?;
+  report.record(Disposition::Mapped);
+  Ok(Some(ColumnBreaks {
+    count: Some(count),
+    manual_break_count: Some(count),
+    r#break: source
+      .breaks
+      .iter()
+      .map(|value| Break {
+        id: Some(u32::from(value.column)),
+        min: Some(u32::from(value.first_row)),
+        max: Some(u32::from(value.last_row)),
+        manual_page_break: bool_value(true),
+        ..Default::default()
+      })
+      .collect(),
+  }))
+}
+
+fn valid_saved_zoom(value: u16) -> bool {
+  value == 0 || (10..=400).contains(&value)
+}
+
+fn nonzero_valid_zoom(value: u16) -> Option<u32> {
+  (value != 0 && valid_saved_zoom(value)).then_some(u32::from(value))
+}
+
+fn convert_current_zoom(
+  source: &SclRecord,
+  location: SourceLocation,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<u32>> {
+  let numerator = u32::from(source.numerator);
+  let denominator = u32::from(source.denominator);
+  let scaled = numerator.saturating_mul(100);
+  let valid = denominator != 0
+    && numerator.saturating_mul(10) >= denominator
+    && numerator <= denominator.saturating_mul(4)
+    && scaled % denominator == 0;
+  if !valid {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetViewNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  }
+  Ok(Some(scaled / denominator))
+}
+
+fn convert_pane(
+  group: &XlsWindowGroup<'_>,
+  sheet_index: usize,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Option<Pane>> {
+  let location = SourceLocation::XlsSheet {
+    workbook_index: 0,
+    sheet_index,
+  };
+  let Some(source) = group
+    .pane
+    .first()
+    .copied()
+    .filter(|_| group.pane.len() == 1)
+  else {
+    if !group.pane.is_empty()
+      || group.window.flags.contains(Window2Flags::FREEZE_PANES)
+      || group.window.flags.contains(Window2Flags::FREEZE_NO_SPLIT)
+    {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetPaneNotMapped,
+        location,
+      )?;
+    }
+    return Ok(None);
+  };
+  let frozen = group.window.flags.contains(Window2Flags::FREEZE_PANES);
+  let active_pane = pane_value(source.active_pane);
+  let valid = active_pane.is_some()
+    && source.left_column <= 255
+    && if frozen {
+      source.horizontal_split <= 255
+    } else {
+      source.horizontal_split <= 32767 && source.vertical_split <= 32767
+    };
+  if !valid {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetPaneNotMapped,
+      location,
+    )?;
+    return Ok(None);
+  }
+  let state = if frozen {
+    if group.window.flags.contains(Window2Flags::FREEZE_NO_SPLIT) {
+      PaneStateValues::Frozen
+    } else {
+      PaneStateValues::FrozenSplit
+    }
+  } else {
+    PaneStateValues::Split
+  };
+  report.record(Disposition::Mapped);
+  Ok(Some(Pane {
+    horizontal_split: Some(f64::from(source.horizontal_split)),
+    vertical_split: Some(f64::from(source.vertical_split)),
+    top_left_cell: Some(cell_reference(source.top_row, source.left_column)),
+    active_pane,
+    state: Some(state),
+  }))
+}
+
+fn pane_value(value: u8) -> Option<PaneValues> {
+  match value {
+    0 => Some(PaneValues::BottomRight),
+    1 => Some(PaneValues::TopRight),
+    2 => Some(PaneValues::BottomLeft),
+    3 => Some(PaneValues::TopLeft),
+    _ => None,
+  }
+}
+
+fn convert_selections(
+  source: &[&SelectionRecord],
+  sheet_index: usize,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+) -> Result<Vec<Selection>> {
+  let location = SourceLocation::XlsSheet {
+    workbook_index: 0,
+    sheet_index,
+  };
+  let mut groups: Vec<Vec<&SelectionRecord>> = Vec::new();
+  for source in source {
+    if groups
+      .last()
+      .and_then(|group| group.first())
+      .is_some_and(|previous| previous.pane == source.pane)
+    {
+      groups
+        .last_mut()
+        .expect("selection group exists")
+        .push(source);
+    } else {
+      groups.push(vec![source]);
+    }
+  }
+  let mut seen_panes = [false; 4];
+  let structurally_valid = groups.len() <= 4
+    && groups.iter().all(|group| {
+      let pane = usize::from(group[0].pane);
+      if pane >= seen_panes.len() || seen_panes[pane] {
+        false
+      } else {
+        seen_panes[pane] = true;
+        true
+      }
+    });
+  if !structurally_valid {
+    unsupported(
+      report,
+      options,
+      ConversionCode::WorksheetSelectionNotMapped,
+      location,
+    )?;
+    return Ok(Vec::new());
+  }
+  let mut result = Vec::with_capacity(groups.len());
+  for group in groups {
+    let first = group[0];
+    let mut references = Vec::new();
+    let mut valid = pane_value(first.pane).is_some()
+      && first.active_column <= 255
+      && first.active_reference_index >= 0
+      && group.iter().all(|value| {
+        value.active_row == first.active_row
+          && value.active_column == first.active_column
+          && value.active_reference_index == first.active_reference_index
+          && usize::from(value.reference_count) == value.references.len()
+      });
+    for record in &group {
+      for reference in &record.references {
+        valid &= reference.first_row <= reference.last_row
+          && reference.first_column <= reference.last_column;
+        references.push(selection_reference(
+          reference.first_row,
+          u16::from(reference.first_column),
+          reference.last_row,
+          u16::from(reference.last_column),
+        ));
+      }
+    }
+    let active_reference_index = usize::try_from(first.active_reference_index).ok();
+    valid &= active_reference_index.is_some_and(|index| {
+      group
+        .iter()
+        .flat_map(|value| &value.references)
+        .nth(index)
+        .is_some_and(|reference| {
+          (reference.first_row..=reference.last_row).contains(&first.active_row)
+            && (u16::from(reference.first_column)..=u16::from(reference.last_column))
+              .contains(&first.active_column)
+        })
+    });
+    if !valid {
+      unsupported(
+        report,
+        options,
+        ConversionCode::WorksheetSelectionNotMapped,
+        location,
+      )?;
+      continue;
+    }
+    result.push(Selection {
+      pane: pane_value(first.pane),
+      active_cell: Some(cell_reference(first.active_row, first.active_column)),
+      active_cell_id: active_reference_index.and_then(|value| u32::try_from(value).ok()),
+      sequence_of_references: Some(references),
+    });
+    report.record(Disposition::Mapped);
+  }
+  Ok(result)
+}
+
+fn selection_reference(
+  first_row: u16,
+  first_column: u16,
+  last_row: u16,
+  last_column: u16,
+) -> String {
+  if first_row == last_row && first_column == last_column {
+    cell_reference(first_row, first_column)
+  } else {
+    cell_range_reference(first_row, first_column, last_row, last_column)
+  }
+}
+
+const fn bool_value(value: bool) -> Option<BooleanValue> {
+  Some(BooleanValue::from_bool(value))
+}
+
+fn convert_columns<'a>(
+  source: impl Iterator<Item = &'a ColInfoRecord>,
+  sheet_index: usize,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+  xf_unmapped: &[bool],
+) -> Result<Vec<Column>> {
+  // [MS-XLS] 2.4.53 and ECMA-376 Part 1 18.3.1.13 describe the same
+  // one-based column range, 1/256-character width, XF, visibility, phonetic,
+  // best-fit, and outline state represented here.
+  let columns = source
+    .map(|source| {
+      let location = SourceLocation::XlsColumns {
+        workbook_index: 0,
+        sheet_index,
+        first_column: source.first_column,
+        last_column: source.last_column,
+      };
+      let valid_range = source.first_column <= source.last_column && source.last_column <= 0x00ff;
+      let style = xf_unmapped.get(usize::from(source.format_index));
+      if !valid_range || style.copied().unwrap_or(true) {
+        unsupported(
+          report,
+          options,
+          ConversionCode::ColumnFormattingNotMapped,
+          location,
+        )?;
+      }
+      if !valid_range {
+        return Ok(None);
+      }
+      let flags = source.flags;
+      report.record(Disposition::Mapped);
+      Ok(Some(Column {
+        min: u32::from(source.first_column) + 1,
+        max: u32::from(source.last_column) + 1,
+        width: Some(f64::from(source.width) / 256.0),
+        style: style.is_some().then_some(u32::from(source.format_index)),
+        hidden: bool_attribute(flags & 0x0001 != 0),
+        custom_width: bool_attribute(flags & 0x0002 != 0),
+        best_fit: bool_attribute(flags & 0x0004 != 0),
+        phonetic: bool_attribute(flags & 0x0008 != 0),
+        outline_level: nonzero_u8((flags >> 8) & 0x0007),
+        collapsed: bool_attribute(flags & 0x1000 != 0),
+      }))
+    })
+    .collect::<Result<Vec<_>>>()?;
+  Ok(columns.into_iter().flatten().collect())
+}
+
+fn convert_row(
+  row: u16,
+  source: Option<&RowRecord>,
+  cell: Vec<Cell>,
+  sheet_index: usize,
+  options: ConversionOptions,
+  report: &mut ConversionReport,
+  xf_unmapped: &[bool],
+) -> Result<Row> {
+  let Some(source) = source else {
+    return Ok(Row {
+      row_index: Some(u32::from(row) + 1),
+      cell,
+      ..Default::default()
+    });
+  };
+  let flags = source.flags;
+  // [MS-XLS] 2.4.221 stores height in twips and packs outline/visibility,
+  // manual-height, row-XF, border and phonetic flags. ECMA-376 Part 1
+  // 18.3.1.73 has direct attributes for every one of those values.
+  let has_style = flags & 0x0000_0080 != 0;
+  let style_index = u16::try_from((flags >> 16) & 0x0fff).expect("twelve bits fit u16");
+  let valid_height = (2..=8192).contains(&source.height);
+  let style = has_style.then(|| xf_unmapped.get(usize::from(style_index)));
+  let style_unmapped = style.is_some_and(|style| style.copied().unwrap_or(true));
+  if !valid_height || style_unmapped {
+    unsupported(
+      report,
+      options,
+      ConversionCode::RowFormattingNotMapped,
+      SourceLocation::XlsRow {
+        workbook_index: 0,
+        sheet_index,
+        row,
+      },
+    )?;
+  }
+  report.record(Disposition::Mapped);
+  Ok(Row {
+    row_index: Some(u32::from(row) + 1),
+    style_index: style.flatten().map(|_| u32::from(style_index)),
+    custom_format: bool_attribute(style.flatten().is_some()),
+    height: valid_height.then_some(f64::from(source.height) / 20.0),
+    hidden: bool_attribute(flags & 0x0000_0020 != 0),
+    custom_height: bool_attribute(flags & 0x0000_0040 != 0),
+    outline_level: nonzero_u8(u16::try_from(flags & 0x0000_0007).expect("three bits fit u16")),
+    collapsed: bool_attribute(flags & 0x0000_0010 != 0),
+    thick_top: bool_attribute(flags & 0x1000_0000 != 0),
+    thick_bot: bool_attribute(flags & 0x2000_0000 != 0),
+    show_phonetic: bool_attribute(flags & 0x4000_0000 != 0),
+    cell,
+    ..Default::default()
+  })
+}
+
+const fn bool_attribute(value: bool) -> Option<BooleanValue> {
+  if value {
+    Some(BooleanValue::True)
+  } else {
+    None
+  }
+}
+
+fn nonzero_u8(value: u16) -> Option<u8> {
+  (value != 0).then(|| u8::try_from(value).expect("three bits fit u8"))
 }
 
 fn convert_shared_strings(
@@ -2168,36 +6083,43 @@ const fn formula_function_name(index: u16) -> Option<&'static str> {
   })
 }
 
-fn convert_cell(
-  view: &XlsWorkbookView<'_>,
-  index: &olecfsdk::xls::XlsSparseCellIndex<'_>,
-  source: olecfsdk::xls::XlsCellRef<'_>,
+struct XlsCellConversionContext<'a, 'source> {
+  view: &'a XlsWorkbookView<'source>,
+  index: &'a olecfsdk::xls::XlsSparseCellIndex<'source>,
   sheet_index: usize,
   options: ConversionOptions,
+  xf_unmapped: &'a [bool],
+  phonetic_visible_ranges: &'a [CellRange],
+}
+
+fn convert_cell(
+  context: &XlsCellConversionContext<'_, '_>,
+  source: olecfsdk::xls::XlsCellRef<'_>,
   report: &mut ConversionReport,
-  xf_unmapped: &[bool],
 ) -> Result<Cell> {
   let header = source.cell();
   let source_location = SourceLocation::XlsCell {
     workbook_index: 0,
-    sheet_index,
+    sheet_index: context.sheet_index,
     row: header.row,
     column: header.column,
   };
-  if xf_unmapped
+  if context
+    .xf_unmapped
     .get(usize::from(header.format_index))
     .copied()
     .unwrap_or(true)
   {
     unsupported(
       report,
-      options,
+      context.options,
       ConversionCode::CellFormattingNotMapped,
       source_location,
     )?;
   }
   let cell_formula = if matches!(source.value(), XlsCellValueRef::Formula(_)) {
-    index
+    context
+      .index
       .resolve_cell_formula(source)?
       .and_then(|formula| render_cell_formula(formula, header.row, header.column))
   } else {
@@ -2210,7 +6132,7 @@ fn convert_cell(
   {
     unsupported(
       report,
-      options,
+      context.options,
       ConversionCode::FormulaNotMapped,
       source_location,
     )?;
@@ -2222,14 +6144,19 @@ fn convert_cell(
       Some(label.shared_string_index.to_string()),
     )
   } else {
-    let value = view.resolve_cell_value(index, source)?;
-    convert_cell_value(value, source_location, options, report)?
+    let value = context.view.resolve_cell_value(context.index, source)?;
+    convert_cell_value(value, source_location, context.options, report)?
   };
   report.record(Disposition::Mapped);
   Ok(Cell {
     cell_reference: Some(cell_reference(header.row, header.column)),
     style_index: Some(u32::from(header.format_index)),
     data_type,
+    show_phonetic: bool_attribute(phonetic_is_visible(
+      context.phonetic_visible_ranges,
+      header.row,
+      header.column,
+    )),
     cell_formula,
     cell_value: value.map(|value| CellValue(xstring(value))),
     ..Default::default()
@@ -2334,6 +6261,39 @@ fn cell_range_reference(
   value
 }
 
+fn cell_reference_u32(row: u32, column: u32) -> Option<String> {
+  if row > 1_048_575 || column > 16_383 {
+    return None;
+  }
+  let mut column = column + 1;
+  let mut reversed = [0_u8; 3];
+  let mut len = 0;
+  while column != 0 {
+    column -= 1;
+    reversed[len] = b'A' + (column % 26) as u8;
+    len += 1;
+    column /= 26;
+  }
+  let mut value = String::with_capacity(len + 7);
+  value.extend(reversed[..len].iter().rev().map(|value| char::from(*value)));
+  value.push_str(&(row + 1).to_string());
+  Some(value)
+}
+
+fn cell_range_reference_u32(
+  first_row: u32,
+  first_column: u32,
+  last_row: u32,
+  last_column: u32,
+) -> Option<String> {
+  if first_row > last_row || first_column > last_column {
+    return None;
+  }
+  let first = cell_reference_u32(first_row, first_column)?;
+  let last = cell_reference_u32(last_row, last_column)?;
+  Some(format!("{first}:{last}"))
+}
+
 fn xstring(value: String) -> XstringType {
   let preserve = value.starts_with(char::is_whitespace)
     || value.ends_with(char::is_whitespace)
@@ -2372,5 +6332,334 @@ fn unsupported(
       report.issue(Disposition::Unsupported, code, source);
       Ok(())
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use olecfsdk::xls::{
+    AutoFilter12Continuation, AutoFilter12Criterion, AutoFilter12Flags, CellRange, FrtFlags,
+    FrtHeader, FrtRefHeaderU, PrintSetupOptions, SheetExtColorIndex, SheetExtOptional,
+    SheetExtOptionalFlags, VerticalPageBreak, VerticalPageBreaksRecord,
+  };
+
+  const TEST_LOCATION: SourceLocation = SourceLocation::XlsSheet {
+    workbook_index: 0,
+    sheet_index: 0,
+  };
+  const REPORTING: ConversionOptions = ConversionOptions {
+    unsupported: LossPolicy::Report,
+  };
+
+  #[test]
+  fn worksheet_phonetic_visibility_and_guts_levels_follow_ms_xls() {
+    let ranges = [
+      CellRange {
+        first_row: 2,
+        last_row: 4,
+        first_column: 3,
+        last_column: 7,
+      },
+      CellRange {
+        first_row: 10,
+        last_row: 10,
+        first_column: 1,
+        last_column: 1,
+      },
+    ];
+    assert!(phonetic_is_visible(&ranges, 2, 3));
+    assert!(phonetic_is_visible(&ranges, 4, 7));
+    assert!(phonetic_is_visible(&ranges, 10, 1));
+    assert!(!phonetic_is_visible(&ranges, 1, 3));
+    assert!(!phonetic_is_visible(&ranges, 4, 8));
+
+    assert_eq!(guts_outline_level(0), None);
+    assert_eq!(guts_outline_level(2), Some(1));
+    assert_eq!(guts_outline_level(8), Some(7));
+    assert!(!guts_outline_level_is_valid(1));
+    assert!(!guts_outline_level_is_valid(9));
+  }
+
+  #[test]
+  fn worksheet_record_audit_only_accepts_explicitly_accounted_records() {
+    assert!(worksheet_record_is_accounted_for(&BiffRecordData::Eof));
+    assert!(worksheet_record_is_accounted_for(
+      &BiffRecordData::PhoneticInfo(olecfsdk::xls::PhoneticInfoRecord {
+        font_index: 0,
+        flags: olecfsdk::xls::PhoneticFlags::empty(),
+        range_count: 0,
+        ranges: Vec::new(),
+      })
+    ));
+    assert!(!worksheet_record_is_accounted_for(
+      &BiffRecordData::Unknown {
+        record_type: 0x7ffe,
+        payload: vec![1, 2, 3],
+      }
+    ));
+  }
+
+  #[test]
+  fn worksheet_property_direction_and_tab_colors_follow_ms_xls_semantics() {
+    assert!(summary_columns_on_right(false, false));
+    assert!(!summary_columns_on_right(true, false));
+    assert!(!summary_columns_on_right(false, true));
+    assert!(summary_columns_on_right(true, true));
+
+    let mut source = SheetExtRecord {
+      header: FrtHeader {
+        record_type: 0x0862,
+        flags: FrtFlags::empty(),
+        reserved: 0,
+      },
+      declared_size: 40,
+      tab_color: SheetExtColorIndex {
+        color_index: 8,
+        reserved: 0,
+      },
+      optional: Some(SheetExtOptional {
+        flags: SheetExtOptionalFlags {
+          color_index: 8,
+          calculate_conditional_formats: true,
+          not_published: false,
+          reserved: 0,
+        },
+        color: CfColor {
+          color_type: 2,
+          color_value: 0x8040_2010,
+          tint_bits: 0.25_f64.to_bits(),
+        },
+      }),
+    };
+    let rgb = convert_sheet_tab_color(&source).expect("matching modern tab color maps");
+    assert_eq!(rgb.rgb.as_deref(), Some("80102040"));
+    assert_eq!(rgb.tint, Some(0.25));
+    assert_eq!(rgb.indexed, None);
+
+    let optional = source.optional.as_mut().unwrap();
+    optional.flags.color_index = 9;
+    optional.color.color_type = 3;
+    optional.color.color_value = 6;
+    let indexed = convert_sheet_tab_color(&source).expect("older tab color takes precedence");
+    assert_eq!(indexed.indexed, Some(8));
+    assert_eq!(indexed.theme, None);
+
+    source.tab_color.color_index = 9;
+    let themed = convert_sheet_tab_color(&source).expect("matching theme tab color maps");
+    assert_eq!(themed.theme, Some(6));
+    assert_eq!(themed.tint, Some(0.25));
+
+    source.tab_color.color_index = 0x7f;
+    assert_eq!(convert_sheet_tab_color(&source), None);
+  }
+
+  #[test]
+  fn print_setup_maps_signed_start_and_every_named_option() {
+    let source = PrintSetupRecord {
+      paper_size: 9,
+      scale: 125,
+      page_start: -3,
+      fit_width: 2,
+      fit_height: 0,
+      options: PrintSetupOptions {
+        left_to_right: true,
+        portrait: false,
+        no_printer_settings: false,
+        black_and_white: true,
+        draft: true,
+        print_comments: true,
+        no_orientation: false,
+        use_first_page_number: true,
+        unused: false,
+        comments_at_end: false,
+        print_errors: 3,
+        reserved: 0,
+      },
+      horizontal_resolution: 600,
+      vertical_resolution: 300,
+      header_margin_bits: 0.3_f64.to_bits(),
+      footer_margin_bits: 0.4_f64.to_bits(),
+      copies: 2,
+    };
+    let mut report = ConversionReport::default();
+    let target = convert_page_setup(&source, TEST_LOCATION, REPORTING, &mut report).unwrap();
+    assert!(report.issues().is_empty());
+    assert_eq!(target.paper_size, Some(9));
+    assert_eq!(target.scale, Some(125));
+    assert_eq!(target.first_page_number, Some(-3));
+    assert_eq!(target.fit_to_width, Some(2));
+    assert_eq!(target.fit_to_height, Some(0));
+    assert_eq!(target.page_order, Some(PageOrderValues::OverThenDown));
+    assert_eq!(target.orientation, Some(OrientationValues::Landscape));
+    assert_eq!(target.cell_comments, Some(CellCommentsValues::AsDisplayed));
+    assert_eq!(target.errors, Some(PrintErrorValues::Na));
+    assert_eq!(target.horizontal_dpi, Some(600));
+    assert_eq!(target.vertical_dpi, Some(300));
+    assert_eq!(target.copies, Some(2));
+  }
+
+  #[test]
+  fn vertical_page_breaks_map_column_and_row_interval_without_offset() {
+    let source = VerticalPageBreaksRecord {
+      break_count: 2,
+      breaks: vec![
+        VerticalPageBreak {
+          column: 3,
+          first_row: 0,
+          last_row: 20,
+        },
+        VerticalPageBreak {
+          column: 7,
+          first_row: 4,
+          last_row: 40,
+        },
+      ],
+    };
+    let mut report = ConversionReport::default();
+    let target = convert_column_breaks(&[&source], TEST_LOCATION, REPORTING, &mut report)
+      .unwrap()
+      .expect("two page breaks map");
+    assert!(report.issues().is_empty());
+    assert_eq!(target.count, Some(2));
+    assert_eq!(target.manual_break_count, Some(2));
+    assert_eq!(target.r#break[0].id, Some(3));
+    assert_eq!(target.r#break[0].min, Some(0));
+    assert_eq!(target.r#break[0].max, Some(20));
+    assert_eq!(
+      target.r#break[0]
+        .manual_page_break
+        .map(BooleanValue::as_bool),
+      Some(true)
+    );
+    assert_eq!(target.r#break[1].id, Some(7));
+  }
+
+  #[test]
+  fn future_auto_filters_map_dynamic_date_and_icon_variants() {
+    let range = CellRange {
+      first_row: 1,
+      last_row: 20,
+      first_column: 2,
+      last_column: 4,
+    };
+    let continuation_header = FrtRefHeaderU {
+      record_type: 0x087f,
+      flags: FrtFlags::HAS_CELL_RANGE,
+      range,
+    };
+    let base = AutoFilter12Record {
+      header: FrtRefHeaderU {
+        record_type: 0x087e,
+        flags: FrtFlags::HAS_CELL_RANGE,
+        range,
+      },
+      entry_index: 1,
+      hide_arrow: true,
+      dynamic_filter_type: AutoFilter12DynamicFilter::Today,
+      declared_criteria_count: 2,
+      declared_date_grouping_count: 0,
+      flags: AutoFilter12Flags {
+        worksheet: true,
+        unused: 0,
+      },
+      unused: 0,
+      list_id: u32::MAX,
+      user_view_guid: [0; 16],
+      filter: AutoFilter12Filter::Criteria,
+      criteria: vec![
+        AutoFilter12Continuation {
+          header: continuation_header,
+          value: AutoFilter12Criterion {
+            operand: AutoFilterOperand {
+              comparison: 6,
+              value: AutoFilterOperandValue::Number {
+                bits: 10.0_f64.to_bits(),
+              },
+              string: None,
+            },
+            string_unused: None,
+          },
+        },
+        AutoFilter12Continuation {
+          header: continuation_header,
+          value: AutoFilter12Criterion {
+            operand: AutoFilterOperand {
+              comparison: 1,
+              value: AutoFilterOperandValue::Number {
+                bits: 20.0_f64.to_bits(),
+              },
+              string: None,
+            },
+            string_unused: None,
+          },
+        },
+      ],
+      date_groupings: Vec::new(),
+    };
+    let mut report = ConversionReport::default();
+    let dynamic = convert_future_filter_column(&base, TEST_LOCATION, REPORTING, &mut report)
+      .expect("dynamic AutoFilter12 maps");
+    assert!(report.issues().is_empty());
+    assert_eq!(dynamic.column_id, 1);
+    assert_eq!(dynamic.hidden_button.map(BooleanValue::as_bool), Some(true));
+    assert!(matches!(
+      dynamic.filter_column_choice,
+      Some(x::FilterColumnChoice::DynamicFilter(x::DynamicFilter {
+        r#type: x::DynamicFilterValues::Today,
+        val: Some(10.0),
+        max_val: Some(20.0),
+        ..
+      }))
+    ));
+
+    let mut date = base.clone();
+    date.dynamic_filter_type = AutoFilter12DynamicFilter::None;
+    date.declared_criteria_count = 0;
+    date.criteria.clear();
+    date.declared_date_grouping_count = 1;
+    date.date_groupings.push(AutoFilter12Continuation {
+      header: continuation_header,
+      value: AutoFilter12DateGrouping {
+        year: 2026,
+        month: 7,
+        day: 1,
+        hour: 0,
+        minute: 0,
+        second: 0,
+        unused: 0,
+        reserved: 0,
+        level: AutoFilter12DateGroupingLevel::Month,
+      },
+    });
+    let date = convert_future_filter_column(&date, TEST_LOCATION, REPORTING, &mut report)
+      .expect("date AutoFilter12 maps");
+    let Some(x::FilterColumnChoice::Filters(filters)) = date.filter_column_choice else {
+      panic!("date grouping maps to filters/dateGroupItem")
+    };
+    let x::FiltersChoice::DateGroupItem(group) = &filters.filters_choice[0] else {
+      panic!("date grouping remains typed")
+    };
+    assert_eq!(group.year, 2026);
+    assert_eq!(group.month, Some(7));
+    assert_eq!(group.day, None);
+
+    let mut icon = base;
+    icon.dynamic_filter_type = AutoFilter12DynamicFilter::None;
+    icon.declared_criteria_count = 0;
+    icon.criteria.clear();
+    icon.filter = AutoFilter12Filter::Icon {
+      icon_set: KpiSet::ThreeFlags,
+      icon_index: 2,
+    };
+    let icon = convert_future_filter_column(&icon, TEST_LOCATION, REPORTING, &mut report)
+      .expect("icon AutoFilter12 maps");
+    assert!(matches!(
+      icon.filter_column_choice,
+      Some(x::FilterColumnChoice::XIconFilter(x::IconFilter {
+        icon_set: x::IconSetValues::ThreeFlags,
+        icon_id: Some(2),
+      }))
+    ));
   }
 }
