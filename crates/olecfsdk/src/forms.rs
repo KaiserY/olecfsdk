@@ -1360,8 +1360,8 @@ impl OleColorType {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RgbColorOrPaletteEntry {
-  pub green_and_blue_or_palette_index: u16,
-  pub red: u8,
+  pub red_and_green_or_palette_index: u16,
+  pub blue: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1374,8 +1374,8 @@ impl OleColor {
   pub fn from_raw(value: u32) -> Result<Self> {
     let result = Self {
       entry: RgbColorOrPaletteEntry {
-        green_and_blue_or_palette_index: value as u16,
-        red: (value >> 16) as u8,
+        red_and_green_or_palette_index: value as u16,
+        blue: (value >> 16) as u8,
       },
       color_type: OleColorType::from_raw((value >> 24) as u8),
     };
@@ -1384,20 +1384,42 @@ impl OleColor {
   }
 
   pub fn raw(self) -> u32 {
-    u32::from(self.entry.green_and_blue_or_palette_index)
-      | (u32::from(self.entry.red) << 16)
+    u32::from(self.entry.red_and_green_or_palette_index)
+      | (u32::from(self.entry.blue) << 16)
       | (u32::from(self.color_type.raw()) << 24)
+  }
+
+  pub fn rgb_components(self) -> Option<(u8, u8, u8)> {
+    matches!(
+      self.color_type,
+      OleColorType::Default | OleColorType::RgbColor
+    )
+    .then(|| {
+      (
+        self.entry.red_and_green_or_palette_index as u8,
+        (self.entry.red_and_green_or_palette_index >> 8) as u8,
+        self.entry.blue,
+      )
+    })
+  }
+
+  pub fn palette_index(self) -> Option<u16> {
+    matches!(
+      self.color_type,
+      OleColorType::PaletteEntry | OleColorType::SystemPalette
+    )
+    .then_some(self.entry.red_and_green_or_palette_index)
   }
 
   fn validate(self) -> Result<()> {
     if matches!(
       self.color_type,
       OleColorType::PaletteEntry | OleColorType::SystemPalette
-    ) && self.entry.red != 0
+    ) && self.entry.blue != 0
     {
       return Err(Error::invalid(
         0,
-        "OLE_COLOR palette entry has a nonzero Red field",
+        "OLE_COLOR palette entry has a nonzero Blue field",
       ));
     }
     Ok(())
@@ -1460,6 +1482,25 @@ pub enum FmStringLengthMode {
 }
 
 impl FmString {
+  /// Decodes this persisted `fmString` according to its property descriptor.
+  ///
+  /// MS-OFORMS compressed strings store the low byte of each Unicode scalar;
+  /// uncompressed strings store little-endian UTF-16 code units.
+  pub fn decode(&self, descriptor: CountOfBytesWithCompressionFlag) -> Result<String> {
+    self.validate(descriptor)?;
+    if descriptor.compressed {
+      return Ok(self.bytes.iter().map(|&value| char::from(value)).collect());
+    }
+
+    let code_units = self
+      .bytes
+      .chunks_exact(2)
+      .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+      .collect::<Vec<_>>();
+    String::from_utf16(&code_units)
+      .map_err(|_| Error::invalid(0, "uncompressed MS-OFORMS string is not valid UTF-16"))
+  }
+
   fn validate(&self, descriptor: CountOfBytesWithCompressionFlag) -> Result<()> {
     let actual = u32::try_from(self.bytes.len())
       .map_err(|_| Error::Limit("MS-OFORMS string exceeds u32".into()))?;
@@ -8197,16 +8238,53 @@ mod tests {
   fn common_property_types_are_static_and_byte_exact() {
     let system = OleColor::from_raw(0x8000_0006).unwrap();
     assert_eq!(system.color_type, OleColorType::SystemPalette);
-    assert_eq!(system.entry.green_and_blue_or_palette_index, 6);
-    assert_eq!(system.entry.red, 0);
+    assert_eq!(system.entry.red_and_green_or_palette_index, 6);
+    assert_eq!(system.entry.blue, 0);
+    assert_eq!(system.palette_index(), Some(6));
+    assert_eq!(system.rgb_components(), None);
     assert_eq!(system.raw(), 0x8000_0006);
 
     let rgb = OleColor::from_raw(0x0211_2233).unwrap();
     assert_eq!(rgb.color_type, OleColorType::RgbColor);
-    assert_eq!(rgb.entry.green_and_blue_or_palette_index, 0x2233);
-    assert_eq!(rgb.entry.red, 0x11);
+    assert_eq!(rgb.entry.red_and_green_or_palette_index, 0x2233);
+    assert_eq!(rgb.entry.blue, 0x11);
+    assert_eq!(rgb.rgb_components(), Some((0x33, 0x22, 0x11)));
+    assert_eq!(rgb.palette_index(), None);
     assert_eq!(rgb.raw(), 0x0211_2233);
     assert!(OleColor::from_raw(0x0101_0006).is_err());
+
+    let compressed = FmString {
+      bytes: vec![b'A', 0xe9],
+      padding_after: vec![0, 0],
+      length_mode: FmStringLengthMode::Declared,
+    };
+    assert_eq!(
+      compressed
+        .decode(CountOfBytesWithCompressionFlag {
+          byte_count: 2,
+          compressed: true,
+        })
+        .unwrap(),
+      "Aé"
+    );
+
+    let uncompressed = FmString {
+      bytes: "A水"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>(),
+      padding_after: vec![],
+      length_mode: FmStringLengthMode::Declared,
+    };
+    assert_eq!(
+      uncompressed
+        .decode(CountOfBytesWithCompressionFlag {
+          byte_count: 4,
+          compressed: false,
+        })
+        .unwrap(),
+      "A水"
+    );
 
     let flags = various(0x2c80_081b);
     assert!(flags.contains(VariousPropertiesBitfield::ENABLED));
