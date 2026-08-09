@@ -48,6 +48,7 @@ pub mod forms;
 pub mod io;
 pub mod limits;
 pub mod office_art;
+pub mod ograph;
 pub mod parse;
 pub mod ppt;
 pub mod property_set;

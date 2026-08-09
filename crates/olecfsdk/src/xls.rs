@@ -26960,6 +26960,28 @@ impl PivotCacheStream {
 }
 
 impl BiffRecordData {
+  /// Decodes one record using the BIFF8 layouts shared by MS-XLS and
+  /// MS-OGRAPH. Graph-only records and records whose Graph layout differs
+  /// are intercepted by the MS-OGRAPH owner before this function is called.
+  pub(crate) fn decode_ograph_common(
+    record_type: u16,
+    payload: &[u8],
+    offset: usize,
+  ) -> Result<Self> {
+    decode_record(record_type, payload, false, true, offset)
+  }
+
+  /// Encodes the complete physical BIFF sequence for a record shared with
+  /// MS-OGRAPH, including any required Continue records.
+  pub(crate) fn encode_ograph_common(&self) -> Result<Vec<(u16, Vec<u8>)>> {
+    self.encode_physical().map(|records| {
+      records
+        .into_iter()
+        .map(|record| (record.record_type, record.payload))
+        .collect()
+    })
+  }
+
   fn validate_mdx_string_references(&self, available: i32, position: u64) -> Result<()> {
     let validate = |value: MdxStringIndex| {
       if value.index >= available {
@@ -28949,7 +28971,10 @@ fn continue_payload<'a>(
   }
 }
 
-fn stitch_continued_records(records: &mut Vec<BiffRecord>, limits: Limits) -> Result<()> {
+pub(crate) fn stitch_continued_records(
+  records: &mut Vec<BiffRecord>,
+  limits: Limits,
+) -> Result<()> {
   let mut index = 0usize;
   while index < records.len() {
     let recipient_count = match &records[index].data {

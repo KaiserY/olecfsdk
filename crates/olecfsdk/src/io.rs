@@ -9,6 +9,7 @@ pub enum BinaryFormat {
   Cfb,
   PropertySet,
   Vba,
+  Ograph,
   Xls,
   Ppt,
   Doc,
